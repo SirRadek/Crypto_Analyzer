@@ -1,0 +1,8 @@
+python-dotenv
+pandas
+numpy
+scikit-learn
+matplotlib
+ta
+# PyTorch:
+torch
