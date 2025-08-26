@@ -1,6 +1,7 @@
 import time
+import pandas as pd
 from db.db_connector import get_price_data
-from analysis.feature_engineering import create_features
+from analysis.feature_engineering import create_features, FEATURE_COLUMNS
 from ml.train import train_model, load_model
 from ml.predict import predict_ml
 from prediction.predictor import combine_predictions
@@ -9,7 +10,7 @@ from utils.progress import step, timed, p
 
 SYMBOL = "BTCUSDT"
 DB_PATH = "db/data/crypto_data.sqlite"
-FEATURE_COLS = ['return_1d', 'sma_7', 'sma_14', 'ema_7', 'ema_14', 'rsi_14']
+FEATURE_COLS = FEATURE_COLUMNS
 
 def prepare_target(df, forward_steps=1):
     df = df.copy()
@@ -23,7 +24,8 @@ def main(train=True):
 
     step(1, 7, "Loading data from DB")
     with timed("Load"):
-        df = get_price_data(SYMBOL, db_path=DB_PATH)
+        start_ts = int((pd.Timestamp.utcnow() - pd.Timedelta(days=5 * 365)).timestamp() * 1000)
+        df = get_price_data(SYMBOL, start_ts=start_ts, db_path=DB_PATH)
         p(f"  -> rows={len(df)}, cols={len(df.columns)}")
 
     step(2, 7, "Feature engineering")
