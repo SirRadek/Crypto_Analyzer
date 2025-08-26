@@ -10,7 +10,7 @@ TABLE_NAME = 'prices'                 # general table (you can use 'btc_ohlcv_5m
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 START_DATE = "2025-08-24"
-END_DATE = "2025-08-25"
+END_DATE = "2025-08-26"
 
 # Convert date string to milliseconds
 def date_to_milliseconds(date_str):
