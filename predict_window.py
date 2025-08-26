@@ -2,7 +2,7 @@ from datetime import datetime
 import pandas as pd
 
 from db.db_connector import get_price_data
-from analysis.feature_engineering import create_features
+from analysis.feature_engineering import create_features, FEATURE_COLUMNS
 from ml.train_regressor import train_regressor, load_regressor
 from ml.predict_regressor import predict_prices
 from db.predictions_store import create_predictions_table, save_predictions
@@ -12,7 +12,7 @@ SYMBOL   = "BTCUSDT"
 INTERVAL = "5m"
 DB_PATH  = "db/data/crypto_data.sqlite"
 
-FEATURE_COLS = ['return_1d','sma_7','sma_14','ema_7','ema_14','rsi_14']
+FEATURE_COLS = FEATURE_COLUMNS
 
 START = "2024-06-01 00:00:00"
 END   = "2024-06-30 23:55:00"

@@ -4,7 +4,7 @@ import pandas as pd
 from typing import Tuple
 
 from db.db_connector import get_price_data
-from analysis.feature_engineering import create_features
+from analysis.feature_engineering import create_features, FEATURE_COLUMNS
 from ml.train_regressor import train_regressor
 
 DB_PATH = "db/data/crypto_data.sqlite"
@@ -12,7 +12,7 @@ SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 
 # must match your training features
-FEATURE_COLS = ['return_1d','sma_7','sma_14','ema_7','ema_14','rsi_14']
+FEATURE_COLS = FEATURE_COLUMNS
 FORWARD_STEPS = 1  # predict close[t+1 bar]
 
 def _prepare_reg_target(df: pd.DataFrame, forward_steps: int) -> pd.DataFrame:
