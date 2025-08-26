@@ -20,7 +20,9 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
         horizon_steps INTEGER NOT NULL,
         prediction_time_ms INTEGER NOT NULL,  -- t (time)
         target_time_ms INTEGER NOT NULL,      -- t+H (time close)
-        y_pred REAL NOT NULL,                 -- predict price 
+        prediction_time_cet TEXT,             -- Prague time (human readable)
+        target_time_cet TEXT,                 -- Prague time for target
+        y_pred REAL NOT NULL,                 -- predict price
         y_true REAL,                          -- fill up at backfill
         abs_error REAL,                       -- |y_pred - y_true|
         model_name TEXT,
@@ -28,20 +30,40 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
         created_at TEXT NOT NULL
     );
     """)
-    # užitečné indexy
+    # Ensure new columns exist if table was created previously without them
+    cols = {r[1] for r in c.execute(f"PRAGMA table_info({table_name})")}
+    for col in ("prediction_time_cet", "target_time_cet"):
+        if col not in cols:
+            c.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} TEXT")
+    # useful indexes
     c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name}(symbol)")
     c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_target_time ON {table_name}(target_time_ms)")
     conn.commit()
     conn.close()
 
+
 def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
+    if not rows:
+        return
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.executemany(f"""
-      INSERT INTO {table_name} (
-        symbol, interval, horizon_steps, prediction_time_ms, target_time_ms,
-        y_pred, y_true, abs_error, model_name, features_version, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, rows)
+    row_len = len(rows[0])
+    if row_len == 11:
+        c.executemany(f"""
+          INSERT INTO {table_name} (
+            symbol, interval, horizon_steps, prediction_time_ms, target_time_ms,
+            y_pred, y_true, abs_error, model_name, features_version, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+    elif row_len == 13:
+        c.executemany(f"""
+          INSERT INTO {table_name} (
+            symbol, interval, horizon_steps, prediction_time_ms, target_time_ms,
+            prediction_time_cet, target_time_cet,
+            y_pred, y_true, abs_error, model_name, features_version, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+    else:
+        raise ValueError(f"Unexpected row length for save_predictions: {row_len}")
     conn.commit()
     conn.close()
