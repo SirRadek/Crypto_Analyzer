@@ -37,9 +37,10 @@ DB_PATH  = "db/data/crypto_data.sqlite"
 
 FEATURE_COLS = FEATURE_COLUMNS
 FORWARD_STEPS    = 1                         # predict close[t+1 bar]
-START_DAY_STR    = "2025-08-24"             # first prediction day (inclusive)
+START_DAY_STR    = ("2021-03-20"
+                    ";")             # first prediction day (inclusive)
 END_DAY_STR      = None                     # None => go to last DB day (+ forward if enabled)
-TRAIN_WINDOW_Y   = 5                         # sliding window length in years
+TRAIN_WINDOW_Y   = 1                         # sliding window length in years
 TABLE_PRED       = "predictions"
 
 # Local timezone for readability
