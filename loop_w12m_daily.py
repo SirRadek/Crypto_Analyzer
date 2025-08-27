@@ -1,7 +1,7 @@
 # loop_wf12m_daily.py
 # Walk-forward with a SLIDING window and forward prediction beyond last DB day.
 # For each historical prediction day D (<= last DB day):
-#   - Train on [D-W months, D)
+#   - Train on [D-5 years, D)
 #   - Predict day D (00:00..23:59)
 #   - Save predictions -> backfill -> cleanup old preds
 # After the last DB day:
@@ -12,9 +12,10 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from collections import deque
+from zoneinfo import ZoneInfo
 
 from db.db_connector import get_price_data
-from analysis.feature_engineering import create_features
+from analysis.feature_engineering import create_features, FEATURE_COLUMNS
 from ml.train_regressor import train_regressor, load_regressor
 from db.predictions_store import create_predictions_table, save_predictions
 from analysis.compare_predictions import backfill_actuals_and_errors
@@ -34,11 +35,16 @@ SYMBOL   = "BTCUSDT"
 INTERVAL = "5m"
 DB_PATH  = "db/data/crypto_data.sqlite"
 
-FEATURE_COLS = ['return_1d','sma_7','sma_14','ema_7','ema_14','rsi_14']
+FEATURE_COLS = FEATURE_COLUMNS
 FORWARD_STEPS    = 1                         # predict close[t+1 bar]
-START_DAY_STR    = "2025-08-24"             # first prediction day (inclusive)
+START_DAY_STR    = ("2021-03-20"
+                    ";")             # first prediction day (inclusive)
 END_DAY_STR      = None                     # None => go to last DB day (+ forward if enabled)
-TRAIN_WINDOW_M   = 12                        # sliding window length in months
+TRAIN_WINDOW_Y   = 1                         # sliding window length in years
+TABLE_PRED       = "predictions"
+
+# Local timezone for readability
+PRAGUE_TZ = ZoneInfo("Europe/Prague")
 
 # Forward prediction beyond last DB day
 PREDICT_FUTURE_DAYS = 1                      # <<< change as you like (e.g. 1, 3, 7, 30)
@@ -47,20 +53,20 @@ FORWARD_MODE_ENABLED = True                  # set False to disable forward mode
 DAY_PREDICT_START_TIME = "00:00:00"
 DAY_PREDICT_END_TIME   = "23:59:59"
 
-FEATURES_VERSION_HIST  = "wfD1"              # tag: wfD1_YYYY-MM-DD for historical days
-FEATURES_VERSION_FWD   = "wfD1_future"       # tag: wfD1_future_YYYY-MM-DD for forward days
+FEATURES_VERSION_HIST  = "wf5yD1"            # tag: wf5yD1_YYYY-MM-DD for historical days
+FEATURES_VERSION_FWD   = "wf5yD1_future"     # tag: wf5yD1_future_YYYY-MM-DD for forward days
 
 INTERVAL_TO_MIN = {
     "1m":1,"3m":3,"5m":5,"15m":15,"30m":30,"1h":60,"2h":120,"4h":240,"1d":1440
 }
 
 # --- helpers (DB/index/cleanup) ---
-def _ensure_indexes():
+def _ensure_indexes(table_name: str):
     conn = sqlite3.connect(DB_PATH); cur = conn.cursor()
     cur.execute("CREATE INDEX IF NOT EXISTS idx_prices_open_time ON prices(open_time)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_prediction_pred_time ON prediction(prediction_time_ms)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_prediction_target_time ON prediction(target_time_ms)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_prediction_symbol ON prediction(symbol)")
+    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pred_time ON {table_name}(prediction_time_ms)")
+    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_target_time ON {table_name}(target_time_ms)")
+    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name}(symbol)")
     conn.commit(); conn.close()
 
 def _prepare_reg_target(df: pd.DataFrame, forward_steps: int) -> pd.DataFrame:
@@ -76,11 +82,65 @@ def _day_bounds(day: pd.Timestamp):
 def _created_at_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def _cleanup_predictions(db_path: str, symbol: str, keep_from_ms: int) -> int:
+def _weights_from_errors_for_range(train_df: pd.DataFrame,
+                                   db_path: str,
+                                   symbol: str,
+                                   table_name: str,
+                                   alpha: float = 1.0,
+                                   max_w: float = 5.0) -> pd.Series:
+    """
+    Build sample weights for rows in train_df using backfilled abs_error from
+    the predictions table.
+
+    weight = 1 + alpha * (abs_error / median_abs_error)
+    clipped to [0.5, max_w].
+    """
+    if train_df.empty:
+        return pd.Series(1.0, index=train_df.index)
+
+    t0 = int(train_df["timestamp"].min().value // 1_000_000)
+    t1 = int(train_df["timestamp"].max().value // 1_000_000)
+
+    conn = sqlite3.connect(db_path)
+    q = f"""
+      SELECT prediction_time_ms, abs_error
+      FROM {table_name}
+      WHERE symbol = ? AND y_true IS NOT NULL
+        AND prediction_time_ms BETWEEN ? AND ?
+    """
+    dfp = pd.read_sql(q, conn, params=(symbol, t0, t1))
+    conn.close()
+
+    if dfp.empty:
+        return pd.Series(1.0, index=train_df.index)
+
+    dfp = dfp.dropna(subset=["abs_error"])
+    if dfp.empty:
+        return pd.Series(1.0, index=train_df.index)
+
+    agg = dfp.groupby("prediction_time_ms", as_index=False)["abs_error"].max()
+    mAE = np.median(agg["abs_error"].values)
+    eps = max(mAE, 1e-8)
+    agg["weight"] = 1.0 + alpha * (agg["abs_error"] / eps)
+    agg["weight"] = agg["weight"].clip(lower=0.5, upper=max_w)
+
+    agg["prediction_time"] = pd.to_datetime(agg["prediction_time_ms"], unit="ms")
+
+    joined = train_df[["timestamp"]].merge(
+        agg[["prediction_time", "weight"]],
+        left_on="timestamp",
+        right_on="prediction_time",
+        how="left",
+    )
+    w = joined["weight"].fillna(1.0)
+    w.index = train_df.index
+    return w
+
+def _cleanup_predictions(db_path: str, symbol: str, keep_from_ms: int, table_name: str) -> int:
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute(
-        "DELETE FROM prediction WHERE symbol = ? AND prediction_time_ms < ?",
+        f"DELETE FROM {table_name} WHERE symbol = ? AND prediction_time_ms < ?",
         (symbol, int(keep_from_ms))
     )
     deleted = cur.rowcount if cur.rowcount is not None else 0
@@ -227,10 +287,14 @@ def _predict_forward_day(model, state, day_start, day_end):
         feats_df = pd.DataFrame([feats_vals], columns=FEATURE_COLS).astype(float)
         new_close = float(model.predict(feats_df)[0])
 
+        pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
+        target_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
         rows.append((
             SYMBOL, INTERVAL, FORWARD_STEPS,
             int(pd.Timestamp(pred_time).value // 1_000_000),
             int(pd.Timestamp(target_time).value // 1_000_000),
+            pred_local.strftime("%Y-%m-%d %H:%M:%S"),
+            target_local.strftime("%Y-%m-%d %H:%M:%S"),
             new_close,
             None, None,
             "RandomForestRegressor", f"{FEATURES_VERSION_FWD}_{day_start.date()}",
@@ -270,9 +334,9 @@ def main():
     else:
         overall_end_day = hist_end_day
 
-    step(2, 10, f"Prepare table 'prediction' in {DB_PATH}")
-    create_predictions_table(DB_PATH, "prediction")
-    _ensure_indexes()
+    step(2, 10, f"Prepare table '{TABLE_PRED}' in {DB_PATH}")
+    create_predictions_table(DB_PATH, TABLE_PRED)
+    _ensure_indexes(TABLE_PRED)
 
     horizon_minutes = INTERVAL_TO_MIN[INTERVAL] * FORWARD_STEPS
     day_idx = 0
@@ -287,9 +351,9 @@ def main():
         features_version = f"{FEATURES_VERSION_HIST}_{pred_day.date()}"
         step(3, 10, f"[{day_idx}/{total_days}] Historical day {pred_day.date()}")
 
-        # Training window: [pred_day - TRAIN_WINDOW_M months, pred_day)
+        # Training window: [pred_day - TRAIN_WINDOW_Y years, pred_day)
         day_start, day_end = _day_bounds(pred_day)
-        train_start = day_start - pd.DateOffset(months=TRAIN_WINDOW_M)
+        train_start = day_start - pd.DateOffset(years=TRAIN_WINDOW_Y)
         earliest = df["timestamp"].min()
         if train_start < earliest:
             train_start = earliest
@@ -307,7 +371,10 @@ def main():
         X_train, y_train = train_df[FEATURE_COLS], train_df["target_close"]
 
         # optional: weights from past errors within window (can be left as ones)
-        weights = pd.Series(1.0, index=train_df.index)
+        weights = _weights_from_errors_for_range(train_df, DB_PATH, SYMBOL, TABLE_PRED,
+                                                 alpha=1.0, max_w=5.0)
+        p(f"  -> weighted rows (w!=1): {(weights!=1).sum()} | "
+          f"median_w={np.median(weights):.3f} max_w={weights.max():.3f}")
 
         with timed(f"Train for {pred_day.date()}"):
             latest_trained_model = train_regressor(
@@ -335,10 +402,14 @@ def main():
         created_at = _created_at_iso()
         rows = []
         for j, yp in enumerate(y_pred):
+            pred_local = pred_df.iloc[j]["timestamp"].tz_localize("UTC").tz_convert(PRAGUE_TZ)
+            target_local = target_dt.iloc[j].tz_localize("UTC").tz_convert(PRAGUE_TZ)
             rows.append((
                 SYMBOL, INTERVAL, FORWARD_STEPS,
                 int(pred_df.iloc[j]["prediction_time_ms"]),
                 int(pred_df.iloc[j]["target_time_ms"]),
+                pred_local.strftime("%Y-%m-%d %H:%M:%S"),
+                target_local.strftime("%Y-%m-%d %H:%M:%S"),
                 float(yp),
                 None, None,
                 "RandomForestRegressor", features_version,
@@ -346,20 +417,20 @@ def main():
             ))
 
         with timed(f"Save {len(rows)} rows for {features_version}"):
-            save_predictions(rows, DB_PATH, "prediction")
+            save_predictions(rows, DB_PATH, TABLE_PRED)
 
         with timed(f"Backfill {features_version}"):
             backfill_actuals_and_errors(
                 db_path=DB_PATH,
-                table_pred="prediction",
+                table_pred=TABLE_PRED,
                 symbol=SYMBOL
             )
 
         # Cleanup old predictions (older than next day's train window)
         next_day_start = day_start + pd.Timedelta(days=1)
-        next_train_start = next_day_start - pd.DateOffset(months=TRAIN_WINDOW_M)
+        next_train_start = next_day_start - pd.DateOffset(years=TRAIN_WINDOW_Y)
         keep_from_ms = int(next_train_start.value // 1_000_000)
-        deleted = _cleanup_predictions(DB_PATH, SYMBOL, keep_from_ms)
+        deleted = _cleanup_predictions(DB_PATH, SYMBOL, keep_from_ms, TABLE_PRED)
         p(f"  -> cleanup: deleted {deleted} old prediction rows (< {next_train_start})")
 
         if day_idx % 30 == 0:
@@ -377,7 +448,7 @@ def main():
         if latest_trained_model is None:
             # train once on the last available sliding window ending at last_db_day
             last_day_start, _ = _day_bounds(last_db_day)
-            train_start = last_day_start - pd.DateOffset(months=TRAIN_WINDOW_M)
+            train_start = last_day_start - pd.DateOffset(years=TRAIN_WINDOW_Y)
             earliest = df["timestamp"].min()
             if train_start < earliest:
                 train_start = earliest
@@ -407,7 +478,7 @@ def main():
                 rows = _predict_forward_day(latest_trained_model, base_state, day_start, day_end)
             if rows:
                 with timed(f"Save {len(rows)} forward rows for {pred_day.date()}"):
-                    save_predictions(rows, DB_PATH, "prediction")
+                    save_predictions(rows, DB_PATH, TABLE_PRED)
             else:
                 p("  -> no rows generated (check intervals/history).")
             # (no backfill/cleanup in forward mode – truth not available yet)

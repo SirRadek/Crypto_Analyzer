@@ -9,8 +9,8 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 TABLE_NAME = 'prices'                 # general table (you can use 'btc_ohlcv_5m' if you want to keep it separate)
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
-START_DATE = "2025-08-24"
-END_DATE = "2025-08-26"
+START_DATE = "2020-01-01"
+END_DATE = "2025-08-27"
 
 # Convert date string to milliseconds
 def date_to_milliseconds(date_str):

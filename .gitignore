@@ -4,7 +4,6 @@ __pycache__/
 .venv/ venv/ env/
 .vscode/ .idea/ *.iml
 
-db/data/*.sqlite
 ml/*.pkl
 
 # modely (ide?ln? LFS)
