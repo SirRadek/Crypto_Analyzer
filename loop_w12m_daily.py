@@ -36,11 +36,19 @@ INTERVAL = "5m"
 DB_PATH  = "db/data/crypto_data.sqlite"
 
 FEATURE_COLS = FEATURE_COLUMNS
+FORWARD_FEATURE_COLS = [
+    "return_1d",
+    "sma_7",
+    "sma_14",
+    "ema_7",
+    "ema_14",
+    "rsi_14",
+]
 FORWARD_STEPS    = 1                         # predict close[t+1 bar]
-START_DAY_STR    = ("2021-03-20"
+START_DAY_STR    = ("2025-09-07"
                     ";")             # first prediction day (inclusive)
 END_DAY_STR      = None                     # None => go to last DB day (+ forward if enabled)
-TRAIN_WINDOW_Y   = 1                         # sliding window length in years
+TRAIN_WINDOW_Y   = 5                         # sliding window length in years
 TABLE_PRED       = "predictions"
 
 # Local timezone for readability
@@ -87,7 +95,7 @@ def _weights_from_errors_for_range(train_df: pd.DataFrame,
                                    symbol: str,
                                    table_name: str,
                                    alpha: float = 1.0,
-                                   max_w: float = 5.0) -> pd.Series:
+                                   max_w: float = 3.0) -> pd.Series:
     """
     Build sample weights for rows in train_df using backfilled abs_error from
     the predictions table.
@@ -158,7 +166,7 @@ def _init_forward_state(df: pd.DataFrame):
     """
     closes = df["close"].values
     ts     = df["timestamp"].values
-    if len(closes) < 300:
+    if len(closes) < 200:
         raise ValueError("Not enough history to initialize forward state (need >= 300 bars).")
 
     last_time = pd.to_datetime(df["timestamp"].iloc[-1])
@@ -278,13 +286,13 @@ def _predict_forward_day(model, state, day_start, day_end):
         if target_time < day_start:
             # advance state with a predicted step but don't record if target is before day_start
             feats_vals = _feat_from_state(state)  # shape (n_features,)
-            feats_df = pd.DataFrame([feats_vals], columns=FEATURE_COLS).astype(float)
+            feats_df = pd.DataFrame([feats_vals], columns=FORWARD_FEATURE_COLS).astype(float)
             new_close = float(model.predict(feats_df)[0])
             _update_state_with_pred(state, new_close)
             continue
 
         feats_vals = _feat_from_state(state)  # shape (n_features,)
-        feats_df = pd.DataFrame([feats_vals], columns=FEATURE_COLS).astype(float)
+        feats_df = pd.DataFrame([feats_vals], columns=FORWARD_FEATURE_COLS).astype(float)
         new_close = float(model.predict(feats_df)[0])
 
         pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
@@ -306,7 +314,7 @@ def _predict_forward_day(model, state, day_start, day_end):
     return rows
 
 def main():
-    step(1, 10, f"Load full series for {SYMBOL}")
+    step(1, 12, f"Load full series for {SYMBOL}")
     with timed("Load + features + target"):
         df = get_price_data(SYMBOL, db_path=DB_PATH)
         if df.empty:
@@ -318,7 +326,8 @@ def main():
 
     # Day range
     first_day = df["timestamp"].min().floor("D")
-    last_db_day  = df["timestamp"].max().floor("D")
+    last_ts = df["timestamp"].max()
+    last_db_day  = last_ts.floor("D")
     pred_day  = pd.to_datetime(START_DAY_STR).floor("D")
     if pred_day < first_day:
         p(f"Adjusting start from {pred_day.date()} to first data day {first_day.date()}.")
@@ -334,7 +343,7 @@ def main():
     else:
         overall_end_day = hist_end_day
 
-    step(2, 10, f"Prepare table '{TABLE_PRED}' in {DB_PATH}")
+    step(2, 12, f"Prepare table '{TABLE_PRED}' in {DB_PATH}")
     create_predictions_table(DB_PATH, TABLE_PRED)
     _ensure_indexes(TABLE_PRED)
 
@@ -349,7 +358,7 @@ def main():
     while pred_day <= hist_end_day:
         day_idx += 1
         features_version = f"{FEATURES_VERSION_HIST}_{pred_day.date()}"
-        step(3, 10, f"[{day_idx}/{total_days}] Historical day {pred_day.date()}")
+        step(3, 12, f"[{day_idx}/{total_days}] Historical day {pred_day.date()}")
 
         # Training window: [pred_day - TRAIN_WINDOW_Y years, pred_day)
         day_start, day_end = _day_bounds(pred_day)
@@ -443,39 +452,39 @@ def main():
 
     # ------ FORWARD LOOP (> last_db_day) ------
     if FORWARD_MODE_ENABLED and pred_day <= overall_end_day:
-        step(9, 10, f"Forward mode: predicting beyond last DB day ({last_db_day.date()})")
-        # Ensure we have a model (train on the last historical window if needed)
-        if latest_trained_model is None:
-            # train once on the last available sliding window ending at last_db_day
-            last_day_start, _ = _day_bounds(last_db_day)
-            train_start = last_day_start - pd.DateOffset(years=TRAIN_WINDOW_Y)
-            earliest = df["timestamp"].min()
-            if train_start < earliest:
-                train_start = earliest
-            base_train_df = df[(df["timestamp"] >= train_start) & (df["timestamp"] < last_day_start)]
-            X_train, y_train = base_train_df[FEATURE_COLS], base_train_df["target_close"]
-            latest_trained_model = train_regressor(
-                X_train, y_train,
-                model_path="ml/model_reg.pkl",
-                sample_weight=None,
-                params=dict(
-                    n_estimators=600,
-                    random_state=42,
-                    n_jobs=-1,
-                    min_samples_leaf=2,
-                    verbose=0
-                ),
-                compress=3
-            )
+        step(9, 12, f"Forward mode: predicting beyond last DB day ({last_db_day.date()})")
+        # Train model on reduced feature set for forward prediction
+        last_day_start, _ = _day_bounds(last_db_day)
+        train_start = last_day_start - pd.DateOffset(years=TRAIN_WINDOW_Y)
+        earliest = df["timestamp"].min()
+        if train_start < earliest:
+            train_start = earliest
+        base_train_df = df[(df["timestamp"] >= train_start) & (df["timestamp"] < last_day_start)]
+        X_train = base_train_df[FORWARD_FEATURE_COLS]
+        y_train = base_train_df["target_close"]
+        forward_model = train_regressor(
+            X_train,
+            y_train,
+            model_path="ml/model_reg.pkl",
+            sample_weight=None,
+            params=dict(
+                n_estimators=600,
+                random_state=42,
+                n_jobs=-1,
+                min_samples_leaf=2,
+                verbose=0,
+            ),
+            compress=3,
+        )
 
         # Initialize forward state from the tail of df
         base_state = _init_forward_state(df)
 
         while pred_day <= overall_end_day:
             day_start, day_end = _day_bounds(pred_day)
-            step(10, 10, f"Forward day {pred_day.date()} (no backfill yet)")
+            step(10, 12, f"Forward day {pred_day.date()} (no backfill yet)")
             with timed(f"Forward predict {pred_day.date()}"):
-                rows = _predict_forward_day(latest_trained_model, base_state, day_start, day_end)
+                rows = _predict_forward_day(forward_model, base_state, day_start, day_end)
             if rows:
                 with timed(f"Save {len(rows)} forward rows for {pred_day.date()}"):
                     save_predictions(rows, DB_PATH, TABLE_PRED)
@@ -483,6 +492,39 @@ def main():
                 p("  -> no rows generated (check intervals/history).")
             # (no backfill/cleanup in forward mode – truth not available yet)
             pred_day += pd.Timedelta(days=1)
+
+    # Retrain once more on all available data up to the latest timestamp
+    step(11, 12, "Retrain model on latest data")
+    train_start = last_ts - pd.DateOffset(years=TRAIN_WINDOW_Y)
+    earliest = df["timestamp"].min()
+    if train_start < earliest:
+        train_start = earliest
+    latest_df = df[(df["timestamp"] >= train_start) & (df["timestamp"] <= last_ts)]
+    X_latest, y_latest = latest_df[FEATURE_COLS], latest_df["target_close"]
+    weights = _weights_from_errors_for_range(latest_df, DB_PATH, SYMBOL, TABLE_PRED,
+                                             alpha=1.0, max_w=5.0)
+    with timed("Train latest model"):
+        train_regressor(
+            X_latest, y_latest,
+            model_path="ml/model_reg.pkl",
+            sample_weight=weights.values,
+            params=dict(
+                n_estimators=600,
+                random_state=42,
+                n_jobs=-1,
+                min_samples_leaf=2,
+                verbose=0
+            ),
+            compress=3,
+        )
+
+    # After updating the model, run the 12-hour forward prediction script
+    step(12, 12, "Run loop_forward_12h")
+    try:
+        from loop_forward_12h import main as forward12h_main
+        forward12h_main()
+    except Exception as exc:
+        p(f"loop_forward_12h failed: {exc}")
 
     p("Done. Historical days backfilled; future days queued with y_true=NULL.")
     p("When new prices are imported, run:  python backfill_compare.py  to fill y_true/abs_error.")
