@@ -211,62 +211,63 @@ def main():
     except Exception as exc:
         p(f"btc_import failed: {exc}")
 
+    step(2, 5, f"Load full series for {SYMBOL}")
+    df = pd.DataFrame();
+    last_ts = None
+    with timed("Load + features + target"):
+        df = get_price_data(SYMBOL, db_path=DB_PATH)
+        if df.empty:
+            p("No data loaded.")
+            return
+        df = create_features(df)
+        df = _prepare_reg_target(df, FORWARD_STEPS)
+        df = df[df["target_close"].notna()].copy()
+        p(f"Rows after features+target: {len(df)}")
+        last_ts = df["timestamp"].max()
 
+    step(3, 5, "Backfill and cleanup predictions")
+    create_predictions_table(DB_PATH, TABLE_PRED)
+    _ensure_indexes(TABLE_PRED)
+    backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
+    deleted = _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
+    p(f"  -> cleanup: deleted {deleted} future prediction rows (>= {last_ts})")
 
-def main():
-    df = get_price_data(SYMBOL, db_path=DB_PATH)
-    if df.empty:
-        p("No data loaded.");
-        return
-    df = create_features(df)
-    df = _prepare_reg_target(df, FORWARD_STEPS)
-    df = df[df["target_close"].notna()].copy()
-    p(f"Rows after features+target: {len(df)}")
+    step(4, 5, "Train model on latest data")
+    train_start = last_ts - pd.DateOffset(years=TRAIN_WINDOW_Y)
+    earliest = df["timestamp"].min()
+    if train_start < earliest:
+        train_start = earliest
+    latest_df = df[(df["timestamp"] >= train_start) & (df["timestamp"] <= last_ts)]
+    X_latest, y_latest = latest_df[FEATURE_COLS], latest_df["target_close"]
+    weights = _weights_from_errors_for_range(latest_df, DB_PATH, SYMBOL, TABLE_PRED, alpha=1.0, max_w=5.0)
+    with timed("Train latest model"):
+        train_regressor(
+            X_latest, y_latest,
+            model_path="ml/model_reg.pkl",
+            sample_weight=weights.values,
+            params=dict(
+                n_estimators=600,
+                random_state=42,
+                n_jobs=-1,
+                min_samples_leaf=2,
+                verbose=0,
+            ),
+            compress=3,
+        )
 
+    model_paths = sorted(glob("ml/model_reg*.pkl"))
+    step(5, 5, "Predict next 3h")
+    state = _init_forward_state(df)
+    steps = int(180 / INTERVAL_TO_MIN[INTERVAL])
+    rows = _predict_forward_steps(model_paths, state, steps)
+    if rows:
+        save_predictions(rows, DB_PATH, TABLE_PRED)
+        p(f"Saved {len(rows)} forward rows.")
+    else:
+        p("No rows generated.")
 
-step(3, 5, "Backfill and cleanup predictions")
-create_predictions_table(DB_PATH, TABLE_PRED)
-_ensure_indexes(TABLE_PRED)
-backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
-last_ts = df["timestamp"].max()
-deleted = _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
-p(f"  -> cleanup: deleted {deleted} future prediction rows (>= {last_ts})")
+    p("Done. Latest prices imported and 3h forecast generated.")
 
-step(4, 5, "Train model on latest data")
-train_start = last_ts - pd.DateOffset(years=TRAIN_WINDOW_Y)
-earliest = df["timestamp"].min()
-if train_start < earliest:
-    train_start = earliest
-latest_df = df[(df["timestamp"] >= train_start) & (df["timestamp"] <= last_ts)]
-X_latest, y_latest = latest_df[FEATURE_COLS], latest_df["target_close"]
-weights = _weights_from_errors_for_range(latest_df, DB_PATH, SYMBOL, TABLE_PRED, alpha=1.0, max_w=5.0)
-with timed("Train latest model"):
-    train_regressor(
-        X_latest, y_latest,
-        model_path="ml/model_reg.pkl",
-        sample_weight=weights.values,
-        params=dict(
-            n_estimators=600,
-            random_state=42,
-            n_jobs=-1,
-            min_samples_leaf=2,
-            verbose=0,
-        ),
-        compress=3,
-    )
-
-model_paths = sorted(glob("ml/model_reg*.pkl"))
-step(5, 5, "Predict next 3h")
-state = _init_forward_state(df)
-steps = int(180 / INTERVAL_TO_MIN[INTERVAL])
-rows = _predict_forward_steps(model_paths, state, steps)
-if rows:
-    save_predictions(rows, DB_PATH, TABLE_PRED)
-    p(f"Saved {len(rows)} forward rows.")
-else:
-    p("No rows generated.")
-
-p("Done. Latest prices imported and 3h forecast generated.")
 
 if __name__ == "__main__":
     main()
