@@ -9,6 +9,7 @@ A modular Python project for **cryptocurrency price analysis and prediction** us
 - Feature engineering for ML models.
 - Supports both rule-based and machine learning (RandomForest) predictions.
 - Aggregates multiple ML models using usage-based weighting.
+- Forecast loop ensembles all regression models via usage-based weights.
 - Combines signals for final trading decision.
 - Fully modular and easy to expand.
 

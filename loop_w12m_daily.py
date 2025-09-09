@@ -1,15 +1,18 @@
-from datetime import datetime, timezone, timedelta
 import sqlite3
-import pandas as pd
-import numpy as np
 from collections import deque
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
-from db.db_connector import get_price_data
-from analysis.feature_engineering import create_features
-from ml.train_regressor import train_regressor
-from db.predictions_store import create_predictions_table, save_predictions
+import numpy as np
+import pandas as pd
+from glob import glob
+
 from analysis.compare_predictions import backfill_actuals_and_errors
+from analysis.feature_engineering import create_features
+from db.db_connector import get_price_data
+from db.predictions_store import create_predictions_table, save_predictions
+from ml.train_regressor import train_regressor
+from ml.predict_regressor import predict_weighted_prices
 
 try:
     from utils.progress import step, timed, p
@@ -26,14 +29,10 @@ DB_PATH = "db/data/crypto_data.sqlite"
 TABLE_PRED = "predictions"
 TRAIN_WINDOW_Y = 5
 FORWARD_STEPS = 1
-FEATURE_COLS = FORWARD_FEATURE_COLS = [
-    "return_1d",
-    "sma_7",
-    "sma_14",
-    "ema_7",
-    "ema_14",
-    "rsi_14",
-]
+# Forward prediction horizon in hours
+PREDICT_HOURS = 2
+# Features available when rolling forward without full re-computation
+FEATURE_COLS = ["return_1d", "sma_7", "sma_14", "ema_7", "ema_14", "rsi_14"]
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 INTERVAL_TO_MIN = {"1m":1,"3m":3,"5m":5,"15m":15,"30m":30,"1h":60,"2h":120,"4h":240,"1d":1440}
 FEATURES_VERSION_FWD = "wf5yD1_future"
@@ -162,28 +161,33 @@ def _update_state_with_pred(state, new_close):
     if len(state["d288"]) == 288:
         state["d288"].popleft()
     state["d288"].append(new_close)
-    alpha7 = 2.0/(7.0+1.0)
-    alpha14 = 2.0/(14.0+1.0)
-    state["ema7"] = state["ema7"] + alpha7*(new_close - state["ema7"])
-    state["ema14"] = state["ema14"] + alpha14*(new_close - state["ema14"])
+    alpha7 = 2.0 / (7.0 + 1.0)
+    alpha14 = 2.0 / (14.0 + 1.0)
+    state["ema7"] = state["ema7"] + alpha7 * (new_close - state["ema7"])
+    state["ema14"] = state["ema14"] + alpha14 * (new_close - state["ema14"])
     delta = new_close - prev_close
-    gain = max(delta,0.0); loss = max(-delta,0.0)
+    gain = max(delta, 0.0);
+    loss = max(-delta, 0.0)
     period = 14
-    state["rsi_avg_gain"] = (state["rsi_avg_gain"]*(period-1)+gain)/period
-    state["rsi_avg_loss"] = (state["rsi_avg_loss"]*(period-1)+loss)/period
+    state["rsi_avg_gain"] = (state["rsi_avg_gain"] * (period - 1) + gain) / period
+    state["rsi_avg_loss"] = (state["rsi_avg_loss"] * (period - 1) + loss) / period
     state["close"] = new_close
     state["time"] = state["time"] + timedelta(minutes=INTERVAL_TO_MIN["5m"])
 
 
-def _predict_forward_steps(model, state, steps):
+def _predict_forward_steps(model_paths, state, steps, usage_path="ml/model_usage.json"):
     rows = []
     step_minutes = INTERVAL_TO_MIN[INTERVAL]
     for _ in range(steps):
         pred_time = state["time"]
         target_time = pred_time + timedelta(minutes=step_minutes)
         feats_vals = _feat_from_state(state)
-        feats_df = pd.DataFrame([feats_vals], columns=FORWARD_FEATURE_COLS).astype(float)
-        new_close = float(model.predict(feats_df)[0])
+        feats_df = pd.DataFrame([feats_vals], columns=FEATURE_COLS).astype(float)
+        new_close = float(
+            predict_weighted_prices(
+                feats_df, FEATURE_COLS, model_paths, usage_path=usage_path
+            )[0]
+        )
         pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
         target_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
         rows.append((
@@ -202,32 +206,35 @@ def _predict_forward_steps(model, state, steps):
 
 
 def main():
-    step(1,5,"Import latest data")
+    step(1, 5, "Import latest data")
     try:
         from db.btc_import import import_latest_data
         import_latest_data()
     except Exception as exc:
         p(f"btc_import failed: {exc}")
 
-    step(2,5,f"Load full series for {SYMBOL}")
+    step(2, 5, f"Load full series for {SYMBOL}")
+    df = pd.DataFrame();
+    last_ts = None
     with timed("Load + features + target"):
         df = get_price_data(SYMBOL, db_path=DB_PATH)
         if df.empty:
-            p("No data loaded."); return
+            p("No data loaded.")
+            return
         df = create_features(df)
         df = _prepare_reg_target(df, FORWARD_STEPS)
         df = df[df["target_close"].notna()].copy()
         p(f"Rows after features+target: {len(df)}")
+        last_ts = df["timestamp"].max()
 
-    step(3,5,"Backfill and cleanup predictions")
+    step(3, 5, "Backfill and cleanup predictions")
     create_predictions_table(DB_PATH, TABLE_PRED)
     _ensure_indexes(TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
-    last_ts = df["timestamp"].max()
     deleted = _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
     p(f"  -> cleanup: deleted {deleted} future prediction rows (>= {last_ts})")
 
-    step(4,5,"Train model on latest data")
+    step(4, 5, "Train model on latest data")
     train_start = last_ts - pd.DateOffset(years=TRAIN_WINDOW_Y)
     earliest = df["timestamp"].min()
     if train_start < earliest:
@@ -236,7 +243,7 @@ def main():
     X_latest, y_latest = latest_df[FEATURE_COLS], latest_df["target_close"]
     weights = _weights_from_errors_for_range(latest_df, DB_PATH, SYMBOL, TABLE_PRED, alpha=1.0, max_w=5.0)
     with timed("Train latest model"):
-        model = train_regressor(
+        train_regressor(
             X_latest, y_latest,
             model_path="ml/model_reg.pkl",
             sample_weight=weights.values,
@@ -250,17 +257,18 @@ def main():
             compress=3,
         )
 
-    step(5,5,"Predict next 3h")
+    model_paths = sorted(glob("ml/model_reg*.pkl"))
+    step(5, 5, f"Predict next {PREDICT_HOURS}h")
     state = _init_forward_state(df)
-    steps = int(180 / INTERVAL_TO_MIN[INTERVAL])
-    rows = _predict_forward_steps(model, state, steps)
+    steps = int(PREDICT_HOURS * 60 / INTERVAL_TO_MIN[INTERVAL])
+    rows = _predict_forward_steps(model_paths, state, steps)
     if rows:
         save_predictions(rows, DB_PATH, TABLE_PRED)
         p(f"Saved {len(rows)} forward rows.")
     else:
         p("No rows generated.")
 
-    p("Done. Latest prices imported and 3h forecast generated.")
+    p(f"Done. Latest prices imported and {PREDICT_HOURS}h forecast generated.")
 
 
 if __name__ == "__main__":
