@@ -191,22 +191,21 @@ def _predict_forward_hours(model, state, hours):
     step_minutes = INTERVAL_TO_MIN[INTERVAL]
     steps = int(hours * 60 / step_minutes)
     for _ in range(steps):
-        pred_time = state["time"]
-        target_time = pred_time + timedelta(minutes=step_minutes)
+        next_time = state["time"] + timedelta(minutes=step_minutes)
 
         feats_vals = _feat_from_state(state)
         feats_df = pd.DataFrame([feats_vals], columns=FEATURE_COLS).astype(float)
         new_close = float(model.predict(feats_df)[0])
 
-        pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
-        target_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
+        pred_local = pd.Timestamp(next_time, tz="UTC").tz_convert(PRAGUE_TZ)
+        target_local = pred_local
         rows.append(
             (
                 SYMBOL,
                 INTERVAL,
                 FORWARD_STEPS,
-                int(pd.Timestamp(pred_time).value // 1_000_000),
-                int(pd.Timestamp(target_time).value // 1_000_000),
+                int(pd.Timestamp(next_time).value // 1_000_000),
+                int(pd.Timestamp(next_time).value // 1_000_000),
                 pred_local.strftime("%Y-%m-%d %H:%M:%S"),
                 target_local.strftime("%Y-%m-%d %H:%M:%S"),
                 new_close,
@@ -234,6 +233,8 @@ def main():
     with timed("Load + features"):
         df = get_price_data(SYMBOL, db_path=DB_PATH)
         df = create_features(df)
+        # Ensure return_1d reflects the change over one day (288 bars)
+        df["return_1d"] = df["close"].pct_change(288)
         df_train = _prepare_reg_target(df, FORWARD_STEPS)
         df_train = df_train[df_train["target_close"].notna()].copy()
 
