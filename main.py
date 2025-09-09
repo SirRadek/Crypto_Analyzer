@@ -20,9 +20,19 @@ DB_PATH = CONFIG.db_path
 FEATURE_COLS = FEATURE_COLUMNS
 TABLE_PRED = CONFIG.table_pred
 INTERVAL = CONFIG.interval
-# predict 2 hours (120 minutes) ahead -> 24 five-minute steps
+# number of future five-minute steps to predict, e.g. 24 -> next 2 hours
 FORWARD_STEPS = CONFIG.forward_steps
-INTERVAL_TO_MIN = {"1m":1,"3m":3,"5m":5,"15m":15,"30m":30,"1h":60,"2h":120,"4h":240,"1d":1440}
+INTERVAL_TO_MIN = {
+    "1m": 1,
+    "3m": 3,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "2h": 120,
+    "4h": 240,
+    "1d": 1440,
+}
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 FEATURES_VERSION = "ext_v1"
 
@@ -78,73 +88,83 @@ def main(train=True):
 
     full_df = df.copy()
 
-    step(4, 8, "Preparing targets")
-    with timed("Target"):
-        df = prepare_targets(df, forward_steps=FORWARD_STEPS)
-        p(f"  -> rows after targets & dropna={len(df)}")
-
-    X = df[FEATURE_COLS]
-    y_cls = df["target_cls"]
-    y_reg = df["target_reg"]
-    p(f"  -> X shape={X.shape}, y_cls shape={y_cls.shape}, y_reg shape={y_reg.shape}")
-
-    step(5, 8, "Backfill predictions & train/load models")
+    step(4, 8, "Backfill predictions & train/load models")
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
     _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
 
-    if train:
-        with timed("Train classifier"):
-            cls_model = train_model(X, y_cls)
-        with timed("Train regressor"):
-            reg_model = train_regressor(X, y_reg)
-    else:
-        with timed("Load classifier"):
-            cls_model = load_model()
-        with timed("Load regressor"):
-            reg_model = load_regressor()
-
-    step(6, 8, "Predicting last step")
-    with timed("Predict"):
-        last_row = full_df.iloc[[-1]]
-        X_last = last_row[FEATURE_COLS]
-        prob_up = float(cls_model.predict_proba(X_last)[:, 1][0])
-        reg_pred = float(reg_model.predict(X_last)[0])
-        last_close = float(last_row["close"].iloc[0])
-        combined_price = last_close + (reg_pred - last_close) * prob_up
-
-    step(7, 8, "Save prediction")
+    rows_to_save = []
+    last_row = full_df.iloc[[-1]]
     pred_time = last_row["timestamp"].iloc[0]
-    target_time = pred_time + pd.Timedelta(minutes=FORWARD_STEPS * INTERVAL_TO_MIN[INTERVAL])
     pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
-    targ_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
-    row = (
-        SYMBOL,
-        INTERVAL,
-        FORWARD_STEPS,
-        int(pred_time.value // 1_000_000),
-        int(target_time.value // 1_000_000),
-        pred_local.strftime("%Y-%m-%d %H:%M:%S"),
-        targ_local.strftime("%Y-%m-%d %H:%M:%S"),
-        float(combined_price),
-        float(reg_pred),
-        float(prob_up),
-        None,
-        None,
-        "RF_cls_reg",
-        FEATURES_VERSION,
-        _created_at_iso(),
-    )
-    save_predictions([row], DB_PATH, TABLE_PRED)
-    p("Saved latest prediction to DB.")
 
-    step(8, 8, "Cleanup old records")
+    for horizon in range(1, FORWARD_STEPS + 1):
+        step(5, 8, f"Train/predict horizon {horizon}")
+
+        with timed("Target"):
+            df_h = prepare_targets(full_df, forward_steps=horizon)
+            X_h = df_h[FEATURE_COLS]
+            y_cls_h = df_h["target_cls"]
+            y_reg_h = df_h["target_reg"]
+            p(
+                f"  -> horizon={horizon} X shape={X_h.shape}, y_cls shape={y_cls_h.shape}, y_reg shape={y_reg_h.shape}"
+            )
+
+        model_path_cls = f"ml/model_{horizon}.pkl"
+        model_path_reg = f"ml/model_reg_{horizon}.pkl"
+
+        if train:
+            with timed("Train classifier"):
+                cls_model = train_model(X_h, y_cls_h, model_path=model_path_cls)
+            with timed("Train regressor"):
+                reg_model = train_regressor(X_h, y_reg_h, model_path=model_path_reg)
+        else:
+            with timed("Load classifier"):
+                cls_model = load_model(model_path=model_path_cls)
+            with timed("Load regressor"):
+                reg_model = load_regressor(model_path=model_path_reg)
+
+        with timed("Predict"):
+            X_last = last_row[FEATURE_COLS]
+            prob_up = float(cls_model.predict_proba(X_last)[:, 1][0])
+            reg_pred = float(reg_model.predict(X_last)[0])
+            last_close = float(last_row["close"].iloc[0])
+            combined_price = last_close + (reg_pred - last_close) * prob_up
+
+        target_time = pred_time + pd.Timedelta(minutes=horizon * INTERVAL_TO_MIN[INTERVAL])
+        targ_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
+
+        row = (
+            SYMBOL,
+            INTERVAL,
+            horizon,
+            int(pred_time.value // 1_000_000),
+            int(target_time.value // 1_000_000),
+            pred_local.strftime("%Y-%m-%d %H:%M:%S"),
+            targ_local.strftime("%Y-%m-%d %H:%M:%S"),
+            float(combined_price),
+            float(reg_pred),
+            float(prob_up),
+            None,
+            None,
+            "RF_cls_reg",
+            FEATURES_VERSION,
+            _created_at_iso(),
+        )
+        rows_to_save.append(row)
+
+    step(6, 8, "Save predictions")
+    save_predictions(rows_to_save, DB_PATH, TABLE_PRED)
+    p(f"Saved {len(rows_to_save)} predictions to DB.")
+
+    step(7, 8, "Cleanup old records")
     prices_del, preds_del = delete_old_records(DB_PATH)
     p(f"  -> deleted {prices_del} prices rows and {preds_del} prediction rows")
 
     total = time.perf_counter() - start
     p(f"Done in {total:.2f}s")
+
 
 if __name__ == "__main__":
     main()
