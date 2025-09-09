@@ -1,5 +1,5 @@
-from ml.retrain_from_errors import retrain_with_error_weights
 import predict_window as pw  # re-use your window config
+from ml.retrain_from_errors import retrain_with_error_weights
 
 if __name__ == "__main__":
     # 1) learn from errors observed so far

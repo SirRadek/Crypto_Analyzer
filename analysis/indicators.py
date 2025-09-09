@@ -1,6 +1,3 @@
-import pandas as pd
-import numpy as np
-
 def calculate_sma(series, window=14):
     """Simple Moving Average"""
     return series.rolling(window=window).mean()

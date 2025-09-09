@@ -1,5 +1,7 @@
-import os, joblib
+import joblib
+import os
 from typing import Optional, Dict, Any, Tuple
+
 from sklearn.ensemble import RandomForestRegressor
 
 MODEL_PATH = "ml/model_reg.pkl"

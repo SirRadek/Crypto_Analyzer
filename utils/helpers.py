@@ -1,5 +1,7 @@
 import os
+
 import yaml
+
 
 def ensure_dir_exists(path):
     """

@@ -1,8 +1,9 @@
-import requests
+import os
 import sqlite3
 import time
 from datetime import datetime
-import os
+
+import requests
 
 # Database location relative to repository root
 DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'crypto_data.sqlite')

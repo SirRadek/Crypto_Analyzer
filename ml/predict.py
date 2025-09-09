@@ -1,4 +1,3 @@
-import pandas as pd
 from .train import load_model
 
 def predict_ml(df, feature_cols, model_path="ml/model.pkl"):

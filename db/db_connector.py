@@ -1,7 +1,7 @@
 import os
-import pandas as pd
 import sqlite3
 
+import pandas as pd
 
 # Resolve database path relative to this file so callers don't depend on CWD
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "crypto_data.sqlite")
