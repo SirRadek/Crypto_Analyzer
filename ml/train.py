@@ -1,8 +1,9 @@
+import os
+from typing import Optional, Dict
+
+import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV, train_test_split
-from typing import Optional, Dict
-import joblib
-import os
 
 from ml.model_utils import evaluate_model
 

@@ -1,6 +1,5 @@
 import os
 import sqlite3
-from datetime import datetime
 
 DB_PATH = "db/data/crypto_data.sqlite"   # same DB like prices
 TABLE_NAME = "prediction"                # new table for predictions

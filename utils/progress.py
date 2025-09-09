@@ -1,6 +1,8 @@
 import time
 from contextlib import contextmanager
+
 from tqdm import tqdm
+
 
 def p(msg: str):
     print(msg, flush=True)

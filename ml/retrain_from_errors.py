@@ -1,10 +1,10 @@
 import sqlite3
+
 import numpy as np
 import pandas as pd
-from typing import Tuple
 
-from db.db_connector import get_price_data
 from analysis.feature_engineering import create_features, FEATURE_COLUMNS
+from db.db_connector import get_price_data
 from ml.train_regressor import train_regressor
 
 DB_PATH = "db/data/crypto_data.sqlite"
