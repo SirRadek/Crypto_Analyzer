@@ -38,11 +38,12 @@ def _load_backfilled_errors(db_path: str, symbol: str) -> pd.DataFrame:
     dfp["prediction_time"] = pd.to_datetime(dfp["prediction_time_ms"], unit="ms")
     return dfp
 
+
 def _build_sample_weights(
-    base_df: pd.DataFrame,
-    preds_df: pd.DataFrame,
-    alpha: float = 1.0,
-    max_w: float = 5.0
+        base_df: pd.DataFrame,
+        preds_df: pd.DataFrame,
+        alpha: float = 1.0,
+        max_w: float = 5.0
 ) -> pd.Series:
     """
     Create per-row weights for training:
@@ -55,28 +56,30 @@ def _build_sample_weights(
         return w
 
     # robust scale by median AE (avoid division by 0 with eps)
-    mAE = np.median(preds_df["abs_error"].values) if len(preds_df) else 0.0
+    mAE = float(np.median(preds_df["abs_error"].to_numpy())) if len(preds_df) else 0.0
     eps = max(mAE, 1e-8)
 
     # map prediction_time -> weight
     preds_df = preds_df.copy()
-    preds_df["weight"] = 1.0 + alpha * (preds_df["abs_error"] / eps)
+    preds_df["weight"] = 1.0 + alpha * (preds_df["abs_error"].astype(float) / eps)
     preds_df["weight"] = preds_df["weight"].clip(lower=0.5, upper=max_w)
 
     # align to base_df rows by timestamp == prediction_time
     weight_map = preds_df.set_index("prediction_time")["weight"]
     # align by index (timestamp) if you set index; here we align by equality:
     aligned_idx = base_df["timestamp"].map(weight_map)  # NaN where no record
-    w.loc[aligned_idx.notna().values] = aligned_idx.dropna().values
+    mask = aligned_idx.notna().to_numpy()
+    w.loc[mask] = aligned_idx.dropna().to_numpy()
     return w
 
+
 def retrain_with_error_weights(
-    db_path: str = DB_PATH,
-    symbol: str = SYMBOL,
-    forward_steps: int = FORWARD_STEPS,
-    alpha: float = 1.0,
-    max_weight: float = 5.0,
-    cutoff_to_latest_backfilled: bool = True
+        db_path: str = DB_PATH,
+        symbol: str = SYMBOL,
+        forward_steps: int = FORWARD_STEPS,
+        alpha: float = 1.0,
+        max_weight: float = 5.0,
+        cutoff_to_latest_backfilled: bool = True
 ):
     """
     1) Load full price df, build features + regression target close[t+H].
@@ -93,7 +96,6 @@ def retrain_with_error_weights(
     df = get_price_data(symbol, db_path=db_path)
     df = create_features(df)
     df = _prepare_reg_target(df, forward_steps)
-    df = df[df["target_close"].notna()].copy()
 
     # 2) backfilled errors
     dfp = _load_backfilled_errors(db_path, symbol)

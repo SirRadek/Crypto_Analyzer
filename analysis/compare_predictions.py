@@ -16,7 +16,8 @@ def backfill_actuals_and_errors(
     )
     if preds.empty:
         conn.close()
-        print("No predictions to backfill."); return
+        print("No predictions to backfill.");
+        return
 
     actuals = pd.read_sql(
         "SELECT open_time AS ts_ms, close FROM prices WHERE symbol = ?",
