@@ -1,16 +1,15 @@
-import sqlite3
-from collections import deque
 from datetime import datetime, timezone, timedelta
+import sqlite3
+import pandas as pd
+import numpy as np
+from collections import deque
 from zoneinfo import ZoneInfo
 
-import numpy as np
-import pandas as pd
-
-from analysis.compare_predictions import backfill_actuals_and_errors
-from analysis.feature_engineering import create_features, FEATURE_COLUMNS
 from db.db_connector import get_price_data
-from db.predictions_store import create_predictions_table, save_predictions
+from analysis.feature_engineering import create_features
 from ml.train_regressor import train_regressor
+from db.predictions_store import create_predictions_table, save_predictions
+from analysis.compare_predictions import backfill_actuals_and_errors
 
 try:
     from utils.progress import step, timed, p
@@ -27,8 +26,14 @@ DB_PATH = "db/data/crypto_data.sqlite"
 TABLE_PRED = "predictions"
 TRAIN_WINDOW_Y = 5
 FORWARD_STEPS = 1
-FEATURE_COLS = FEATURE_COLUMNS
-FORWARD_FEATURE_COLS = ["return_1d","sma_7","sma_14","ema_7","ema_14","rsi_14"]
+FEATURE_COLS = FORWARD_FEATURE_COLS = [
+    "return_1d",
+    "sma_7",
+    "sma_14",
+    "ema_7",
+    "ema_14",
+    "rsi_14",
+]
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 INTERVAL_TO_MIN = {"1m":1,"3m":3,"5m":5,"15m":15,"30m":30,"1h":60,"2h":120,"4h":240,"1d":1440}
 FEATURES_VERSION_FWD = "wf5yD1_future"

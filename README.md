@@ -8,6 +8,7 @@ A modular Python project for **cryptocurrency price analysis and prediction** us
 - Calculates technical indicators (SMA, EMA, RSI, etc.).
 - Feature engineering for ML models.
 - Supports both rule-based and machine learning (RandomForest) predictions.
+- Aggregates multiple ML models using usage-based weighting.
 - Combines signals for final trading decision.
 - Fully modular and easy to expand.
 
