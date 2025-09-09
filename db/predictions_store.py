@@ -48,6 +48,7 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
     conn.close()
 
 
+
 def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
     if not rows:
         return
