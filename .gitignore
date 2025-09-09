@@ -11,3 +11,4 @@ ml/*.pkl
 *.pth
 *.ckpt
 *.onnx
+*.sqlite
