@@ -5,17 +5,21 @@ import numpy as np
 
 from .train import load_model
 
+
 def predict_ml(df, feature_cols, model_path="ml/model.pkl"):
-    """
-    Loads a model and predicts target labels for given DataFrame.
-    - df: DataFrame with features
-    - feature_cols: list of column names to use as features
-    Returns a numpy array or pandas Series with predictions (e.g., 1=up, 0=down).
-    """
+    """Predict class labels (0/1) using a trained classifier."""
     model = load_model(model_path)
     X = df[feature_cols]
     preds = model.predict(X)
     return preds
+
+
+def predict_ml_proba(df, feature_cols, model_path="ml/model.pkl"):
+    """Return probability of the positive class (price up)."""
+    model = load_model(model_path)
+    X = df[feature_cols]
+    proba = model.predict_proba(X)[:, 1]
+    return proba
 
 
 def _load_usage_counts(usage_path):
@@ -43,10 +47,7 @@ def predict_weighted(df, feature_cols, model_paths, usage_path="ml/model_usage.j
         Names of the features to use for prediction.
     model_paths : list[str]
         Paths to model files to load.
-    usage_path : str, optional
-        JSON file storing usage counts for each model. Defaults to
-        ``"ml/model_usage.json"``.
-
+@@ -50,26 +54,26 @@ def predict_weighted(df, feature_cols, model_paths, usage_path="ml/model_usage.j
     Returns
     -------
     numpy.ndarray

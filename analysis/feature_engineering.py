@@ -73,7 +73,73 @@ def create_features(df):
     df["ema_14"] = calculate_ema(df["close"], window=14)
     df["rsi_14"] = calculate_rsi(df["close"], window=14)
 
-    df = df.dropna()
+    # --- Additional market & macro features ----------------------------------
+    if "funding_now" in df.columns:
+        df["funding_delta_1h"] = df["funding_now"] - df["funding_now"].shift(12)
+    else:
+        df["funding_now"] = 0.0
+        df["funding_delta_1h"] = 0.0
+
+    if "basis_annualized" not in df.columns:
+        df["basis_annualized"] = 0.0
+
+    if "open_interest" in df.columns:
+        df["oi_delta_15m"] = df["open_interest"].diff(3)
+        df["oi_delta_1h"] = df["open_interest"].diff(12)
+    else:
+        df["oi_delta_15m"] = 0.0
+        df["oi_delta_1h"] = 0.0
+
+    if {"liq_long_usd", "liq_short_usd"}.issubset(df.columns):
+        denom = df["liq_short_usd"].replace(0, np.nan)
+        df["liq_long_short_ratio"] = df["liq_long_usd"] / denom
+    else:
+        df["liq_long_short_ratio"] = 0.0
+
+    denom = (df["volume"] - df["taker_buy_base"]).replace(0, np.nan)
+    df["taker_buy_sell_ratio"] = df["taker_buy_base"] / denom
+
+    for level in range(1, 6):
+        bid_col = f"lob_bid_L{level}"
+        ask_col = f"lob_ask_L{level}"
+        imb_col = f"lob_imbalance_L{level}"
+        if bid_col in df.columns and ask_col in df.columns:
+            df[imb_col] = (df[bid_col] - df[ask_col]) / (df[bid_col] + df[ask_col])
+        else:
+            df[imb_col] = 0.0
+
+    df["rv_5m"] = df["ret1"].rolling(1).std()
+    df["rv_30m"] = df["ret1"].rolling(6).std()
+
+    hour = df["timestamp"].dt.hour
+    df["session_dummy_EU"] = hour.between(7, 15).astype(int)
+    df["session_dummy_US"] = hour.between(13, 21).astype(int)
+    df["session_dummy_Asia"] = ((hour >= 23) | (hour <= 7)).astype(int)
+
+    if "google_trends_btc" in df.columns:
+        df["google_trends_btc_delta"] = df["google_trends_btc"].diff()
+    else:
+        df["google_trends_btc_delta"] = 0.0
+
+    if "btc_dominance" in df.columns:
+        df["btc_dominance_delta"] = df["btc_dominance"].diff()
+    else:
+        df["btc_dominance_delta"] = 0.0
+
+    for col in ["mvrv_z", "sopr", "fees_per_tx"]:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    for sym in ["eth", "sol", "bnb"]:
+        base_col = f"{sym}_ret"
+        lag_col = f"{base_col}_lagged"
+        if base_col in df.columns:
+            df[lag_col] = df[base_col].shift(1)
+        else:
+            df[lag_col] = 0.0
+
+    df = df.fillna(0)
+
     return df
 
 
@@ -112,6 +178,29 @@ FEATURE_COLUMNS = [
     "ema_7",
     "ema_14",
     "rsi_14",
+    "funding_now",
+    "funding_delta_1h",
+    "basis_annualized",
+    "oi_delta_15m",
+    "oi_delta_1h",
+    "liq_long_short_ratio",
+    "taker_buy_sell_ratio",
+    "lob_imbalance_L1",
+    "lob_imbalance_L2",
+    "lob_imbalance_L3",
+    "lob_imbalance_L4",
+    "lob_imbalance_L5",
+    "rv_5m",
+    "rv_30m",
+    "session_dummy_EU",
+    "session_dummy_US",
+    "session_dummy_Asia",
+    "google_trends_btc_delta",
+    "mvrv_z",
+    "sopr",
+    "fees_per_tx",
+    "eth_ret_lagged",
+    "sol_ret_lagged",
+    "bnb_ret_lagged",
+    "btc_dominance_delta",
 ]
-
-
