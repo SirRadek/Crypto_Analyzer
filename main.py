@@ -1,5 +1,7 @@
+import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -36,6 +38,11 @@ INTERVAL_TO_MIN = {
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 FEATURES_VERSION = "ext_v1"
 
+CLS_MODEL_COUNT = 25
+REG_MODEL_COUNT = 30
+CLS_ACC_PATH = Path("ml/backtest_acc_cls.json")
+REG_ACC_PATH = Path("ml/backtest_acc_reg.json")
+
 
 def _created_at_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -55,6 +62,29 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
         cur.execute("PRAGMA optimize;")
         conn.commit()
     return deleted
+
+
+
+def load_base_models(pattern: str, count: int, loader):
+    models = []
+    indices = []
+    for i in range(1, count + 1):
+        path = pattern.format(i=i)
+        try:
+            models.append(loader(model_path=path))
+            indices.append(i)
+        except FileNotFoundError:
+            p(f"Missing model {path}")
+    return models, indices
+
+
+def load_accuracy_weights(path: Path, indices):
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        data = {}
+    return [float(data.get(str(i), 1.0)) for i in indices]
 
 
 def prepare_targets(df, forward_steps=1):
@@ -93,42 +123,74 @@ def main(train=True):
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
     _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
+    # Load base models and their validation weights
+    cls_base_models, cls_indices = load_base_models("ml/model_{i}.pkl", CLS_MODEL_COUNT, load_model)
+    reg_base_models, reg_indices = load_base_models(
+        "ml/model_reg_{i}.pkl", REG_MODEL_COUNT, load_regressor
+    )
+    cls_weights = load_accuracy_weights(CLS_ACC_PATH, cls_indices)
+    reg_weights = load_accuracy_weights(REG_ACC_PATH, reg_indices)
+
+    # Prepare training data including predictions from base models
+    horizon_dfs = []
+    for horizon in range(1, FORWARD_STEPS + 1):
+        df_h = prepare_targets(full_df, forward_steps=horizon)
+        df_h["horizon"] = horizon
+        horizon_dfs.append(df_h)
+    train_df = pd.concat(horizon_dfs, ignore_index=True)
+
+    base_feats = train_df[FEATURE_COLS]
+    for idx, model, w in zip(cls_indices, cls_base_models, cls_weights):
+        preds = model.predict_proba(base_feats)[:, 1] * w
+        train_df[f"cls_pred_{idx}"] = preds
+    for idx, model, w in zip(reg_indices, reg_base_models, reg_weights):
+        preds = model.predict(base_feats) * w
+        train_df[f"reg_pred_{idx}"] = preds
+
+    cls_pred_cols = [f"cls_pred_{i}" for i in cls_indices]
+    reg_pred_cols = [f"reg_pred_{i}" for i in reg_indices]
+    feature_cols_meta = FEATURE_COLS + ["horizon"] + cls_pred_cols + reg_pred_cols
+    X_all = train_df[feature_cols_meta]
+    y_cls_all = train_df["target_cls"]
+    y_reg_all = train_df["target_reg"]
+
+    model_path_cls = "ml/meta_model_cls.pkl"
+    model_path_reg = "ml/meta_model_reg.pkl"
+    if train:
+        with timed("Train meta-classifier"):
+            cls_model = train_model(X_all, y_cls_all, model_path=model_path_cls)
+        with timed("Train meta-regressor"):
+            reg_model = train_regressor(X_all, y_reg_all, model_path=model_path_reg)
+    else:
+        with timed("Load meta-classifier"):
+            cls_model = load_model(model_path=model_path_cls)
+        with timed("Load meta-regressor"):
+            reg_model = load_regressor(model_path=model_path_reg)
 
     rows_to_save = []
     last_row = full_df.iloc[[-1]]
     pred_time = last_row["timestamp"].iloc[0]
     pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
+    # Base model predictions for the latest row
+    base_last = last_row[FEATURE_COLS]
+    last_base_preds = {}
+    for idx, model, w in zip(cls_indices, cls_base_models, cls_weights):
+        last_base_preds[f"cls_pred_{idx}"] = float(
+            model.predict_proba(base_last)[:, 1][0] * w
+        )
+    for idx, model, w in zip(reg_indices, reg_base_models, reg_weights):
+        last_base_preds[f"reg_pred_{idx}"] = float(model.predict(base_last)[0] * w)
+
+    step(5, 8, "Predict horizons")
     for horizon in range(1, FORWARD_STEPS + 1):
-        step(5, 8, f"Train/predict horizon {horizon}")
-
-        with timed("Target"):
-            df_h = prepare_targets(full_df, forward_steps=horizon)
-            X_h = df_h[FEATURE_COLS]
-            y_cls_h = df_h["target_cls"]
-            y_reg_h = df_h["target_reg"]
-            p(
-                f"  -> horizon={horizon} X shape={X_h.shape}, y_cls shape={y_cls_h.shape}, y_reg shape={y_reg_h.shape}"
-            )
-
-        model_path_cls = f"ml/model_{horizon}.pkl"
-        model_path_reg = f"ml/model_reg_{horizon}.pkl"
-
-        if train:
-            with timed("Train classifier"):
-                cls_model = train_model(X_h, y_cls_h, model_path=model_path_cls)
-            with timed("Train regressor"):
-                reg_model = train_regressor(X_h, y_reg_h, model_path=model_path_reg)
-        else:
-            with timed("Load classifier"):
-                cls_model = load_model(model_path=model_path_cls)
-            with timed("Load regressor"):
-                reg_model = load_regressor(model_path=model_path_reg)
-
         with timed("Predict"):
-            X_last = last_row[FEATURE_COLS]
-            prob_up = float(cls_model.predict_proba(X_last)[:, 1][0])
-            reg_pred = float(reg_model.predict(X_last)[0])
+            X_last = base_last.copy()
+            X_last["horizon"] = horizon
+            for name, val in last_base_preds.items():
+                X_last[name] = val
+            prob_up = float(cls_model.predict_proba(X_last[feature_cols_meta])[:, 1][0])
+            reg_pred = float(reg_model.predict(X_last[feature_cols_meta])[0])
             last_close = float(last_row["close"].iloc[0])
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
@@ -165,6 +227,5 @@ def main(train=True):
     total = time.perf_counter() - start
     p(f"Done in {total:.2f}s")
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
