@@ -158,6 +158,7 @@ FEATURE_COLUMNS = [
     "vwap",
     "close_minus_vwap",
     "rel_close_vwap",
+    "return_1d",
     "ret1",
     "ret3",
     "ret6",

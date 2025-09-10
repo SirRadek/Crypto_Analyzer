@@ -24,6 +24,20 @@ def load_model(path):
         raise FileNotFoundError(f"Model file not found at {path}")
     return joblib.load(path)
 
+def match_model_features(df, model):
+    """Align ``df`` columns with features expected by ``model``.
+
+    Extra columns are dropped and missing ones are filled with zeros so that
+    the returned dataframe has the same column order as used during model
+    training. If the model does not expose ``feature_names_in_`` the original
+    ``df`` is returned unchanged.
+    """
+
+    feature_names = getattr(model, "feature_names_in_", None)
+    if feature_names is None:
+        return df
+    return df.reindex(columns=feature_names, fill_value=0)
+
 def evaluate_model(model, X_test, y_test):
     """Print evaluation metrics for classification models.
 
