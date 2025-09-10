@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Any, Dict, Iterable, Tuple, Union
+
 
 import joblib
 import numpy as np
@@ -68,7 +69,8 @@ def fit_meta_classifier(
 
 def fit_meta_regressor(
     X: pd.DataFrame,
-    y: pd.Series,
+    y: Union[pd.Series, pd.DataFrame],
+
     feature_cols: Iterable[str],
     *,
     model_path: str = "ml/meta_model_reg.joblib",
@@ -79,14 +81,30 @@ def fit_meta_regressor(
     gap: int = 0,
     random_state: int = 42,
     n_estimators: int = 200,
-) -> Tuple[RandomForestRegressor, float]:
+    multi_output: bool = False,
+) -> Tuple[RandomForestRegressor, Union[float, Dict[int, float]]]:
     """Train and persist the meta regression model.
 
-    Returns the fitted model and mean MAE from ``TimeSeriesSplit``.
+    Parameters
+    ----------
+    multi_output:
+        If ``True``, ``y`` must have shape ``(n_samples, n_horizons)`` and the
+        regressor is trained to predict all horizons jointly. The returned
+        metric is a ``dict`` mapping horizon index (1-based) to MAE. If
+        ``False``, behaves like a standard single-output regressor and returns
+        the mean MAE across splits.
+
+    Returns
+    -------
+    RandomForestRegressor
+        The fitted model.
+    float or dict
+        Mean MAE or per-horizon MAE depending on ``multi_output``.
     """
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
-    maes: list[float] = []
+    maes: list[Any] = []
+
     for train_idx, test_idx in tscv.split(X):
         reg = RandomForestRegressor(
             n_estimators=n_estimators,
@@ -97,7 +115,13 @@ def fit_meta_regressor(
         )
         reg.fit(X.iloc[train_idx], y.iloc[train_idx])
         pred = reg.predict(X.iloc[test_idx])
-        maes.append(float(mean_absolute_error(y.iloc[test_idx], pred)))
+        if multi_output:
+            maes.append(
+                mean_absolute_error(y.iloc[test_idx], pred, multioutput="raw_values")
+            )
+        else:
+            maes.append(float(mean_absolute_error(y.iloc[test_idx], pred)))
+
 
     final_model = RandomForestRegressor(
         n_estimators=n_estimators,
@@ -109,7 +133,13 @@ def fit_meta_regressor(
     final_model.fit(X, y)
     joblib.dump(final_model, model_path)
     _save_metadata(feature_cols, version, feature_list_path, version_path)
-    return final_model, float(np.mean(maes))
+
+    if multi_output:
+        mae_arr = np.mean(maes, axis=0)
+        return final_model, {i + 1: float(m) for i, m in enumerate(mae_arr)}
+    else:
+        return final_model, float(np.mean(maes))
+
 
 
 def predict_meta(
@@ -119,8 +149,21 @@ def predict_meta(
     *,
     batch_size: int = 1000,
     proba: bool = False,
-) -> np.ndarray:
-    """Predict using a stored meta model with batching and memory mapping."""
+    multi_output: bool = False,
+) -> Union[np.ndarray, Dict[int, np.ndarray]]:
+    """Predict using a stored meta model with batching and memory mapping.
+
+    Parameters
+    ----------
+    multi_output:
+        If ``True``, the loaded model is expected to output multiple horizons.
+        The return value is a dictionary ``{horizon: np.ndarray}`` with
+        1-based horizon indices.
+    """
+
+    if proba and multi_output:
+        raise ValueError("`proba` and `multi_output` cannot both be True")
+
 
     model = joblib.load(model_path, mmap_mode="r")
     X = df[list(feature_cols)]
@@ -131,6 +174,11 @@ def predict_meta(
             preds.append(model.predict_proba(batch)[:, 1])
         else:
             preds.append(model.predict(batch))
+
+    if multi_output:
+        arr = np.concatenate(preds, axis=0)
+        return {i + 1: arr[:, i] for i in range(arr.shape[1])}
+
     return np.concatenate(preds)
 
 
