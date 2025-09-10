@@ -33,6 +33,7 @@ def train_model(
     test_size: float = 0.2,
     random_state: int = 42,
     use_gpu: bool = False,
+
 ):
     """Train a classification model.
 
