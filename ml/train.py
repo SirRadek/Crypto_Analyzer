@@ -17,6 +17,7 @@ def train_model(
     param_grid: Optional[Dict] = None,
     test_size: float = 0.2,
     random_state: int = 42,
+    use_xgboost: bool = False,
 ):
     """Train a classification model.
 
@@ -42,7 +43,19 @@ def train_model(
         X, y, test_size=test_size, random_state=random_state, stratify=y
     )
 
-    if tune:
+    if use_xgboost:
+        try:
+            from xgboost import XGBClassifier
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError("xgboost is required for GPU training") from exc
+
+        clf = XGBClassifier(
+            tree_method="gpu_hist",
+            predictor="gpu_predictor",
+            random_state=random_state,
+        )
+        clf.fit(X_train, y_train)
+    elif tune:
         param_grid = param_grid or {
             "n_estimators": [100, 200, 300],
             "max_depth": [None, 10, 20],
