@@ -18,6 +18,19 @@ import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
+try:
+    from numpy.core._exceptions import _ArrayMemoryError
+    _MEM_ERRORS = (MemoryError, _ArrayMemoryError)
+except Exception:  # pragma: no cover
+    _MEM_ERRORS = (MemoryError,)
+
+
+def _safe_load(path: str):
+    try:
+        return joblib.load(path)
+    except _MEM_ERRORS:
+        return joblib.load(path, mmap_mode="r")
+
 # ---------------------------------------------------------------------------
 # Paths to auxiliary data
 # ---------------------------------------------------------------------------
@@ -25,8 +38,8 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 BASE_DIR = Path(__file__).resolve().parent
 USAGE_PATH = BASE_DIR / "model_usage.json"
 PERF_PATH = BASE_DIR / "model_performance.json"
-META_CLF_PATH = BASE_DIR / "meta_classifier.joblib"
-META_REG_PATH = BASE_DIR / "meta_regressor.joblib"
+META_CLF_PATH = BASE_DIR / "meta_classifier.pkl"
+META_REG_PATH = BASE_DIR / "meta_regressor.pkl"
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +124,6 @@ def compute_weights(
     return weights / weights.sum(), zero_weight
 
 
-def load_models(model_paths: Iterable[str]) -> Dict[str, object]:
-    """Load models given a list of file paths."""
-    return {path: joblib.load(path) for path in model_paths}
-
-
 # ---------------------------------------------------------------------------
 # Base model ensembling (weighted averaging)
 # ---------------------------------------------------------------------------
@@ -135,29 +143,34 @@ def predict_weighted(
 
     usage_counts = load_usage_counts(usage_counts_path)
     performance = load_performance(performance_path)
-    models = load_models(model_paths)
-    names = list(models.keys())
+    names = list(model_paths)
     weights, zero_weight = compute_weights(usage_counts, performance, names)
     X = df[feature_cols]
-    preds = np.array([models[n].predict(X) for n in names])
+    preds = np.zeros(len(df))
+    for path, w in zip(names, weights):
+        model = _safe_load(path)
+        preds += model.predict(X) * w
+        del model
     increment_usage(names, usage_counts_path)
     if zero_weight:
         print(f"Models with zero weight (consider removing): {zero_weight}")
-    return np.average(preds, axis=0, weights=weights)
+    return preds
 
 
 # ---------------------------------------------------------------------------
 # Meta-model helpers
 # ---------------------------------------------------------------------------
 
-def _stack_features(df, feature_cols, horizon_col, models, weights):
+def _stack_features(df, feature_cols, horizon_col, model_paths, weights):
     """Construct stacked feature matrix for meta models."""
 
     X_base = df[feature_cols]
     X_meta = df[feature_cols + [horizon_col]].copy()
-    for (name, model), w in zip(models.items(), weights):
+    for path, w in zip(model_paths, weights):
+        model = _safe_load(path)
         preds = model.predict(X_base)
-        X_meta[name] = preds * w
+        X_meta[path] = preds * w
+        del model
     return X_meta
 
 
@@ -175,10 +188,9 @@ def train_meta_classifier(
 
     usage_counts = load_usage_counts(usage_counts_path)
     performance = load_performance(performance_path)
-    models = load_models(model_paths)
-    names = list(models.keys())
+    names = list(model_paths)
     weights, zero_weight = compute_weights(usage_counts, performance, names)
-    X_meta = _stack_features(df, feature_cols, horizon_col, models, weights)
+    X_meta = _stack_features(df, feature_cols, horizon_col, names, weights)
     y = df[target_col]
     meta = RandomForestClassifier(n_estimators=200, random_state=42)
     meta.fit(X_meta, y)
@@ -202,10 +214,9 @@ def train_meta_regressor(
 
     usage_counts = load_usage_counts(usage_counts_path)
     performance = load_performance(performance_path)
-    models = load_models(model_paths)
-    names = list(models.keys())
+    names = list(model_paths)
     weights, zero_weight = compute_weights(usage_counts, performance, names)
-    X_meta = _stack_features(df, feature_cols, horizon_col, models, weights)
+    X_meta = _stack_features(df, feature_cols, horizon_col, names, weights)
     y = df[target_col]
     meta = RandomForestRegressor(n_estimators=200, random_state=42)
     meta.fit(X_meta, y)
@@ -228,10 +239,9 @@ def predict_meta_classifier(
 
     usage_counts = load_usage_counts(usage_counts_path)
     performance = load_performance(performance_path)
-    models = load_models(model_paths)
-    names = list(models.keys())
+    names = list(model_paths)
     weights, zero_weight = compute_weights(usage_counts, performance, names)
-    X_meta = _stack_features(df, feature_cols, horizon_col, models, weights)
+    X_meta = _stack_features(df, feature_cols, horizon_col, names, weights)
     meta = joblib.load(meta_model_path)
     increment_usage(names, usage_counts_path)
     if zero_weight:
@@ -252,10 +262,9 @@ def predict_meta_regressor(
 
     usage_counts = load_usage_counts(usage_counts_path)
     performance = load_performance(performance_path)
-    models = load_models(model_paths)
-    names = list(models.keys())
+    names = list(model_paths)
     weights, zero_weight = compute_weights(usage_counts, performance, names)
-    X_meta = _stack_features(df, feature_cols, horizon_col, models, weights)
+    X_meta = _stack_features(df, feature_cols, horizon_col, names, weights)
     meta = joblib.load(meta_model_path)
     increment_usage(names, usage_counts_path)
     if zero_weight:
@@ -269,7 +278,6 @@ __all__ = [
     "increment_usage",
     "load_performance",
     "compute_weights",
-    "load_models",
     "predict_weighted",
     "train_meta_classifier",
     "train_meta_regressor",

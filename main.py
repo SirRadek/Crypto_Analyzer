@@ -65,17 +65,17 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
 
 
 
-def load_base_models(pattern: str, count: int, loader):
-    models = []
+def list_model_paths(pattern: str, count: int):
+    paths = []
     indices = []
     for i in range(1, count + 1):
         path = pattern.format(i=i)
-        try:
-            models.append(loader(model_path=path))
+        if Path(path).exists():
+            paths.append(path)
             indices.append(i)
-        except FileNotFoundError:
+        else:
             p(f"Missing model {path}")
-    return models, indices
+    return paths, indices
 
 
 def load_accuracy_weights(path: Path, indices):
@@ -124,10 +124,8 @@ def main(train=True):
     last_ts = full_df["timestamp"].max()
     _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
     # Load base models and their validation weights
-    cls_base_models, cls_indices = load_base_models("ml/model_{i}.joblib", CLS_MODEL_COUNT, load_model)
-    reg_base_models, reg_indices = load_base_models(
-        "ml/model_reg_{i}.joblib", REG_MODEL_COUNT, load_regressor
-    )
+    cls_paths, cls_indices = list_model_paths("ml/model_{i}.pkl", CLS_MODEL_COUNT)
+    reg_paths, reg_indices = list_model_paths("ml/model_reg_{i}.joblib", REG_MODEL_COUNT)
     cls_weights = load_accuracy_weights(CLS_ACC_PATH, cls_indices)
     reg_weights = load_accuracy_weights(REG_ACC_PATH, reg_indices)
 
@@ -140,12 +138,16 @@ def main(train=True):
     train_df = pd.concat(horizon_dfs, ignore_index=True)
 
     base_feats = train_df[FEATURE_COLS]
-    for idx, model, w in zip(cls_indices, cls_base_models, cls_weights):
+    for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
+        model = load_model(model_path=path)
         preds = model.predict_proba(base_feats)[:, 1] * w
         train_df[f"cls_pred_{idx}"] = preds
-    for idx, model, w in zip(reg_indices, reg_base_models, reg_weights):
+        del model
+    for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
+        model = load_regressor(model_path=path)
         preds = model.predict(base_feats) * w
         train_df[f"reg_pred_{idx}"] = preds
+        del model
 
     cls_pred_cols = [f"cls_pred_{i}" for i in cls_indices]
     reg_pred_cols = [f"reg_pred_{i}" for i in reg_indices]
@@ -154,7 +156,7 @@ def main(train=True):
     y_cls_all = train_df["target_cls"]
     y_reg_all = train_df["target_reg"]
 
-    model_path_cls = "ml/meta_model_cls.joblib"
+    model_path_cls = "ml/meta_model_cls.pkl"
     model_path_reg = "ml/meta_model_reg.joblib"
     if train:
         with timed("Train meta-classifier"):
@@ -175,12 +177,16 @@ def main(train=True):
     # Base model predictions for the latest row
     base_last = last_row[FEATURE_COLS]
     last_base_preds = {}
-    for idx, model, w in zip(cls_indices, cls_base_models, cls_weights):
+    for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
+        model = load_model(model_path=path)
         last_base_preds[f"cls_pred_{idx}"] = float(
             model.predict_proba(base_last)[:, 1][0] * w
         )
-    for idx, model, w in zip(reg_indices, reg_base_models, reg_weights):
+        del model
+    for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
+        model = load_regressor(model_path=path)
         last_base_preds[f"reg_pred_{idx}"] = float(model.predict(base_last)[0] * w)
+        del model
 
     step(5, 8, "Predict horizons")
     for horizon in range(1, FORWARD_STEPS + 1):
