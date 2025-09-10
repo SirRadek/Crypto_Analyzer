@@ -8,9 +8,8 @@ A modular Python project for **cryptocurrency price analysis and prediction** us
 - Calculates technical indicators (SMA, EMA, RSI, etc.).
 - Feature engineering for ML models.
 - Supports both rule-based and machine learning (RandomForest) predictions.
-- Aggregates multiple ML models using usage-based weighting.
-- Forecast loop ensembles all regression models via usage-based weights.
-- Combines signals for final trading decision.
+- Trains a single meta-level RandomForest for classification and regression.
+- Combines rule-based and meta-model signals for the final trading decision.
 - Fully modular and easy to expand.
 
 ---
@@ -88,6 +87,92 @@ By default, this trains a RandomForest model and outputs the latest signals.
 * Adjust or create new rules in `analysis/rules.py`.
 * Tune ML model or use another classifier in `ml/train.py`.
 * Combine rule and ML signals as you wish in `prediction/predictor.py`.
+
+---
+
+## Meta-only Random Forest
+
+The project now uses a single meta-level RandomForest instead of large ensembles.
+Utilities in `ml.meta` handle training, calibration, and batched inference.
+
+### GPU training
+
+```bash
+python - <<'PY'
+from ml.train import train_model
+from ml.train_regressor import train_regressor
+# X, y = ... load your training data ...
+train_model(X, y, use_gpu=True)
+train_regressor(X, y, use_gpu=True)
+PY
+```
+
+Training falls back to the CPU path when CUDA or `cuml` is unavailable.
+
+### Multi-output regression
+
+```bash
+python - <<'PY'
+from ml.meta import fit_meta_regressor, predict_meta
+# X, Y = ... features and multi-horizon targets ...
+fit_meta_regressor(X, Y, FEATURE_COLUMNS, multi_output=True)
+preds = predict_meta(X, FEATURE_COLUMNS, 'ml/meta_model_reg.joblib', multi_output=True)
+PY
+```
+
+### Quantile prediction intervals
+
+```bash
+python - <<'PY'
+from ml.meta import predict_meta
+# df = ... features for inference ...
+preds, intervals = predict_meta(
+    df,
+    FEATURE_COLUMNS,
+    'ml/meta_model_reg.joblib',
+    return_pi=True,
+    quantiles=(0.05, 0.95),
+)
+PY
+```
+
+### Benchmarks
+
+Synthetic 5k-row datasets were used to gauge baseline performance:
+
+```bash
+python - <<'PY'
+import time, resource, pandas as pd
+from sklearn.datasets import make_classification, make_regression
+from ml.meta import fit_meta_classifier, fit_meta_regressor
+
+n = 5000
+Xc, yc = make_classification(n_samples=n, n_features=20, random_state=0)
+start = time.perf_counter();
+_, f1 = fit_meta_classifier(pd.DataFrame(Xc), pd.Series(yc), range(20),
+    n_splits=3, gap=1, n_estimators=50, model_path='ml/tmp_cls.joblib',
+    feature_list_path='ml/tmp_feat.json', version_path='ml/tmp_ver.json',
+    threshold_path='ml/tmp_thr.json');
+cls_time = time.perf_counter() - start
+cls_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+Xr, yr = make_regression(n_samples=n, n_features=20, random_state=0)
+start = time.perf_counter();
+_, mae = fit_meta_regressor(pd.DataFrame(Xr), pd.Series(yr), range(20),
+    n_splits=3, gap=1, n_estimators=50, model_path='ml/tmp_reg.joblib',
+    feature_list_path='ml/tmp_feat.json', version_path='ml/tmp_ver.json');
+reg_time = time.perf_counter() - start
+reg_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - cls_mem
+
+print(f"CLASSIFIER time={cls_time:.2f}s memory={cls_mem}KB F1={f1:.3f}")
+print(f"REGRESSOR time={reg_time:.2f}s memory={reg_mem}KB MAE={mae:.3f}")
+PY
+```
+
+| model      | latency (s) | peak RAM (MB) | score    |
+|------------|-------------|---------------|----------|
+| classifier | 4.24        | 167           | F1 = 0.973 |
+| regressor  | 3.67        | 43            | MAE = 40.33 |
 
 ---
 
