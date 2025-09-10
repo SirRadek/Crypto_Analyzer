@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Tuple, Union, Literal
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -57,6 +56,7 @@ def fit_meta_classifier(
             n_jobs=-1,
             random_state=random_state,
         )
+
         clf = CalibratedClassifierCV(base, method=method, cv=3)
         clf.fit(X.iloc[train_idx], y.iloc[train_idx])
         probas = clf.predict_proba(X.iloc[test_idx])[:, 1]
@@ -70,6 +70,7 @@ def fit_meta_classifier(
         n_jobs=-1,
         random_state=random_state,
     )
+
     final_model = CalibratedClassifierCV(final_base, method=method, cv=3)
     final_model.fit(X, y)
     joblib.dump(final_model, model_path)

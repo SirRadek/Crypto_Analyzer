@@ -1,7 +1,6 @@
 """Prediction helpers for classification models."""
 
 import json
-
 from .meta import predict_meta
 
 

@@ -102,6 +102,7 @@ def main(train=True):
     _delete_future_predictions(
         DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
     )
+
     # Prepare training data for meta models
     horizon_dfs = []
     for horizon in range(1, FORWARD_STEPS + 1):
@@ -120,6 +121,7 @@ def main(train=True):
     feature_list_path = "ml/feature_list.json"
     version_path = "ml/meta_version.json"
     threshold_path = "ml/threshold.json"
+
     if train:
         with timed("Train meta-classifier"):
             cls_model, f1 = fit_meta_classifier(
@@ -131,6 +133,7 @@ def main(train=True):
                 version_path=version_path,
                 version=FEATURES_VERSION,
                 threshold_path=threshold_path,
+
             )
             p(f"F1={f1:.4f}")
         with timed("Train meta-regressor"):
