@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Tuple, Union, Literal
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -229,7 +228,6 @@ def predict_meta(
                 q_dict[q] = {i + 1: arr[:, i] for i in range(arr.shape[1])}
             return pred_dict, q_dict
         return pred_arr, q_arrs
-
     preds = []
     for start in range(0, len(X), batch_size):
         batch = X.iloc[start : start + batch_size]

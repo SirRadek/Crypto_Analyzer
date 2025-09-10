@@ -1,9 +1,7 @@
 """Prediction helpers for classification models."""
 
 import json
-
 from .meta import predict_meta
-
 
 def _load_threshold(path: str) -> float:
     try:
@@ -11,7 +9,6 @@ def _load_threshold(path: str) -> float:
             return float(json.load(f)["threshold"])
     except Exception:
         return 0.5
-
 
 def predict_ml(
     df,
