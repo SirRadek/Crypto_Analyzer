@@ -5,13 +5,17 @@ sys.path.append(os.getcwd())  # noqa: E402
 
 import json  # noqa: E402
 from pathlib import Path  # noqa: E402
-
+from typing import cast  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-
+from sklearn.datasets import make_classification  # noqa: E402
+from sklearn.ensemble import RandomForestClassifier  # noqa: E402
+from sklearn.metrics import brier_score_loss  # noqa: E402
 from analysis.feature_engineering import FEATURE_COLUMNS, create_features  # noqa: E402
 from main import prepare_targets  # noqa: E402
 from ml.meta import fit_meta_classifier, fit_meta_regressor, predict_meta  # noqa: E402
+from ml.predict import predict_ml  # noqa: E402
+
 
 
 def _synthetic_prices(n: int = 200) -> pd.DataFrame:
@@ -51,6 +55,8 @@ def test_classifier_deterministic_oob(tmp_path: Path) -> None:
         n_splits=3,
         gap=1,
         n_estimators=10,
+        threshold_path=str(tmp_path / "thr1.json"),
+
     )
     model2, f1_2 = fit_meta_classifier(
         X,
@@ -62,9 +68,11 @@ def test_classifier_deterministic_oob(tmp_path: Path) -> None:
         n_splits=3,
         gap=1,
         n_estimators=10,
+        threshold_path=str(tmp_path / "thr2.json"),
     )
     assert np.isclose(f1_1, f1_2)
-    assert model1.oob_score_ > 0
+    assert all(c.estimator.oob_score_ > 0 for c in model1.calibrated_classifiers_)
+
     preds = predict_meta(
         train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "m1.joblib")
     )
@@ -128,6 +136,8 @@ def test_integration_small_sample(tmp_path: Path) -> None:
         n_splits=3,
         gap=5,
         n_estimators=20,
+        threshold_path=str(tmp_path / "thr.json"),
+
     )
     reg_model, mae = fit_meta_regressor(
         X_reg,
@@ -141,7 +151,7 @@ def test_integration_small_sample(tmp_path: Path) -> None:
         n_estimators=20,
     )
 
-    assert cls_model.oob_score_ > 0
+    assert all(c.estimator.oob_score_ > 0 for c in cls_model.calibrated_classifiers_)
     assert reg_model.oob_score_ > 0
     assert f1 > 0
     assert isinstance(mae, float)
@@ -162,6 +172,8 @@ def test_integration_small_sample(tmp_path: Path) -> None:
     # metadata files were saved
     assert (tmp_path / "features.json").exists()
     assert json.load(open(tmp_path / "ver.json"))
+    assert (tmp_path / "thr.json").exists()
+
 
 
 def test_multi_output_regressor(tmp_path: Path) -> None:
@@ -221,3 +233,71 @@ def test_multi_output_regressor(tmp_path: Path) -> None:
         assert isinstance(single_preds, np.ndarray)
         assert np.allclose(single_preds, preds[h], atol=2.0)
 
+
+def test_calibration_improves_brier(tmp_path: Path) -> None:
+    X, y = make_classification(n_samples=1000, n_features=20, random_state=0)
+    X_df = pd.DataFrame(X)
+    feature_cols = list(X_df.columns)
+
+    base = RandomForestClassifier(n_estimators=50, random_state=0)
+    base.fit(X_df, y)
+    base_proba = base.predict_proba(X_df)[:, 1] ** 2  # intentionally miscalibrated
+    base_brier = brier_score_loss(y, base_proba)
+
+    _model, _ = fit_meta_classifier(
+        X_df,
+        pd.Series(y),
+        feature_cols,
+        model_path=str(tmp_path / "cal.joblib"),
+        feature_list_path=str(tmp_path / "features.json"),
+        version_path=str(tmp_path / "ver.json"),
+        n_splits=3,
+        gap=1,
+        n_estimators=50,
+        threshold_path=str(tmp_path / "thr.json"),
+    )
+    cal_proba = cast(
+        np.ndarray,
+        predict_meta(
+            X_df,
+            feature_cols,
+            model_path=str(tmp_path / "cal.joblib"),
+            proba=True,
+        ),
+    )
+    cal_brier = brier_score_loss(y, cal_proba)
+    assert cal_brier <= base_brier
+
+
+def test_threshold_respected(tmp_path: Path) -> None:
+    df = create_features(_synthetic_prices())
+    train_df = prepare_targets(df, forward_steps=1)
+    X = train_df[FEATURE_COLUMNS]
+    y = train_df["target_cls"]
+
+    _model, _ = fit_meta_classifier(
+        X,
+        y,
+        FEATURE_COLUMNS,
+        model_path=str(tmp_path / "th_model.joblib"),
+        feature_list_path=str(tmp_path / "features.json"),
+        version_path=str(tmp_path / "ver.json"),
+        n_splits=3,
+        gap=1,
+        n_estimators=10,
+        threshold_path=str(tmp_path / "threshold.json"),
+    )
+    probas = predict_meta(
+        train_df,
+        FEATURE_COLUMNS,
+        model_path=str(tmp_path / "th_model.joblib"),
+        proba=True,
+    )
+    preds = predict_ml(
+        train_df,
+        FEATURE_COLUMNS,
+        model_path=str(tmp_path / "th_model.joblib"),
+        threshold_path=str(tmp_path / "threshold.json"),
+    )
+    thr = json.load(open(tmp_path / "threshold.json"))["threshold"]
+    assert np.array_equal(preds, (probas >= thr).astype(int))
