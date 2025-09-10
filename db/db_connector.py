@@ -7,7 +7,12 @@ import pandas as pd
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "crypto_data.sqlite")
 
 
-def get_price_data(symbol, start_ts: int | None = None, end_ts: int | None = None, db_path: str = DEFAULT_DB_PATH):
+def get_price_data(
+    symbol,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+):
     conn = sqlite3.connect(db_path)
     query = (
         "SELECT "
@@ -26,5 +31,5 @@ def get_price_data(symbol, start_ts: int | None = None, end_ts: int | None = Non
 
     df = pd.read_sql(query, conn, params=params)
     conn.close()
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
