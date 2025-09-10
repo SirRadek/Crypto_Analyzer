@@ -1,11 +1,12 @@
 import joblib
 import os
-from typing import Optional, Dict, Any, Tuple
-import numpy as np
+from typing import Any, Dict, Optional, Tuple, Type
+
 from sklearn.ensemble import RandomForestRegressor
 
 MODEL_PATH = "ml/model_reg.joblib"
 MAX_MODEL_BYTES = 200 * 1024**3  # 200 GB guard
+
 
 def _fits_size(path: str, max_bytes: int = MAX_MODEL_BYTES) -> bool:
     return os.path.exists(path) and os.path.getsize(path) <= max_bytes
@@ -13,7 +14,8 @@ def _fits_size(path: str, max_bytes: int = MAX_MODEL_BYTES) -> bool:
 
 try:
     from numpy.core._exceptions import _ArrayMemoryError
-    _MEM_ERRORS = (MemoryError, _ArrayMemoryError)
+
+    _MEM_ERRORS: Tuple[Type[BaseException], ...] = (MemoryError, _ArrayMemoryError)
 except Exception:  # pragma: no cover - numpy versions <1.20
     _MEM_ERRORS = (MemoryError,)
 
@@ -28,6 +30,7 @@ def _should_mmap(path: str) -> bool:
         return size > 0.5 * avail
     except Exception:
         return False
+
 
 def train_regressor(
     X,
@@ -59,7 +62,7 @@ def train_regressor(
             random_state=42,
             n_jobs=-1,
             min_samples_leaf=2,
-            verbose=0
+            verbose=0,
         )
 
     for n in fallback_estimators:
@@ -71,13 +74,20 @@ def train_regressor(
 
         size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
         size_mb = os.path.getsize(model_path) / (1024**2)
-        print(f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)")
+        print(
+            f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)"
+        )
         if size_ok:
             return model
         else:
-            print(f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees...")
+            print(
+                f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees..."
+            )
 
-    raise RuntimeError("Could not save model under the size limit; try reducing complexity further.")
+    raise RuntimeError(
+        "Could not save model under the size limit; try reducing complexity further."
+    )
+
 
 def load_regressor(model_path: str = MODEL_PATH, mmap_mode: Optional[str] = None):
     """Load a previously trained regressor with graceful OOM handling."""
@@ -90,7 +100,7 @@ def load_regressor(model_path: str = MODEL_PATH, mmap_mode: Optional[str] = None
         mode = "r"
 
     try:
-        return joblib.load(model_path, mmap_mode=mode)
+        return joblib.load(model_path, mmap_mode=mode)  # type: ignore[arg-type]
     except _MEM_ERRORS:
         if mode != "r":
             print("Memory low; retrying regressor load with mmap")

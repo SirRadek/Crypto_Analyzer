@@ -9,6 +9,7 @@ from ml.model_utils import evaluate_model
 
 MODEL_PATH = "ml/model.joblib"
 
+
 def train_model(
     X,
     y,
@@ -37,6 +38,8 @@ def train_model(
         Fraction of data to use for validation during training.
     random_state : int
         Reproducibility seed.
+    use_xgboost : bool
+        If True, train an XGBoost classifier using GPU acceleration.
     """
 
     X_train, X_val, y_train, y_val = train_test_split(
@@ -93,8 +96,8 @@ def train_model(
     print(f"Model saved to {model_path}")
     return clf
 
+
 def load_model(model_path=MODEL_PATH):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No model found at {model_path}")
     return joblib.load(model_path)
-
