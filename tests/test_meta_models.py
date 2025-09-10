@@ -16,7 +16,7 @@ from ml.meta import fit_meta_classifier, fit_meta_regressor, predict_meta  # noq
 
 def _synthetic_prices(n: int = 200) -> pd.DataFrame:
     rng = np.random.default_rng(0)
-    ts = pd.date_range("2024-01-01", periods=n, freq="min")
+    ts = pd.date_range("2024-01-01", periods=n, freq="T")
     base = np.cumsum(rng.normal(size=n)) + 100
     df = pd.DataFrame(
         {
