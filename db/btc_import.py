@@ -5,13 +5,14 @@ from datetime import datetime, timezone
 import os
 
 # Database location relative to repository root
-DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'crypto_data.sqlite')
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "crypto_data.sqlite")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-TABLE_NAME = 'prices'
+TABLE_NAME = "prices"
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 
 # Download 5-minute candles between the specified timestamps
+
 
 def get_klines(symbol, interval, start_ts, end_ts, limit=1000):
     url = "https://api.binance.com/api/v3/klines"
@@ -28,7 +29,9 @@ def get_klines(symbol, interval, start_ts, end_ts, limit=1000):
         return []
     return response.json()
 
+
 # Create database and table if not exists
+
 
 def create_db():
     conn = sqlite3.connect(DB_PATH)
@@ -54,7 +57,9 @@ def create_db():
     conn.commit()
     conn.close()
 
+
 # Save rows into the database
+
 
 def save_to_db(rows, symbol, interval):
     conn = sqlite3.connect(DB_PATH)
@@ -84,7 +89,9 @@ def save_to_db(rows, symbol, interval):
     conn.commit()
     conn.close()
 
+
 # Import new data from the last stored timestamp up to now
+
 
 def import_latest_data():
     create_db()
