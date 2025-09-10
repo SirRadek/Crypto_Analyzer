@@ -23,7 +23,9 @@ def create_features(df):
     trades = df["number_of_trades"].replace(0, np.nan)
     df["avg_trade_size"] = vol / trades
     df["d_volume"] = vol.diff()
-    df["z_trades"] = (df["number_of_trades"] - df["number_of_trades"].rolling(36).mean()) / df["number_of_trades"].rolling(36).std()
+    df["z_trades"] = (
+        df["number_of_trades"] - df["number_of_trades"].rolling(36).mean()
+    ) / df["number_of_trades"].rolling(36).std()
     df["z_volume"] = (vol - vol.rolling(36).mean()) / vol.rolling(36).std()
 
     # --- VWAP & price relationship -------------------------------------------
@@ -43,15 +45,18 @@ def create_features(df):
     df["rv36"] = df["ret1"].rolling(36).std()
 
     hl_log = np.log(df["high"] / df["low"])
-    parkinson = (hl_log ** 2) / (4 * np.log(2))
+    parkinson = (hl_log**2) / (4 * np.log(2))
     df["parkinson12"] = np.sqrt(parkinson.rolling(12).mean())
 
     prev_close = df["close"].shift(1)
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev_close).abs(),
-        (df["low"] - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     df["atr14"] = tr.rolling(14).mean()
 
     price_range = (df["high"] - df["low"]).replace(0, np.nan)
