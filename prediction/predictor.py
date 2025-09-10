@@ -5,7 +5,6 @@ from ml.predict import predict_ml
 def combine_predictions(
     df,
     feature_cols,
-    model_paths=None,
     method="majority",
     use_meta_only=True,
     usage_path="ml/model_usage.json",
