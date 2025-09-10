@@ -102,6 +102,7 @@ def main(train=True):
     _delete_future_predictions(
         DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
     )
+
     # Prepare training data for meta models
     horizon_dfs = []
     for horizon in range(1, FORWARD_STEPS + 1):
