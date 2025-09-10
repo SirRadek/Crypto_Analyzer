@@ -31,4 +31,22 @@ def predict_ml_proba(df, feature_cols, model_path="ml/meta_model_cls.joblib"):
     return predict_meta(df, feature_cols, model_path, proba=True)
 
 
-__all__ = ["predict_ml", "predict_ml_proba"]
+def predict_weighted(
+    df,
+    feature_cols,
+    model_paths,
+    usage_path="ml/model_usage.json",
+):
+    """Backward-compatible wrapper for weighted base-model ensembling."""
+
+    from .ensemble import predict_weighted as _predict_weighted
+
+    return _predict_weighted(
+        df,
+        feature_cols,
+        model_paths,
+        usage_counts_path=usage_path,
+    )
+
+
+__all__ = ["predict_ml", "predict_ml_proba", "predict_weighted"]
