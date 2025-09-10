@@ -9,6 +9,7 @@ from ml.model_utils import evaluate_model
 
 MODEL_PATH = "ml/model.joblib"
 
+
 def train_model(
     X,
     y,
@@ -17,6 +18,7 @@ def train_model(
     param_grid: Optional[Dict] = None,
     test_size: float = 0.2,
     random_state: int = 42,
+    use_xgboost: bool = False,
 ):
     """Train a classification model.
 
@@ -36,13 +38,27 @@ def train_model(
         Fraction of data to use for validation during training.
     random_state : int
         Reproducibility seed.
+    use_xgboost : bool
+        If True, train an XGBoost classifier using GPU acceleration.
     """
 
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=y
     )
 
-    if tune:
+    if use_xgboost:
+        try:
+            from xgboost import XGBClassifier
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError("xgboost is required for GPU training") from exc
+
+        clf = XGBClassifier(
+            tree_method="gpu_hist",
+            predictor="gpu_predictor",
+            random_state=random_state,
+        )
+        clf.fit(X_train, y_train)
+    elif tune:
         param_grid = param_grid or {
             "n_estimators": [100, 200, 300],
             "max_depth": [None, 10, 20],
@@ -80,8 +96,8 @@ def train_model(
     print(f"Model saved to {model_path}")
     return clf
 
+
 def load_model(model_path=MODEL_PATH):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No model found at {model_path}")
     return joblib.load(model_path)
-

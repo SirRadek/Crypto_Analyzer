@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, Type
 
 import joblib
 import numpy as np
@@ -20,7 +20,8 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 try:
     from numpy.core._exceptions import _ArrayMemoryError
-    _MEM_ERRORS = (MemoryError, _ArrayMemoryError)
+
+    _MEM_ERRORS: Tuple[Type[BaseException], ...] = (MemoryError, _ArrayMemoryError)
 except Exception:  # pragma: no cover
     _MEM_ERRORS = (MemoryError,)
 
@@ -30,6 +31,7 @@ def _safe_load(path: str):
         return joblib.load(path)
     except _MEM_ERRORS:
         return joblib.load(path, mmap_mode="r")
+
 
 # ---------------------------------------------------------------------------
 # Paths to auxiliary data
@@ -45,6 +47,7 @@ META_REG_PATH = BASE_DIR / "meta_regressor.pkl"
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
+
 
 def load_usage_counts(path: Path = USAGE_PATH) -> Dict[str, int]:
     """Return mapping of model path to usage counts."""
@@ -84,6 +87,7 @@ def load_performance(path: Path = PERF_PATH) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 # Weight computation
 # ---------------------------------------------------------------------------
+
 
 def compute_weights(
     usage_counts: Dict[str, int],
@@ -128,6 +132,7 @@ def compute_weights(
 # Base model ensembling (weighted averaging)
 # ---------------------------------------------------------------------------
 
+
 def predict_weighted(
     df,
     feature_cols,
@@ -160,6 +165,7 @@ def predict_weighted(
 # ---------------------------------------------------------------------------
 # Meta-model helpers
 # ---------------------------------------------------------------------------
+
 
 def _stack_features(df, feature_cols, horizon_col, model_paths, weights):
     """Construct stacked feature matrix for meta models."""
@@ -284,4 +290,3 @@ __all__ = [
     "predict_meta_classifier",
     "predict_meta_regressor",
 ]
-

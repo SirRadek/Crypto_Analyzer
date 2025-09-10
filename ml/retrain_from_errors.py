@@ -15,10 +15,12 @@ INTERVAL = "5m"
 FEATURE_COLS = FEATURE_COLUMNS
 FORWARD_STEPS = 1  # predict close[t+1 bar]
 
+
 def _prepare_reg_target(df: pd.DataFrame, forward_steps: int) -> pd.DataFrame:
     df = df.copy()
     df["target_close"] = df["close"].shift(-forward_steps)
     return df
+
 
 def _load_backfilled_errors(db_path: str, symbol: str) -> pd.DataFrame:
     """
@@ -40,10 +42,10 @@ def _load_backfilled_errors(db_path: str, symbol: str) -> pd.DataFrame:
 
 
 def _build_sample_weights(
-        base_df: pd.DataFrame,
-        preds_df: pd.DataFrame,
-        alpha: float = 1.0,
-        max_w: float = 5.0
+    base_df: pd.DataFrame,
+    preds_df: pd.DataFrame,
+    alpha: float = 1.0,
+    max_w: float = 5.0,
 ) -> pd.Series:
     """
     Create per-row weights for training:
@@ -74,12 +76,12 @@ def _build_sample_weights(
 
 
 def retrain_with_error_weights(
-        db_path: str = DB_PATH,
-        symbol: str = SYMBOL,
-        forward_steps: int = FORWARD_STEPS,
-        alpha: float = 1.0,
-        max_weight: float = 5.0,
-        cutoff_to_latest_backfilled: bool = True
+    db_path: str = DB_PATH,
+    symbol: str = SYMBOL,
+    forward_steps: int = FORWARD_STEPS,
+    alpha: float = 1.0,
+    max_weight: float = 5.0,
+    cutoff_to_latest_backfilled: bool = True,
 ):
     """
     1) Load full price df, build features + regression target close[t+H].
@@ -113,9 +115,13 @@ def retrain_with_error_weights(
     # 4) train
     X = df[FEATURE_COLS]
     y = df["target_close"]
-    print(f"[retrain] rows={len(df)}, weighted rows (w!=1)={(weights!=1).sum()}, "
-          f"median_w={np.median(weights):.3f}, max_w={weights.max():.3f}")
-    train_regressor(X, y, model_path="ml/model_reg.joblib")  # RFReg ignores weights directly,
+    print(
+        f"[retrain] rows={len(df)}, weighted rows (w!=1)={(weights!=1).sum()}, "
+        f"median_w={np.median(weights):.3f}, max_w={weights.max():.3f}"
+    )
+    train_regressor(
+        X, y, model_path="ml/model_reg.joblib"
+    )  # RFReg ignores weights directly,
     # If you want a regressor that supports sample_weight well, use HistGradientBoostingRegressor:
     # from sklearn.ensemble import HistGradientBoostingRegressor
     # model = HistGradientBoostingRegressor(max_depth=8, learning_rate=0.05)
