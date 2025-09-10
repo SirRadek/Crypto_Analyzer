@@ -240,6 +240,7 @@ def main(train=True, use_meta_only=True):
             if not use_meta_only:
                 for name, val in last_base_preds.items():
                     X_last[name] = val
+
             prob_up = float(cls_model.predict_proba(X_last[feature_cols_meta])[:, 1][0])
             reg_pred = float(reg_model.predict(X_last[feature_cols_meta])[0])
             last_close = float(last_row["close"].iloc[0])

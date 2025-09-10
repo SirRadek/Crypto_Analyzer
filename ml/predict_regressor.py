@@ -26,4 +26,4 @@ def predict_weighted_prices(
     )
 
 
-__all__ = ["predict_prices", "predict_weighted_prices"]
+__all__ = ["predict_prices"]
