@@ -20,7 +20,7 @@ def combine_predictions(
         Features used by the ML models.
     model_paths : list[str] | None
         Paths to multiple model files. If ``None``, a single model at
-        ``ml/model.pkl`` is used.
+        ``ml/model.joblib`` is used.
     method : str, optional
         - ``"majority"``: 1 if at least one predicts up, else 0
         - ``"strict"``: 1 only if both agree

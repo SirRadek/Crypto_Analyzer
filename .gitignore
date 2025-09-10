@@ -5,6 +5,7 @@ __pycache__/
 .vscode/ .idea/ *.iml
 
 ml/*.pkl
+ml/*.joblib
 
 # modely (ide?ln? LFS)
 *.pt
