@@ -115,7 +115,7 @@ def retrain_with_error_weights(
     y = df["target_close"]
     print(f"[retrain] rows={len(df)}, weighted rows (w!=1)={(weights!=1).sum()}, "
           f"median_w={np.median(weights):.3f}, max_w={weights.max():.3f}")
-    train_regressor(X, y, model_path="ml/model_reg.pkl")  # RFReg ignores weights directly,
+    train_regressor(X, y, model_path="ml/model_reg.joblib")  # RFReg ignores weights directly,
     # If you want a regressor that supports sample_weight well, use HistGradientBoostingRegressor:
     # from sklearn.ensemble import HistGradientBoostingRegressor
     # model = HistGradientBoostingRegressor(max_depth=8, learning_rate=0.05)
