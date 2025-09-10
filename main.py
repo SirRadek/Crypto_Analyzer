@@ -1,7 +1,5 @@
-import json
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -13,7 +11,6 @@ from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
 from ml.train import train_model, load_model
 from ml.train_regressor import train_regressor, load_regressor
-from ml.model_utils import match_model_features
 from utils.config import CONFIG
 from utils.helpers import ensure_dir_exists
 from utils.progress import step, timed, p
@@ -39,17 +36,14 @@ INTERVAL_TO_MIN = {
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 FEATURES_VERSION = "ext_v1"
 
-CLS_MODEL_COUNT = 25
-REG_MODEL_COUNT = 30
-CLS_ACC_PATH = Path("ml/backtest_acc_cls.json")
-REG_ACC_PATH = Path("ml/backtest_acc_reg.json")
-
 
 def _created_at_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_name: str) -> int:
+def _delete_future_predictions(
+    db_path: str, symbol: str, from_ms: int, table_name: str
+) -> int:
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
@@ -65,35 +59,13 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
     return deleted
 
 
-
-def list_model_paths(pattern: str, count: int):
-    paths = []
-    indices = []
-    for i in range(1, count + 1):
-        path = pattern.format(i=i)
-        if Path(path).exists():
-            paths.append(path)
-            indices.append(i)
-        else:
-            p(f"Missing model {path}")
-    return paths, indices
-
-
-def load_accuracy_weights(path: Path, indices):
-    if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = {}
-    return [float(data.get(str(i), 1.0)) for i in indices]
-
-
 def prepare_targets(df, forward_steps=1):
     df = df.copy()
     df["target_cls"] = (df["close"].shift(-forward_steps) > df["close"]).astype(int)
     df["target_reg"] = df["close"].shift(-forward_steps)
     df = df.dropna(subset=["target_cls", "target_reg"])
     return df
+
 
 def main(train=True):
     ensure_dir_exists("db/data")
@@ -102,13 +74,16 @@ def main(train=True):
     step(1, 8, "Import latest data")
     try:
         from db.btc_import import import_latest_data
+
         import_latest_data()
     except Exception as exc:
         p(f"btc_import failed: {exc}")
 
     step(2, 8, "Loading data from DB")
     with timed("Load"):
-        start_ts = int((pd.Timestamp.utcnow() - pd.Timedelta(days=5 * 365)).timestamp() * 1000)
+        start_ts = int(
+            (pd.Timestamp.utcnow() - pd.Timedelta(days=5 * 365)).timestamp() * 1000
+        )
         df = get_price_data(SYMBOL, start_ts=start_ts, db_path=DB_PATH)
         p(f"  -> rows={len(df)}, cols={len(df.columns)}")
 
@@ -123,14 +98,10 @@ def main(train=True):
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
-    _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
-    # Load base models and their validation weights
-    cls_paths, cls_indices = list_model_paths("ml/model_{i}.joblib", CLS_MODEL_COUNT)
-    reg_paths, reg_indices = list_model_paths("ml/model_reg_{i}.joblib", REG_MODEL_COUNT)
-    cls_weights = load_accuracy_weights(CLS_ACC_PATH, cls_indices)
-    reg_weights = load_accuracy_weights(REG_ACC_PATH, reg_indices)
-
-    # Prepare training data including predictions from base models
+    _delete_future_predictions(
+        DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
+    )
+    # Prepare training data for meta models
     horizon_dfs = []
     for horizon in range(1, FORWARD_STEPS + 1):
         df_h = prepare_targets(full_df, forward_steps=horizon)
@@ -138,23 +109,7 @@ def main(train=True):
         horizon_dfs.append(df_h)
     train_df = pd.concat(horizon_dfs, ignore_index=True)
 
-    base_feats = train_df[FEATURE_COLS]
-    for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
-        model = load_model(model_path=path)
-        feats = match_model_features(base_feats, model)
-        preds = model.predict_proba(feats)[:, 1] * w
-        train_df[f"cls_pred_{idx}"] = preds
-        del model
-    for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
-        model = load_regressor(model_path=path)
-        feats = match_model_features(base_feats, model)
-        preds = model.predict(feats) * w
-        train_df[f"reg_pred_{idx}"] = preds
-        del model
-
-    cls_pred_cols = [f"cls_pred_{i}" for i in cls_indices]
-    reg_pred_cols = [f"reg_pred_{i}" for i in reg_indices]
-    feature_cols_meta = FEATURE_COLS + ["horizon"] + cls_pred_cols + reg_pred_cols
+    feature_cols_meta = FEATURE_COLS + ["horizon"]
     X_all = train_df[feature_cols_meta]
     y_cls_all = train_df["target_cls"]
     y_reg_all = train_df["target_reg"]
@@ -177,35 +132,22 @@ def main(train=True):
     pred_time = last_row["timestamp"].iloc[0]
     pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
-    # Base model predictions for the latest row
+    # Base features for the latest row
     base_last = last_row[FEATURE_COLS]
-    last_base_preds = {}
-    for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
-        model = load_model(model_path=path)
-        feats = match_model_features(base_last, model)
-        last_base_preds[f"cls_pred_{idx}"] = float(
-            model.predict_proba(feats)[:, 1][0] * w
-        )
-        del model
-    for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
-        model = load_regressor(model_path=path)
-        feats = match_model_features(base_last, model)
-        last_base_preds[f"reg_pred_{idx}"] = float(model.predict(feats)[0] * w)
-        del model
 
     step(5, 8, "Predict horizons")
     for horizon in range(1, FORWARD_STEPS + 1):
         with timed("Predict"):
             X_last = base_last.copy()
             X_last["horizon"] = horizon
-            for name, val in last_base_preds.items():
-                X_last[name] = val
             prob_up = float(cls_model.predict_proba(X_last[feature_cols_meta])[:, 1][0])
             reg_pred = float(reg_model.predict(X_last[feature_cols_meta])[0])
             last_close = float(last_row["close"].iloc[0])
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
-        target_time = pred_time + pd.Timedelta(minutes=horizon * INTERVAL_TO_MIN[INTERVAL])
+        target_time = pred_time + pd.Timedelta(
+            minutes=horizon * INTERVAL_TO_MIN[INTERVAL]
+        )
         targ_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
         row = (
@@ -238,5 +180,6 @@ def main(train=True):
     total = time.perf_counter() - start
     p(f"Done in {total:.2f}s")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
