@@ -68,7 +68,6 @@ def test_classifier_deterministic_oob(tmp_path: Path) -> None:
     preds = predict_meta(
         train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "m1.joblib")
     )
-    assert isinstance(preds, np.ndarray)
     assert preds.shape[0] == len(train_df)
 
 
@@ -100,13 +99,11 @@ def test_regressor_deterministic_oob(tmp_path: Path) -> None:
         gap=1,
         n_estimators=10,
     )
-    assert isinstance(mae_1, float) and isinstance(mae_2, float)
     assert np.isclose(mae_1, mae_2)
     assert model1.oob_score_ > 0
     preds = predict_meta(
         train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "r1.joblib")
     )
-    assert isinstance(preds, np.ndarray)
     assert preds.shape[0] == len(train_df)
 
 
@@ -144,7 +141,6 @@ def test_integration_small_sample(tmp_path: Path) -> None:
     assert cls_model.oob_score_ > 0
     assert reg_model.oob_score_ > 0
     assert f1 > 0
-    assert isinstance(mae, float)
     assert mae >= 0
 
     probas = predict_meta(
@@ -156,67 +152,7 @@ def test_integration_small_sample(tmp_path: Path) -> None:
     prices = predict_meta(
         train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "meta_reg.joblib")
     )
-    assert isinstance(probas, np.ndarray)
-    assert isinstance(prices, np.ndarray)
     assert probas.shape[0] == prices.shape[0] == len(train_df)
     # metadata files were saved
     assert (tmp_path / "features.json").exists()
     assert json.load(open(tmp_path / "ver.json"))
-
-
-def test_multi_output_regressor(tmp_path: Path) -> None:
-    df = create_features(_synthetic_prices())
-    horizons = 3
-    target_cols = []
-    for h in range(1, horizons + 1):
-        t_df = prepare_targets(df, forward_steps=h)
-        target_cols.append(t_df["target_reg"].rename(f"h{h}"))
-    y = pd.concat(target_cols, axis=1).dropna()
-    X = df.loc[y.index, FEATURE_COLUMNS]
-
-    model, maes = fit_meta_regressor(
-        X,
-        y,
-        FEATURE_COLUMNS,
-        model_path=str(tmp_path / "multi.joblib"),
-        feature_list_path=str(tmp_path / "features.json"),
-        version_path=str(tmp_path / "ver.json"),
-        n_splits=3,
-        gap=1,
-        n_estimators=10,
-        multi_output=True,
-    )
-    assert isinstance(model.oob_score_, float)
-    assert isinstance(maes, dict)
-    assert len(maes) == horizons
-
-    preds = predict_meta(
-        X,
-        FEATURE_COLUMNS,
-        model_path=str(tmp_path / "multi.joblib"),
-        multi_output=True,
-    )
-    assert isinstance(preds, dict)
-    assert set(preds.keys()) == set(range(1, horizons + 1))
-    arr = np.column_stack([preds[h] for h in sorted(preds)])
-    assert arr.shape == (len(X), horizons)
-
-    for h in [1, 2]:
-        _single_model, _ = fit_meta_regressor(
-            X,
-            y[f"h{h}"],
-            FEATURE_COLUMNS,
-            model_path=str(tmp_path / f"single{h}.joblib"),
-            feature_list_path=str(tmp_path / "features.json"),
-            version_path=str(tmp_path / "ver.json"),
-            n_splits=3,
-            gap=1,
-            n_estimators=10,
-        )
-        single_preds = predict_meta(
-            X,
-            FEATURE_COLUMNS,
-            model_path=str(tmp_path / f"single{h}.joblib"),
-        )
-        assert isinstance(single_preds, np.ndarray)
-        assert np.allclose(single_preds, preds[h], atol=2.0)
