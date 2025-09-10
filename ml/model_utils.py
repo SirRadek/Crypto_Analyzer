@@ -50,6 +50,10 @@ def evaluate_model(model, X_test, y_test):
         (accuracy, f1) scores for further analysis.
     """
     preds = model.predict(X_test)
+    if hasattr(preds, "to_numpy"):
+        preds = preds.to_numpy()  # type: ignore[assignment]
+    if hasattr(y_test, "to_numpy"):
+        y_test = y_test.to_numpy()  # type: ignore[assignment]
     acc = accuracy_score(y_test, preds)
     f1 = f1_score(y_test, preds, average="weighted")
     print("Accuracy:", acc)

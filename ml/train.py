@@ -1,5 +1,6 @@
+import logging
 import os
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 import joblib
 from sklearn.ensemble import RandomForestClassifier
@@ -10,6 +11,19 @@ from ml.model_utils import evaluate_model
 MODEL_PATH = "ml/model.joblib"
 
 
+logger = logging.getLogger(__name__)
+
+
+def _gpu_available() -> bool:
+    """Return ``True`` if a CUDA device is available."""
+    try:  # pragma: no cover - optional dependency
+        import cupy  # type: ignore
+
+        return cupy.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+
 def train_model(
     X,
     y,
@@ -18,7 +32,8 @@ def train_model(
     param_grid: Optional[Dict] = None,
     test_size: float = 0.2,
     random_state: int = 42,
-    use_xgboost: bool = False,
+    use_gpu: bool = False,
+
 ):
     """Train a classification model.
 
@@ -38,27 +53,35 @@ def train_model(
         Fraction of data to use for validation during training.
     random_state : int
         Reproducibility seed.
-    use_xgboost : bool
-        If True, train an XGBoost classifier using GPU acceleration.
+    use_gpu : bool
+        If ``True`` and CUDA with ``cuml`` is available, train a GPU RandomForest.
+        Otherwise, silently fall back to the CPU implementation.
     """
 
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=y
     )
 
-    if use_xgboost:
-        try:
-            from xgboost import XGBClassifier
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise ImportError("xgboost is required for GPU training") from exc
+    if use_gpu:
+        if _gpu_available():
+            try:  # pragma: no cover - optional dependency
+                import cudf  # type: ignore
+                from cuml.ensemble import RandomForestClassifier as cuRF  # type: ignore
+            except Exception:  # pragma: no cover - optional dependency
+                logger.warning("cuml not available, falling back to CPU")
+            else:
+                X_train_f = cudf.from_pandas(X_train.astype("float32"))
+                y_train_f = cudf.Series(y_train.astype("float32"))
+                clf = cuRF(random_state=random_state)
+                clf.fit(X_train_f, y_train_f)
+                X_val_f = cudf.from_pandas(X_val.astype("float32"))
+                evaluate_model(clf, X_val_f, cudf.Series(y_val.astype("float32")))
+                joblib.dump(clf, model_path)
+                return clf
+        else:
+            logger.warning("CUDA not available, falling back to CPU")
 
-        clf = XGBClassifier(
-            tree_method="gpu_hist",
-            predictor="gpu_predictor",
-            random_state=random_state,
-        )
-        clf.fit(X_train, y_train)
-    elif tune:
+    if tune:
         param_grid = param_grid or {
             "n_estimators": [100, 200, 300],
             "max_depth": [None, 10, 20],
