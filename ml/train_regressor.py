@@ -39,16 +39,38 @@ def train_regressor(
         joblib.dump(model, model_path, compress=compress)
 
         size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
-        size_mb = os.path.getsize(model_path) / (1024**2)
+        size_mb = os.path.getsize(model_path) / (1024 ** 2)
         print(f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)")
         if size_ok:
             return model
         else:
-            print(f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees...")
+            print(f"Model exceeds {MAX_MODEL_BYTES / (1024 ** 3):.0f} GB, retrying with fewer trees...")
 
     raise RuntimeError("Could not save model under the size limit; try reducing complexity further.")
 
-def load_regressor(model_path: str = MODEL_PATH):
+
+def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str = "r"):
+    """Load a previously trained regressor.
+
+    Parameters
+    ----------
+    model_path: str
+        Path to the serialized model.
+    mmap_mode: str, optional
+        Memory-mapping mode for :func:`joblib.load`. Using a read-only
+        memory map (``"r"``) avoids loading the entire model into RAM,
+        which helps on systems with limited memory and prevents
+        ``MemoryError`` during deserialization.
+    """
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No regressor at {model_path}")
-    return joblib.load(model_path)
+
+    try:
+        return joblib.load(model_path, mmap_mode=mmap_mode)
+    except MemoryError as err:
+        raise MemoryError(
+            "Failed to load regressor due to insufficient memory. "
+            "Consider retraining the model with fewer estimators or "
+            "freeing system memory."
+        ) from err
