@@ -1,21 +1,34 @@
 """Prediction helpers for classification models."""
 
-from .train import load_model
-from .ensemble import predict_weighted
+import json
+
+from .meta import predict_meta
 
 
-def predict_ml(df, feature_cols, model_path="ml/model.joblib"):
-    """Predict class labels (0/1) using a trained classifier."""
-    model = load_model(model_path)
-    X = df[feature_cols]
-    return model.predict(X)
+def _load_threshold(path: str) -> float:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return float(json.load(f)["threshold"])
+    except Exception:
+        return 0.5
 
 
-def predict_ml_proba(df, feature_cols, model_path="ml/model.joblib"):
-    """Return probability of the positive class (price up)."""
-    model = load_model(model_path)
-    X = df[feature_cols]
-    return model.predict_proba(X)[:, 1]
+def predict_ml(
+    df,
+    feature_cols,
+    model_path="ml/meta_model_cls.joblib",
+    threshold_path="ml/threshold.json",
+):
+    """Predict class labels (0/1) using the calibrated meta classifier."""
+
+    probas = predict_meta(df, feature_cols, model_path, proba=True)
+    threshold = _load_threshold(threshold_path)
+    return (probas >= threshold).astype(int)
 
 
-__all__ = ["predict_ml", "predict_ml_proba", "predict_weighted"]
+def predict_ml_proba(df, feature_cols, model_path="ml/meta_model_cls.joblib"):
+    """Return calibrated probability of the positive class (price up)."""
+    return predict_meta(df, feature_cols, model_path, proba=True)
+
+
+__all__ = ["predict_ml", "predict_ml_proba"]
