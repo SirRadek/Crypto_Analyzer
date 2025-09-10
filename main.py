@@ -124,7 +124,7 @@ def main(train=True):
     last_ts = full_df["timestamp"].max()
     _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
     # Load base models and their validation weights
-    cls_paths, cls_indices = list_model_paths("ml/model_{i}.pkl", CLS_MODEL_COUNT)
+    cls_paths, cls_indices = list_model_paths("ml/model_{i}.joblib", CLS_MODEL_COUNT)
     reg_paths, reg_indices = list_model_paths("ml/model_reg_{i}.joblib", REG_MODEL_COUNT)
     cls_weights = load_accuracy_weights(CLS_ACC_PATH, cls_indices)
     reg_weights = load_accuracy_weights(REG_ACC_PATH, reg_indices)
@@ -156,7 +156,7 @@ def main(train=True):
     y_cls_all = train_df["target_cls"]
     y_reg_all = train_df["target_reg"]
 
-    model_path_cls = "ml/meta_model_cls.pkl"
+    model_path_cls = "ml/meta_model_cls.joblib"
     model_path_reg = "ml/meta_model_reg.joblib"
     if train:
         with timed("Train meta-classifier"):
