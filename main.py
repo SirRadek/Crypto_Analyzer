@@ -13,6 +13,7 @@ from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
 from ml.train import train_model, load_model
 from ml.train_regressor import train_regressor, load_regressor
+from ml.model_utils import match_model_features
 from utils.config import CONFIG
 from utils.helpers import ensure_dir_exists
 from utils.progress import step, timed, p
@@ -140,12 +141,14 @@ def main(train=True):
     base_feats = train_df[FEATURE_COLS]
     for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
         model = load_model(model_path=path)
-        preds = model.predict_proba(base_feats)[:, 1] * w
+        feats = match_model_features(base_feats, model)
+        preds = model.predict_proba(feats)[:, 1] * w
         train_df[f"cls_pred_{idx}"] = preds
         del model
     for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
         model = load_regressor(model_path=path)
-        preds = model.predict(base_feats) * w
+        feats = match_model_features(base_feats, model)
+        preds = model.predict(feats) * w
         train_df[f"reg_pred_{idx}"] = preds
         del model
 
@@ -179,13 +182,15 @@ def main(train=True):
     last_base_preds = {}
     for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
         model = load_model(model_path=path)
+        feats = match_model_features(base_last, model)
         last_base_preds[f"cls_pred_{idx}"] = float(
-            model.predict_proba(base_last)[:, 1][0] * w
+            model.predict_proba(feats)[:, 1][0] * w
         )
         del model
     for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
         model = load_regressor(model_path=path)
-        last_base_preds[f"reg_pred_{idx}"] = float(model.predict(base_last)[0] * w)
+        feats = match_model_features(base_last, model)
+        last_base_preds[f"reg_pred_{idx}"] = float(model.predict(feats)[0] * w)
         del model
 
     step(5, 8, "Predict horizons")
