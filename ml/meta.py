@@ -56,7 +56,6 @@ def fit_meta_classifier(
             n_jobs=-1,
             random_state=random_state,
         )
-
         clf = CalibratedClassifierCV(base, method=method, cv=3)
         clf.fit(X.iloc[train_idx], y.iloc[train_idx])
         probas = clf.predict_proba(X.iloc[test_idx])[:, 1]
@@ -70,7 +69,6 @@ def fit_meta_classifier(
         n_jobs=-1,
         random_state=random_state,
     )
-
     final_model = CalibratedClassifierCV(final_base, method=method, cv=3)
     final_model.fit(X, y)
     joblib.dump(final_model, model_path)
@@ -168,7 +166,15 @@ def predict_meta(
     batch_size: int = 1000,
     proba: bool = False,
     multi_output: bool = False,
-) -> Union[np.ndarray, Dict[int, np.ndarray]]:
+    return_pi: bool = False,
+    quantiles: Iterable[float] = (0.05, 0.95),
+    log_pi_width: bool = False,
+) -> Union[
+    np.ndarray,
+    Dict[int, np.ndarray],
+    Tuple[np.ndarray, Dict[float, np.ndarray]],
+    Tuple[Dict[int, np.ndarray], Dict[float, Dict[int, np.ndarray]]],
+]:
     """Predict using a stored meta model with batching and memory mapping.
 
     Parameters
@@ -177,13 +183,51 @@ def predict_meta(
         If ``True``, the loaded model is expected to output multiple horizons.
         The return value is a dictionary ``{horizon: np.ndarray}`` with
         1-based horizon indices.
+    return_pi:
+        If ``True`` (regression only), also return prediction intervals based on
+        estimator quantiles. The second return value is a dict mapping each
+        quantile to an array shaped like the predictions. When ``multi_output``
+        is ``True``, this becomes ``{q: {h: arr}}``.
+    log_pi_width:
+        If ``True`` and at least two quantiles are provided, log the mean width
+        of the extreme interval.
     """
 
-    if proba and multi_output:
-        raise ValueError("`proba` and `multi_output` cannot both be True")
+    if proba and (multi_output or return_pi):
+        raise ValueError(
+            "`proba` cannot be combined with `multi_output` or `return_pi`"
+        )
 
     model = joblib.load(model_path, mmap_mode="r")
     X = df[list(feature_cols)]
+
+    if return_pi:
+        if not hasattr(model, "estimators_"):
+            raise ValueError("Model does not support prediction intervals")
+        preds: list[np.ndarray] = []
+        q_preds: Dict[float, list[np.ndarray]] = {q: [] for q in quantiles}
+        ests = model.estimators_
+        qs = list(quantiles)
+        for start in range(0, len(X), batch_size):
+            batch = X.iloc[start : start + batch_size]
+            est_batch = np.array([e.predict(batch) for e in ests])
+            preds.append(est_batch.mean(axis=0))
+            for q in qs:
+                q_preds[q].append(np.quantile(est_batch, q, axis=0))
+            if log_pi_width and len(qs) >= 2:
+                lower = np.quantile(est_batch, min(qs), axis=0)
+                upper = np.quantile(est_batch, max(qs), axis=0)
+                width = np.mean(upper - lower)
+                print(f"PI width mean={width:.6f}")
+        pred_arr = np.concatenate(preds, axis=0)
+        q_arrs = {q: np.concatenate(v, axis=0) for q, v in q_preds.items()}
+        if multi_output:
+            pred_dict = {i + 1: pred_arr[:, i] for i in range(pred_arr.shape[1])}
+            q_dict: Dict[float, Dict[int, np.ndarray]] = {}
+            for q, arr in q_arrs.items():
+                q_dict[q] = {i + 1: arr[:, i] for i in range(arr.shape[1])}
+            return pred_dict, q_dict
+        return pred_arr, q_arrs
     preds = []
     for start in range(0, len(X), batch_size):
         batch = X.iloc[start : start + batch_size]

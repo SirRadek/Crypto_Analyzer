@@ -3,14 +3,12 @@
 import json
 from .meta import predict_meta
 
-
 def _load_threshold(path: str) -> float:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return float(json.load(f)["threshold"])
     except Exception:
         return 0.5
-
 
 def predict_ml(
     df,
