@@ -35,12 +35,24 @@ def train_regressor(
     model_path: str = MODEL_PATH,
     sample_weight=None,
     params: Optional[Dict[str, Any]] = None,
-    fallback_estimators: Tuple[int, ...] = (600, 400, 200, 100)
+    fallback_estimators: Tuple[int, ...] = (600, 400, 200, 100),
+    use_xgboost: bool = False,
 ):
     """
     Train a regressor and ensure the saved model file <= 200 GB.
     Will try a sequence of n_estimators (fallback_estimators) until size fits.
     """
+    if use_xgboost:
+        try:
+            from xgboost import XGBRegressor
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError("xgboost is required for GPU training") from exc
+
+        model = XGBRegressor(tree_method="gpu_hist", predictor="gpu_predictor")
+        model.fit(X, y, sample_weight=sample_weight)
+        joblib.dump(model, model_path, compress=False)
+        return model
+
     if params is None:
         params = dict(
             n_estimators=fallback_estimators[0],
