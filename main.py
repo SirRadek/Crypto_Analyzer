@@ -41,9 +41,7 @@ def _created_at_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _delete_future_predictions(
-    db_path: str, symbol: str, from_ms: int, table_name: str
-) -> int:
+def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_name: str) -> int:
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
@@ -74,16 +72,13 @@ def main(train=True):
     step(1, 8, "Import latest data")
     try:
         from db.btc_import import import_latest_data
-
         import_latest_data()
     except Exception as exc:
         p(f"btc_import failed: {exc}")
 
     step(2, 8, "Loading data from DB")
     with timed("Load"):
-        start_ts = int(
-            (pd.Timestamp.utcnow() - pd.Timedelta(days=5 * 365)).timestamp() * 1000
-        )
+        start_ts = int((pd.Timestamp.utcnow() - pd.Timedelta(days=5 * 365)).timestamp() * 1000)
         df = get_price_data(SYMBOL, start_ts=start_ts, db_path=DB_PATH)
         p(f"  -> rows={len(df)}, cols={len(df.columns)}")
 
@@ -98,9 +93,8 @@ def main(train=True):
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
-    _delete_future_predictions(
-        DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
-    )
+    _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
+
     # Prepare training data for meta models
     horizon_dfs = []
     for horizon in range(1, FORWARD_STEPS + 1):
@@ -132,7 +126,6 @@ def main(train=True):
     pred_time = last_row["timestamp"].iloc[0]
     pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
-    # Base features for the latest row
     base_last = last_row[FEATURE_COLS]
 
     step(5, 8, "Predict horizons")
@@ -145,9 +138,7 @@ def main(train=True):
             last_close = float(last_row["close"].iloc[0])
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
-        target_time = pred_time + pd.Timedelta(
-            minutes=horizon * INTERVAL_TO_MIN[INTERVAL]
-        )
+        target_time = pred_time + pd.Timedelta(minutes=horizon * INTERVAL_TO_MIN[INTERVAL])
         targ_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
         row = (
