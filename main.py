@@ -119,7 +119,6 @@ def main(train=True):
     model_path_reg = "ml/meta_model_reg.joblib"
     feature_list_path = "ml/feature_list.json"
     version_path = "ml/meta_version.json"
-    threshold_path = "ml/threshold.json"
     if train:
         with timed("Train meta-classifier"):
             cls_model, f1 = fit_meta_classifier(
@@ -130,7 +129,6 @@ def main(train=True):
                 feature_list_path=feature_list_path,
                 version_path=version_path,
                 version=FEATURES_VERSION,
-                threshold_path=threshold_path,
             )
             p(f"F1={f1:.4f}")
         with timed("Train meta-regressor"):
