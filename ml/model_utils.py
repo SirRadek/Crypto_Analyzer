@@ -16,6 +16,7 @@ def save_model(model, path):
     joblib.dump(model, path)
     print(f"Model saved to {path}")
 
+
 def load_model(path):
     """
     Loads a model from disk.
@@ -23,6 +24,7 @@ def load_model(path):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Model file not found at {path}")
     return joblib.load(path)
+
 
 def match_model_features(df, model):
     """Align ``df`` columns with features expected by ``model``.
@@ -37,6 +39,7 @@ def match_model_features(df, model):
     if feature_names is None:
         return df
     return df.reindex(columns=feature_names, fill_value=0)
+
 
 def evaluate_model(model, X_test, y_test):
     """Print evaluation metrics for classification models.
