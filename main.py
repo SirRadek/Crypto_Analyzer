@@ -68,7 +68,7 @@ def prepare_targets(df, forward_steps=1):
     return df
 
 
-def main(train=True, use_meta_only=True):
+def main(train=True):
     ensure_dir_exists("db/data")
     start = time.perf_counter()
 
@@ -102,48 +102,6 @@ def main(train=True, use_meta_only=True):
     _delete_future_predictions(
         DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
     )
-
-    if not use_meta_only:
-        from pathlib import Path
-        import json
-        from ml.train import load_model as load_base_model
-        from ml.train_regressor import load_regressor as load_base_regressor
-        from ml.model_utils import match_model_features
-
-        CLS_MODEL_COUNT = 25
-        REG_MODEL_COUNT = 30
-        CLS_ACC_PATH = Path("ml/backtest_acc_cls.json")
-        REG_ACC_PATH = Path("ml/backtest_acc_reg.json")
-
-        def list_model_paths(pattern: str, count: int):
-            paths = []
-            indices = []
-            for i in range(1, count + 1):
-                path = pattern.format(i=i)
-                if Path(path).exists():
-                    paths.append(path)
-                    indices.append(i)
-                else:
-                    p(f"Missing model {path}")
-            return paths, indices
-
-        def load_accuracy_weights(path: Path, indices):
-            if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            else:
-                data = {}
-            return [float(data.get(str(i), 1.0)) for i in indices]
-
-        cls_paths, cls_indices = list_model_paths(
-            "ml/model_{i}.joblib", CLS_MODEL_COUNT
-        )
-        reg_paths, reg_indices = list_model_paths(
-            "ml/model_reg_{i}.joblib", REG_MODEL_COUNT
-        )
-        cls_weights = load_accuracy_weights(CLS_ACC_PATH, cls_indices)
-        reg_weights = load_accuracy_weights(REG_ACC_PATH, reg_indices)
-
     # Prepare training data for meta models
     horizon_dfs = []
     for horizon in range(1, FORWARD_STEPS + 1):
@@ -153,24 +111,6 @@ def main(train=True, use_meta_only=True):
     train_df = pd.concat(horizon_dfs, ignore_index=True)
 
     feature_cols_meta = FEATURE_COLS + ["horizon"]
-    if not use_meta_only:
-        base_feats = train_df[FEATURE_COLS]
-        for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
-            model = load_base_model(model_path=path)
-            feats = match_model_features(base_feats, model)
-            preds = model.predict_proba(feats)[:, 1] * w
-            train_df[f"cls_pred_{idx}"] = preds
-            del model
-        for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
-            model = load_base_regressor(model_path=path)
-            feats = match_model_features(base_feats, model)
-            preds = model.predict(feats) * w
-            train_df[f"reg_pred_{idx}"] = preds
-            del model
-        cls_pred_cols = [f"cls_pred_{i}" for i in cls_indices]
-        reg_pred_cols = [f"reg_pred_{i}" for i in reg_indices]
-        feature_cols_meta += cls_pred_cols + reg_pred_cols
-
     X_all = train_df[feature_cols_meta]
     y_cls_all = train_df["target_cls"]
     y_reg_all = train_df["target_reg"]
@@ -217,29 +157,12 @@ def main(train=True, use_meta_only=True):
 
     # Base features for the latest row
     base_last = last_row[FEATURE_COLS]
-    if not use_meta_only:
-        last_base_preds = {}
-        for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
-            model = load_base_model(model_path=path)
-            feats = match_model_features(base_last, model)
-            last_base_preds[f"cls_pred_{idx}"] = float(
-                model.predict_proba(feats)[:, 1][0] * w
-            )
-            del model
-        for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
-            model = load_base_regressor(model_path=path)
-            feats = match_model_features(base_last, model)
-            last_base_preds[f"reg_pred_{idx}"] = float(model.predict(feats)[0] * w)
-            del model
 
     step(5, 8, "Predict horizons")
     for horizon in range(1, FORWARD_STEPS + 1):
         with timed("Predict"):
             X_last = base_last.copy()
             X_last["horizon"] = horizon
-            if not use_meta_only:
-                for name, val in last_base_preds.items():
-                    X_last[name] = val
             prob_up = float(cls_model.predict_proba(X_last[feature_cols_meta])[:, 1][0])
             reg_pred = float(reg_model.predict(X_last[feature_cols_meta])[0])
             last_close = float(last_row["close"].iloc[0])
