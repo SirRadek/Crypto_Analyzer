@@ -98,9 +98,9 @@ def main(train=True):
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
-    _delete_future_predictions(
-        DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
-    )
+
+    _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
+
     # Prepare training data for meta models
     horizon_dfs = []
     for horizon in range(1, FORWARD_STEPS + 1):
@@ -133,6 +133,7 @@ def main(train=True):
     pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
     # Base features for the latest row
+
     base_last = last_row[FEATURE_COLS]
 
     step(5, 8, "Predict horizons")
