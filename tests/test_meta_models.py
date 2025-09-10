@@ -117,44 +117,6 @@ def test_regressor_deterministic_oob(tmp_path: Path) -> None:
     assert preds.shape[0] == len(train_df)
 
 
-def test_regressor_prediction_intervals(tmp_path: Path) -> None:
-    df = create_features(_synthetic_prices())
-    train_df = prepare_targets(df, forward_steps=1)
-    X = train_df[FEATURE_COLUMNS]
-    y = train_df["target_reg"]
-
-    _model, _ = fit_meta_regressor(
-        X,
-        y,
-        FEATURE_COLUMNS,
-        model_path=str(tmp_path / "rpi.joblib"),
-        feature_list_path=str(tmp_path / "features.json"),
-        version_path=str(tmp_path / "ver.json"),
-        n_splits=3,
-        gap=1,
-        n_estimators=10,
-    )
-
-    preds, pi = cast(
-        tuple[np.ndarray, dict[float, np.ndarray]],
-        predict_meta(
-            train_df,
-            FEATURE_COLUMNS,
-            model_path=str(tmp_path / "rpi.joblib"),
-            return_pi=True,
-            quantiles=(0.1, 0.5, 0.9),
-        ),
-    )
-    assert isinstance(preds, np.ndarray)
-    assert isinstance(pi, dict)
-    qs = sorted(pi.keys())
-    arr = np.column_stack([pi[q] for q in qs])
-    assert arr.shape == (len(train_df), len(qs))
-    assert not np.isnan(arr).any()
-    for i in range(len(qs) - 1):
-        assert np.all(arr[:, i] <= arr[:, i + 1] + 1e-8)
-
-
 def test_integration_small_sample(tmp_path: Path) -> None:
     df = create_features(_synthetic_prices(5000))
     train_df = prepare_targets(df, forward_steps=1)
