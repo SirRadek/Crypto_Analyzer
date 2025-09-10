@@ -85,7 +85,7 @@ def retrain_with_error_weights(
     1) Load full price df, build features + regression target close[t+H].
     2) Load backfilled predictions with abs_error.
     3) Build sample weights: rows where we had larger error get larger weight.
-    4) Retrain RandomForestRegressor with sample_weight and overwrite model_reg.pkl.
+    4) Retrain RandomForestRegressor with sample_weight and overwrite model_reg.joblib.
 
     cutoff_to_latest_backfilled=True:
       Only use rows with timestamp <= last prediction_time that has y_true,
@@ -120,6 +120,6 @@ def retrain_with_error_weights(
     # from sklearn.ensemble import HistGradientBoostingRegressor
     # model = HistGradientBoostingRegressor(max_depth=8, learning_rate=0.05)
     # model.fit(X, y, sample_weight=weights.values)
-    # joblib.dump(model, "ml/model_reg.pkl")
+    # joblib.dump(model, "ml/model_reg.joblib")
 
-    print("[retrain] Done. Updated ml/model_reg.pkl with error-informed training.")
+    print("[retrain] Done. Updated ml/model_reg.joblib with error-informed training.")

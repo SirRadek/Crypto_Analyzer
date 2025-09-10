@@ -25,8 +25,8 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 BASE_DIR = Path(__file__).resolve().parent
 USAGE_PATH = BASE_DIR / "model_usage.json"
 PERF_PATH = BASE_DIR / "model_performance.json"
-META_CLF_PATH = BASE_DIR / "meta_classifier.pkl"
-META_REG_PATH = BASE_DIR / "meta_regressor.pkl"
+META_CLF_PATH = BASE_DIR / "meta_classifier.joblib"
+META_REG_PATH = BASE_DIR / "meta_regressor.joblib"
 
 
 # ---------------------------------------------------------------------------

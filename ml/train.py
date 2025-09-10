@@ -7,7 +7,7 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 
 from ml.model_utils import evaluate_model
 
-MODEL_PATH = "ml/model.pkl"
+MODEL_PATH = "ml/model.joblib"
 
 def train_model(
     X,

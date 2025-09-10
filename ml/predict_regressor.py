@@ -4,7 +4,7 @@ from .train_regressor import load_regressor
 from .ensemble import predict_weighted as predict_weighted_prices
 
 
-def predict_prices(df, feature_cols, model_path="ml/model_reg.pkl"):
+def predict_prices(df, feature_cols, model_path="ml/model_reg.joblib"):
     """Predict prices using a single regressor model."""
     model = load_regressor(model_path)
     X = df[feature_cols]

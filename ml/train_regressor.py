@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, Tuple
 
 from sklearn.ensemble import RandomForestRegressor
 
-MODEL_PATH = "ml/model_reg.pkl"
+MODEL_PATH = "ml/model_reg.joblib"
 MAX_MODEL_BYTES = 200 * 1024**3  # 200 GB guard
 
 def _fits_size(path: str, max_bytes: int = MAX_MODEL_BYTES) -> bool:
