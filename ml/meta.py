@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple, Union
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -158,7 +157,7 @@ def predict_meta(
 
     if proba and multi_output:
         raise ValueError("`proba` and `multi_output` cannot both be True")
-
+   
     model = joblib.load(model_path, mmap_mode="r")
     X = df[list(feature_cols)]
     preds = []

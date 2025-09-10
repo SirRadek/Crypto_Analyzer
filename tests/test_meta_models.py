@@ -220,3 +220,4 @@ def test_multi_output_regressor(tmp_path: Path) -> None:
         )
         assert isinstance(single_preds, np.ndarray)
         assert np.allclose(single_preds, preds[h], atol=2.0)
+
