@@ -1,12 +1,14 @@
+import json
 import logging
 import os
-from typing import Dict, Optional
+from typing import Any, Dict, cast
 
 import joblib
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import train_test_split
 
 from ml.model_utils import evaluate_model
+from .oob import fit_incremental_forest, halving_random_search
 
 MODEL_PATH = "ml/model.joblib"
 
@@ -29,11 +31,13 @@ def train_model(
     y,
     model_path: str = MODEL_PATH,
     tune: bool = False,
-    param_grid: Optional[Dict] = None,
     test_size: float = 0.2,
     random_state: int = 42,
     use_gpu: bool = False,
-
+    oob_tol: float | None = None,
+    oob_step: int = 50,
+    max_estimators: int = 400,
+    log_path: str = "ml/oob_cls.json",
 ):
     """Train a classification model.
 
@@ -81,36 +85,38 @@ def train_model(
         else:
             logger.warning("CUDA not available, falling back to CPU")
 
+    params: Dict[str, Any] = {}
     if tune:
-        param_grid = param_grid or {
-            "n_estimators": [100, 200, 300],
-            "max_depth": [None, 10, 20],
-            "min_samples_split": [2, 5, 10],
-            "min_samples_leaf": [1, 2, 4],
-        }
-        base_clf = RandomForestClassifier(
-            n_jobs=-1, random_state=random_state, class_weight="balanced"
+        params = halving_random_search(
+            X_train, y_train, RandomForestClassifier, random_state
         )
-        search = GridSearchCV(
-            base_clf,
-            param_grid=param_grid,
-            cv=5,
-            n_jobs=-1,
-            scoring="accuracy",
-            verbose=2,
+
+    if oob_tol is not None:
+        clf, oob_scores = fit_incremental_forest(
+            X_train,
+            y_train,
+            RandomForestClassifier,
+            step=oob_step,
+            max_estimators=max_estimators,
+            tol=oob_tol,
+            random_state=random_state,
+            log_path=log_path,
+            **params,
         )
-        search.fit(X_train, y_train)
-        clf = search.best_estimator_
-        print("Best params:", search.best_params_)
     else:
+        n_estimators = cast(int, params.pop("n_estimators", 200))
         clf = RandomForestClassifier(
-            n_estimators=200,
+            n_estimators=n_estimators,
             random_state=random_state,
             n_jobs=-1,
-            min_samples_leaf=2,
-            verbose=1,  # <- prints training progress
+            oob_score=True,
+            **params,
         )
         clf.fit(X_train, y_train)
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"params": clf.get_params(), "oob_scores": [float(clf.oob_score_)]}, f
+            )
 
     # Evaluate on validation data
     evaluate_model(clf, X_val, y_val)

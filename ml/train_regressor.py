@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple, Type
 
 from sklearn.ensemble import RandomForestRegressor
 from .train import _gpu_available
+from .oob import fit_incremental_forest, halving_random_search
 
 MODEL_PATH = "ml/model_reg.joblib"
 MAX_MODEL_BYTES = 200 * 1024**3  # 200 GB guard
@@ -45,7 +46,11 @@ def train_regressor(
     params: Optional[Dict[str, Any]] = None,
     fallback_estimators: Tuple[int, ...] = (600, 400, 200, 100),
     use_gpu: bool = False,
-
+    tune: bool = False,
+    oob_tol: float | None = None,
+    oob_step: int = 50,
+    max_estimators: int = 400,
+    log_path: str = "ml/oob_reg.json",
 ):
     """
     Train a regressor and ensure the saved model file <= 200 GB.
@@ -77,6 +82,25 @@ def train_regressor(
         else:
             logger.warning("CUDA not available, falling back to CPU")
 
+    if tune:
+        tuned = halving_random_search(X, y, RandomForestRegressor, random_state=42)
+        params = {**(params or {}), **tuned}
+
+    if oob_tol is not None:
+        model, oob_scores = fit_incremental_forest(
+            X,
+            y,
+            RandomForestRegressor,
+            step=oob_step,
+            max_estimators=max_estimators,
+            tol=oob_tol,
+            random_state=42,
+            log_path=log_path,
+            **(params or {}),
+        )
+        joblib.dump(model, model_path, compress=False)
+        return model
+
     if params is None:
         params = dict(
             n_estimators=fallback_estimators[0],
@@ -90,7 +114,6 @@ def train_regressor(
         params["n_estimators"] = n
         model = RandomForestRegressor(**params)
         model.fit(X, y, sample_weight=sample_weight)
-        # Save uncompressed to allow memory-mapped loading later
         joblib.dump(model, model_path, compress=False)
 
         size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
