@@ -17,6 +17,7 @@ from typing import Dict, Iterable, Tuple
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from .train_regressor import train_regressor as _train_regressor
 
 try:
     from numpy.core._exceptions import _ArrayMemoryError
@@ -218,9 +219,9 @@ def train_meta_regressor(
     weights, zero_weight = compute_weights(usage_counts, performance, names)
     X_meta = _stack_features(df, feature_cols, horizon_col, names, weights)
     y = df[target_col]
-    meta = RandomForestRegressor(n_estimators=200, random_state=42)
-    meta.fit(X_meta, y)
-    joblib.dump(meta, meta_model_path)
+
+    params = dict(n_estimators=200, random_state=42, n_jobs=-1, min_samples_leaf=2, verbose=0)
+    meta = _train_regressor(X_meta, y, model_path=str(meta_model_path), params=params)
     if zero_weight:
         print(f"Models with zero weight (consider removing): {zero_weight}")
     return meta
