@@ -52,20 +52,35 @@ def train_regressor(
 
     for n in fallback_estimators:
         params["n_estimators"] = n
-        model = RandomForestRegressor(**params)
-        model.fit(X, y, sample_weight=sample_weight)
-        # Save uncompressed to allow memory-mapped loading later
-        joblib.dump(model, model_path, compress=False)
+        try:
+            model = RandomForestRegressor(**params)
+            model.fit(X, y, sample_weight=sample_weight)
+            # Save uncompressed to allow memory-mapped loading later
+            joblib.dump(model, model_path, compress=False)
+        except _MEM_ERRORS:
+            # If training or saving fails due to insufficient memory, try
+            # with fewer estimators to reduce memory footprint.
+            print(
+                f"MemoryError with n_estimators={n}; trying fewer trees if available."
+            )
+            del model
+            continue
 
         size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
         size_mb = os.path.getsize(model_path) / (1024**2)
-        print(f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)")
+        print(
+            f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)"
+        )
         if size_ok:
             return model
         else:
-            print(f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees...")
+            print(
+                f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees..."
+            )
 
-    raise RuntimeError("Could not save model under the size limit; try reducing complexity further.")
+    raise RuntimeError(
+        "Could not save model under the size limit or training failed due to memory constraints."
+    )
 
 def load_regressor(model_path: str = MODEL_PATH, mmap_mode: Optional[str] = None):
     """Load a previously trained regressor with graceful OOM handling."""
