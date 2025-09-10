@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple, Union
 
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -69,6 +70,7 @@ def fit_meta_classifier(
 def fit_meta_regressor(
     X: pd.DataFrame,
     y: Union[pd.Series, pd.DataFrame],
+
     feature_cols: Iterable[str],
     *,
     model_path: str = "ml/meta_model_reg.joblib",
@@ -102,6 +104,7 @@ def fit_meta_regressor(
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     maes: list[Any] = []
+
     for train_idx, test_idx in tscv.split(X):
         reg = RandomForestRegressor(
             n_estimators=n_estimators,
@@ -119,6 +122,7 @@ def fit_meta_regressor(
         else:
             maes.append(float(mean_absolute_error(y.iloc[test_idx], pred)))
 
+
     final_model = RandomForestRegressor(
         n_estimators=n_estimators,
         oob_score=True,
@@ -135,6 +139,7 @@ def fit_meta_regressor(
         return final_model, {i + 1: float(m) for i, m in enumerate(mae_arr)}
     else:
         return final_model, float(np.mean(maes))
+
 
 
 def predict_meta(
@@ -159,6 +164,7 @@ def predict_meta(
     if proba and multi_output:
         raise ValueError("`proba` and `multi_output` cannot both be True")
 
+
     model = joblib.load(model_path, mmap_mode="r")
     X = df[list(feature_cols)]
     preds = []
@@ -172,6 +178,7 @@ def predict_meta(
     if multi_output:
         arr = np.concatenate(preds, axis=0)
         return {i + 1: arr[:, i] for i in range(arr.shape[1])}
+
     return np.concatenate(preds)
 
 
