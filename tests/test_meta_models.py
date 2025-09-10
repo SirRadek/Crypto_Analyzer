@@ -16,7 +16,7 @@ from ml.meta import fit_meta_classifier, fit_meta_regressor, predict_meta  # noq
 
 def _synthetic_prices(n: int = 200) -> pd.DataFrame:
     rng = np.random.default_rng(0)
-    ts = pd.date_range("2024-01-01", periods=n, freq="T")
+    ts = pd.date_range("2024-01-01", periods=n, freq="min")
     base = np.cumsum(rng.normal(size=n)) + 100
     df = pd.DataFrame(
         {
@@ -69,7 +69,6 @@ def test_classifier_deterministic_oob(tmp_path: Path) -> None:
         train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "m1.joblib")
     )
     assert isinstance(preds, np.ndarray)
-
     assert preds.shape[0] == len(train_df)
 
 
@@ -102,14 +101,12 @@ def test_regressor_deterministic_oob(tmp_path: Path) -> None:
         n_estimators=10,
     )
     assert isinstance(mae_1, float) and isinstance(mae_2, float)
-
     assert np.isclose(mae_1, mae_2)
     assert model1.oob_score_ > 0
     preds = predict_meta(
         train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "r1.joblib")
     )
     assert isinstance(preds, np.ndarray)
-
     assert preds.shape[0] == len(train_df)
 
 
@@ -148,7 +145,6 @@ def test_integration_small_sample(tmp_path: Path) -> None:
     assert reg_model.oob_score_ > 0
     assert f1 > 0
     assert isinstance(mae, float)
-
     assert mae >= 0
 
     probas = predict_meta(
@@ -162,7 +158,6 @@ def test_integration_small_sample(tmp_path: Path) -> None:
     )
     assert isinstance(probas, np.ndarray)
     assert isinstance(prices, np.ndarray)
-
     assert probas.shape[0] == prices.shape[0] == len(train_df)
     # metadata files were saved
     assert (tmp_path / "features.json").exists()
