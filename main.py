@@ -9,8 +9,9 @@ from analysis.compare_predictions import backfill_actuals_and_errors
 from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
-from ml.train import train_model, load_model
-from ml.train_regressor import train_regressor, load_regressor
+import joblib
+
+from ml.meta import fit_meta_classifier, fit_meta_regressor
 from utils.config import CONFIG
 from utils.helpers import ensure_dir_exists
 from utils.progress import step, timed, p
@@ -98,8 +99,9 @@ def main(train=True):
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
-
-    _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
+    _delete_future_predictions(
+        DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
+    )
 
     # Prepare training data for meta models
     horizon_dfs = []
@@ -116,16 +118,36 @@ def main(train=True):
 
     model_path_cls = "ml/meta_model_cls.joblib"
     model_path_reg = "ml/meta_model_reg.joblib"
+    feature_list_path = "ml/feature_list.json"
+    version_path = "ml/meta_version.json"
     if train:
         with timed("Train meta-classifier"):
-            cls_model = train_model(X_all, y_cls_all, model_path=model_path_cls)
+            cls_model, f1 = fit_meta_classifier(
+                X_all,
+                y_cls_all,
+                feature_cols_meta,
+                model_path=model_path_cls,
+                feature_list_path=feature_list_path,
+                version_path=version_path,
+                version=FEATURES_VERSION,
+            )
+            p(f"F1={f1:.4f}")
         with timed("Train meta-regressor"):
-            reg_model = train_regressor(X_all, y_reg_all, model_path=model_path_reg)
+            reg_model, mae = fit_meta_regressor(
+                X_all,
+                y_reg_all,
+                feature_cols_meta,
+                model_path=model_path_reg,
+                feature_list_path=feature_list_path,
+                version_path=version_path,
+                version=FEATURES_VERSION,
+            )
+            p(f"MAE={mae:.4f}")
     else:
         with timed("Load meta-classifier"):
-            cls_model = load_model(model_path=model_path_cls)
+            cls_model = joblib.load(model_path_cls, mmap_mode="r")
         with timed("Load meta-regressor"):
-            reg_model = load_regressor(model_path=model_path_reg)
+            reg_model = joblib.load(model_path_reg, mmap_mode="r")
 
     rows_to_save = []
     last_row = full_df.iloc[[-1]]
@@ -133,7 +155,6 @@ def main(train=True):
     pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
     # Base features for the latest row
-
     base_last = last_row[FEATURE_COLS]
 
     step(5, 8, "Predict horizons")
