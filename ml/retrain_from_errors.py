@@ -96,7 +96,7 @@ def retrain_with_error_weights(
     df = get_price_data(symbol, db_path=db_path)
     df = create_features(df)
     df = _prepare_reg_target(df, forward_steps)
-    df = df[df["target_close"].notna()].copy()
+    df = df[df["target_close"].notna()].copy()()
     # 2) backfilled errors
     dfp = _load_backfilled_errors(db_path, symbol)
     if dfp.empty:
