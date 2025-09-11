@@ -14,7 +14,7 @@ from crypto_analyzer.model_manager import atomic_write
 
 from .oob import fit_incremental_forest, halving_random_search
 
-MODEL_PATH = "ml/model.joblib"
+MODEL_PATH = "ml/meta_model_cls.joblib"
 
 
 logger = logging.getLogger(__name__)

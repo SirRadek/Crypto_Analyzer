@@ -82,7 +82,6 @@ FEATURE_COLUMNS = [
     "rv_5m",
     "parkinson12",
     "lob_imbalance_L1",
-    "lob_imbalance_L2",
     "oi_delta_15m",
     "basis_annualized",
     "tod_sin",

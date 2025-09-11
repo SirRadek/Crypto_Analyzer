@@ -11,8 +11,8 @@ from .oob import fit_incremental_forest, halving_random_search
 from .train import _gpu_available
 from crypto_analyzer.model_manager import atomic_write
 
-MODEL_PATH = "ml/model_reg.joblib"
-MAX_MODEL_BYTES = 200 * 1024**3  # 200 GB guard
+MODEL_PATH = "ml/meta_model_reg.joblib"
+MAX_MODEL_BYTES = 100 * 1024**3  # 200 GB guard
 
 
 logger = logging.getLogger(__name__)
