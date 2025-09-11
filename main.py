@@ -1,20 +1,19 @@
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+import joblib
 import pandas as pd
 
-from analysis.feature_engineering import create_features, FEATURE_COLUMNS
 from analysis.compare_predictions import backfill_actuals_and_errors
+from analysis.feature_engineering import FEATURE_COLUMNS, create_features
 from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
-import joblib
-
 from ml.meta import fit_meta_classifier, fit_meta_regressor
 from utils.config import CONFIG
 from utils.helpers import ensure_dir_exists
-from utils.progress import step, timed, p
+from utils.progress import p, step, timed
 
 SYMBOL = CONFIG.symbol
 DB_PATH = CONFIG.db_path
@@ -39,12 +38,10 @@ FEATURES_VERSION = "ext_v1"
 
 
 def _created_at_iso():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
-def _delete_future_predictions(
-    db_path: str, symbol: str, from_ms: int, table_name: str
-) -> int:
+def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_name: str) -> int:
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
@@ -82,9 +79,7 @@ def main(train=True, use_meta_only=True):
 
     step(2, 8, "Loading data from DB")
     with timed("Load"):
-        start_ts = int(
-            (pd.Timestamp.utcnow() - pd.Timedelta(days=5 * 365)).timestamp() * 1000
-        )
+        start_ts = int((pd.Timestamp.utcnow() - pd.Timedelta(days=5 * 365)).timestamp() * 1000)
         df = get_price_data(SYMBOL, start_ts=start_ts, db_path=DB_PATH)
         p(f"  -> rows={len(df)}, cols={len(df.columns)}")
 
@@ -99,16 +94,15 @@ def main(train=True, use_meta_only=True):
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
-    _delete_future_predictions(
-        DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
-    )
+    _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
 
     if not use_meta_only:
-        from pathlib import Path
         import json
+        from pathlib import Path
+
+        from ml.model_utils import match_model_features
         from ml.train import load_model as load_base_model
         from ml.train_regressor import load_regressor as load_base_regressor
-        from ml.model_utils import match_model_features
 
         CLS_MODEL_COUNT = 25
         REG_MODEL_COUNT = 30
@@ -129,18 +123,14 @@ def main(train=True, use_meta_only=True):
 
         def load_accuracy_weights(path: Path, indices):
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
             else:
                 data = {}
             return [float(data.get(str(i), 1.0)) for i in indices]
 
-        cls_paths, cls_indices = list_model_paths(
-            "ml/model_{i}.joblib", CLS_MODEL_COUNT
-        )
-        reg_paths, reg_indices = list_model_paths(
-            "ml/model_reg_{i}.joblib", REG_MODEL_COUNT
-        )
+        cls_paths, cls_indices = list_model_paths("ml/model_{i}.joblib", CLS_MODEL_COUNT)
+        reg_paths, reg_indices = list_model_paths("ml/model_reg_{i}.joblib", REG_MODEL_COUNT)
         cls_weights = load_accuracy_weights(CLS_ACC_PATH, cls_indices)
         reg_weights = load_accuracy_weights(REG_ACC_PATH, reg_indices)
 
@@ -155,13 +145,13 @@ def main(train=True, use_meta_only=True):
     feature_cols_meta = FEATURE_COLS + ["horizon"]
     if not use_meta_only:
         base_feats = train_df[FEATURE_COLS]
-        for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
+        for path, idx, w in zip(cls_paths, cls_indices, cls_weights, strict=False):
             model = load_base_model(model_path=path)
             feats = match_model_features(base_feats, model)
             preds = model.predict_proba(feats)[:, 1] * w
             train_df[f"cls_pred_{idx}"] = preds
             del model
-        for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
+        for path, idx, w in zip(reg_paths, reg_indices, reg_weights, strict=False):
             model = load_base_regressor(model_path=path)
             feats = match_model_features(base_feats, model)
             preds = model.predict(feats) * w
@@ -219,14 +209,12 @@ def main(train=True, use_meta_only=True):
     base_last = last_row[FEATURE_COLS]
     if not use_meta_only:
         last_base_preds = {}
-        for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
+        for path, idx, w in zip(cls_paths, cls_indices, cls_weights, strict=False):
             model = load_base_model(model_path=path)
             feats = match_model_features(base_last, model)
-            last_base_preds[f"cls_pred_{idx}"] = float(
-                model.predict_proba(feats)[:, 1][0] * w
-            )
+            last_base_preds[f"cls_pred_{idx}"] = float(model.predict_proba(feats)[:, 1][0] * w)
             del model
-        for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
+        for path, idx, w in zip(reg_paths, reg_indices, reg_weights, strict=False):
             model = load_base_regressor(model_path=path)
             feats = match_model_features(base_last, model)
             last_base_preds[f"reg_pred_{idx}"] = float(model.predict(feats)[0] * w)
@@ -245,9 +233,7 @@ def main(train=True, use_meta_only=True):
             last_close = float(last_row["close"].iloc[0])
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
-        target_time = pred_time + pd.Timedelta(
-            minutes=horizon * INTERVAL_TO_MIN[INTERVAL]
-        )
+        target_time = pred_time + pd.Timedelta(minutes=horizon * INTERVAL_TO_MIN[INTERVAL])
         targ_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
         row = (

@@ -1,16 +1,28 @@
-﻿name: CI
+name: tests
 on: [push, pull_request]
 jobs:
-  python-ci:
+  tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -U pip
-      - run: pip install -r requirements.txt || true
-      - run: pip install pytest ruff black
-      - run: ruff check .
-      - run: black --check .
+        with: { python-version: "3.11" }
+      - run: pip install -e ".[dev]"
+      - run: pre-commit run -a
       - run: pytest -q
+      - run: mypy .
+      - run: deptry .
+      - run: vulture . --exclude tests --min-confidence 70 || true
+  importtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -e ".[dev]"
+      - run: chmod +x tools/check_import_time.sh
+      - run: ./tools/check_import_time.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: importtime
+          path: ml/importtime.json
