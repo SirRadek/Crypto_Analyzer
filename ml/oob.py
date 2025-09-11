@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any
 
 from sklearn.experimental import enable_halving_search_cv  # noqa: F401
 from sklearn.model_selection import HalvingRandomSearchCV  # type: ignore[attr-defined]
@@ -8,16 +8,16 @@ from sklearn.model_selection import HalvingRandomSearchCV  # type: ignore[attr-d
 def halving_random_search(
     X,
     y,
-    estimator_class: Type[Any],
+    estimator_class: type[Any],
     random_state: int = 42,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return best hyperparameters via a small ``HalvingRandomSearchCV``.
 
     The search spans ``n_estimators``, ``max_depth``, ``max_features``,
     ``min_samples_split`` and ``min_samples_leaf``.
     """
 
-    param_dist: Dict[str, List[Any]] = {
+    param_dist: dict[str, list[Any]] = {
         "max_depth": [None, 10, 20, 30],
         "max_features": ["auto", "sqrt", 0.5],
         "min_samples_split": [2, 5, 10],
@@ -49,7 +49,7 @@ def halving_random_search(
 def fit_incremental_forest(
     X,
     y,
-    estimator_class: Type[Any],
+    estimator_class: type[Any],
     *,
     step: int = 50,
     max_estimators: int = 400,
@@ -57,7 +57,7 @@ def fit_incremental_forest(
     random_state: int = 42,
     log_path: str | None = None,
     **params: Any,
-) -> Tuple[Any, List[float]]:
+) -> tuple[Any, list[float]]:
     """Fit a forest, growing trees until OOB improvement drops below ``tol``.
 
     Parameters
@@ -86,7 +86,7 @@ def fit_incremental_forest(
         random_state=random_state,
         **params,
     )
-    oob_scores: List[float] = []
+    oob_scores: list[float] = []
     while model.n_estimators < max_estimators:
         model.n_estimators += step
         model.fit(X, y)

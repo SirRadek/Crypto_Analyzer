@@ -180,3 +180,20 @@ PY
 
 * Python 3.13
 * [See `requirements.txt`](./requirements.txt)
+
+## Performance notes
+
+* **Lazy imports** keep the cold-start time low by deferring heavy
+  dependencies (pandas, scikit-learn, etc.) until the functions that need
+  them are called.
+* **GPU fallback**: GPU libraries (`cuml`, `cudf`) are imported only when
+  `use_gpu=True` and CUDA is available. Otherwise the code logs a warning
+  and falls back to the CPU implementation without importing those
+  modules.
+* **Thread control**: inference can limit BLAS and OpenMP threads via
+  ``threadpoolctl`` for more predictable performance.
+* **Batching**: large inference jobs should use batch sizes of around
+  200k rows for best throughput.
+* To measure import performance run ``tools/check_import_time.sh``. The
+  JSON flame graph is written to ``ml/importtime.json`` and uploaded as a
+  CI artifact.

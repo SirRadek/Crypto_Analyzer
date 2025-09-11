@@ -1,8 +1,9 @@
-import requests
+import os
 import sqlite3
 import time
-from datetime import datetime, timezone
-import os
+from datetime import UTC, datetime
+
+import requests
 
 # Database location relative to repository root
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "crypto_data.sqlite")
@@ -101,13 +102,13 @@ def import_latest_data():
     row = cur.fetchone()
     conn.close()
     start_ts = row[0] + 1 if row and row[0] is not None else 0
-    end_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+    end_ts = int(datetime.now(UTC).timestamp() * 1000)
     if start_ts >= end_ts:
         print("Database already up to date.")
         return
     curr_ts = start_ts
     print(
-        f"Downloading {SYMBOL}, interval {INTERVAL} from {datetime.fromtimestamp(start_ts/1000, timezone.utc)} to {datetime.fromtimestamp(end_ts/1000, timezone.utc)}"
+        f"Downloading {SYMBOL}, interval {INTERVAL} from {datetime.fromtimestamp(start_ts/1000, UTC)} to {datetime.fromtimestamp(end_ts/1000, UTC)}"
     )
     while curr_ts < end_ts:
         klines = get_klines(SYMBOL, INTERVAL, curr_ts, end_ts)

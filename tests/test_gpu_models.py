@@ -1,18 +1,22 @@
 import os
 import sys
 
-sys.path.append(os.getcwd())  # noqa: E402
+sys.path.append(os.getcwd())
 
-import logging  # noqa: E402
-import pandas as pd  # noqa: E402
-import pytest  # noqa: E402
-from sklearn.datasets import make_classification, make_regression  # noqa: E402
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor  # noqa: E402
+import logging
 
-from ml.train import train_model, _gpu_available as cls_gpu_available  # noqa: E402
-from ml.train_regressor import (  # noqa: E402
-    train_regressor,
+import pandas as pd
+import pytest
+from sklearn.datasets import make_classification, make_regression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
+from ml.train import _gpu_available as cls_gpu_available
+from ml.train import train_model
+from ml.train_regressor import (
     _gpu_available as reg_gpu_available,
+)
+from ml.train_regressor import (
+    train_regressor,
 )
 
 
@@ -44,9 +48,7 @@ def test_regressor_gpu_fallback(monkeypatch, caplog):
     assert any("falling back to CPU" in r.message for r in caplog.records)
 
 
-@pytest.mark.skipif(
-    not cls_gpu_available() or not reg_gpu_available(), reason="CUDA not available"
-)
+@pytest.mark.skipif(not cls_gpu_available() or not reg_gpu_available(), reason="CUDA not available")
 def test_gpu_shapes_equal():
     pytest.importorskip("cuml")
     import cudf  # type: ignore
@@ -69,9 +71,7 @@ def test_gpu_shapes_equal():
         params=dict(n_estimators=10),
         fallback_estimators=(10,),
     )
-    reg_cpu = train_regressor(
-        Xr, yr, params=dict(n_estimators=10), fallback_estimators=(10,)
-    )
+    reg_cpu = train_regressor(Xr, yr, params=dict(n_estimators=10), fallback_estimators=(10,))
     preds_gpu_reg = reg_gpu.predict(cudf.from_pandas(Xr.astype("float32")))
     preds_cpu_reg = reg_cpu.predict(Xr)
     if hasattr(preds_gpu_reg, "to_numpy"):

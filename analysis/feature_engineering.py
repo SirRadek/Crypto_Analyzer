@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from .indicators import calculate_sma, calculate_ema, calculate_rsi
+from .indicators import calculate_ema, calculate_rsi, calculate_sma
 
 
 def create_features(df):
@@ -23,9 +23,9 @@ def create_features(df):
     trades = df["number_of_trades"].replace(0, np.nan)
     df["avg_trade_size"] = vol / trades
     df["d_volume"] = vol.diff()
-    df["z_trades"] = (
-        df["number_of_trades"] - df["number_of_trades"].rolling(36).mean()
-    ) / df["number_of_trades"].rolling(36).std()
+    df["z_trades"] = (df["number_of_trades"] - df["number_of_trades"].rolling(36).mean()) / df[
+        "number_of_trades"
+    ].rolling(36).std()
     df["z_volume"] = (vol - vol.rolling(36).mean()) / vol.rolling(36).std()
 
     # --- VWAP & price relationship -------------------------------------------

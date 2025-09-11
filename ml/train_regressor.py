@@ -1,11 +1,18 @@
-import joblib
+import logging
 import os
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any
 
+import joblib
 from sklearn.ensemble import RandomForestRegressor
+
+from .oob import fit_incremental_forest, halving_random_search
+from .train import _gpu_available
 
 MODEL_PATH = "ml/model_reg.joblib"
 MAX_MODEL_BYTES = 200 * 1024**3  # 200 GB guard
+
+
+logger = logging.getLogger(__name__)
 
 
 def _fits_size(path: str, max_bytes: int = MAX_MODEL_BYTES) -> bool:
@@ -15,7 +22,7 @@ def _fits_size(path: str, max_bytes: int = MAX_MODEL_BYTES) -> bool:
 try:
     from numpy.core._exceptions import _ArrayMemoryError
 
-    _MEM_ERRORS: Tuple[Type[BaseException], ...] = (MemoryError, _ArrayMemoryError)
+    _MEM_ERRORS: tuple[type[BaseException], ...] = (MemoryError, _ArrayMemoryError)
 except Exception:  # pragma: no cover - numpy versions <1.20
     _MEM_ERRORS = (MemoryError,)
 
@@ -37,22 +44,59 @@ def train_regressor(
     y,
     model_path: str = MODEL_PATH,
     sample_weight=None,
-    params: Optional[Dict[str, Any]] = None,
-    fallback_estimators: Tuple[int, ...] = (600, 400, 200, 100),
-    use_xgboost: bool = False,
+    params: dict[str, Any] | None = None,
+    fallback_estimators: tuple[int, ...] = (600, 400, 200, 100),
+    use_gpu: bool = False,
+    tune: bool = False,
+    oob_tol: float | None = None,
+    oob_step: int = 50,
+    max_estimators: int = 400,
+    log_path: str = "ml/oob_reg.json",
 ):
     """
     Train a regressor and ensure the saved model file <= 200 GB.
     Will try a sequence of n_estimators (fallback_estimators) until size fits.
-    """
-    if use_xgboost:
-        try:
-            from xgboost import XGBRegressor
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise ImportError("xgboost is required for GPU training") from exc
 
-        model = XGBRegressor(tree_method="gpu_hist", predictor="gpu_predictor")
-        model.fit(X, y, sample_weight=sample_weight)
+    Parameters
+    ----------
+    use_gpu : bool
+        If ``True`` and CUDA with ``cuml`` is available, train a GPU RandomForest.
+        Otherwise, a CPU-based ``RandomForestRegressor`` is used.
+    """
+    if use_gpu:
+        if _gpu_available():
+            try:  # pragma: no cover - optional dependency
+                import cudf  # type: ignore
+                from cuml.ensemble import RandomForestRegressor as cuRF  # type: ignore
+            except Exception:  # pragma: no cover - optional dependency
+                logger.warning("cuml not available, falling back to CPU")
+            else:
+                params_gpu = params or dict(n_estimators=fallback_estimators[0], random_state=42)
+                model = cuRF(**params_gpu)
+                X_f = cudf.from_pandas(X.astype("float32"))
+                y_f = cudf.Series(y.astype("float32"))
+                model.fit(X_f, y_f, sample_weight=sample_weight)
+                joblib.dump(model, model_path, compress=False)
+                return model
+        else:
+            logger.warning("CUDA not available, falling back to CPU")
+
+    if tune:
+        tuned = halving_random_search(X, y, RandomForestRegressor, random_state=42)
+        params = {**(params or {}), **tuned}
+
+    if oob_tol is not None:
+        model, oob_scores = fit_incremental_forest(
+            X,
+            y,
+            RandomForestRegressor,
+            step=oob_step,
+            max_estimators=max_estimators,
+            tol=oob_tol,
+            random_state=42,
+            log_path=log_path,
+            **(params or {}),
+        )
         joblib.dump(model, model_path, compress=False)
         return model
 
@@ -69,27 +113,22 @@ def train_regressor(
         params["n_estimators"] = n
         model = RandomForestRegressor(**params)
         model.fit(X, y, sample_weight=sample_weight)
-        # Save uncompressed to allow memory-mapped loading later
         joblib.dump(model, model_path, compress=False)
 
         size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
         size_mb = os.path.getsize(model_path) / (1024**2)
-        print(
-            f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)"
-        )
+        print(f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)")
         if size_ok:
             return model
         else:
-            print(
-                f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees..."
-            )
+            print(f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees...")
 
     raise RuntimeError(
         "Could not save model under the size limit; try reducing complexity further."
     )
 
 
-def load_regressor(model_path: str = MODEL_PATH, mmap_mode: Optional[str] = None):
+def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
     """Load a previously trained regressor with graceful OOM handling."""
 
     if not os.path.exists(model_path):

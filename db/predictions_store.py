@@ -46,9 +46,7 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
         if col not in cols:
             c.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
     # useful indexes
-    c.execute(
-        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name}(symbol)"
-    )
+    c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name}(symbol)")
     c.execute(
         f"CREATE INDEX IF NOT EXISTS idx_{table_name}_target_time ON {table_name}(target_time_ms)"
     )

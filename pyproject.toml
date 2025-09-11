@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-analyzer"
+version = "0.1.0"
+description = "Utilities for crypto market analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas~=2.3.2",
+    "numpy~=2.3.2",
+    "scikit-learn~=1.7.1",
+    "requests~=2.32.5",
+    "joblib~=1.5.1",
+    "PyYAML~=6.0.2",
+    "tqdm~=4.67.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black==24.4.2",
+    "ruff>=0.6.8",
+    "mypy==1.11.1",
+    "pre-commit",
+    "vulture",
+    "deptry",
+    "tuna",
+    "threadpoolctl",
+    "pandas-stubs",
+    "types-requests",
+    "joblib-stubs",
+    "scikit-learn-stubs",
+    "types-tqdm",
+    "types-PyYAML",
+]
+gpu = ["cuml", "cudf"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "crypto_analyzer*",
+    "analysis*",
+    "ml*",
+    "prediction*",
+    "utils*",
+    "db*",
+]
+
+[tool.deptry]
+
+[tool.deptry.per_rule_ignores]
+DEP001 = ["cupy", "psutil"]
+DEP002 = [
+    "black",
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "vulture",
+    "deptry",
+    "tuna",
+    "threadpoolctl",
+    "pandas-stubs",
+    "types-requests",
+    "joblib-stubs",
+    "scikit-learn-stubs",
+    "types-tqdm",
+    "types-PyYAML",
+]
+
+[tool.ruff]
+select = ["E","W","F","I","UP","B","C4","SIM","NPY","RUF100"]
+extend-select = ["F401","F403"]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_return_any = true
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

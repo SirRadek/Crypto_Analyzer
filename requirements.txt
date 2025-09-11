@@ -1,21 +1,7 @@
-python-dotenv
 pandas~=2.3.2
 numpy~=2.3.2
 scikit-learn~=1.7.1
-matplotlib
-ta
-# PyTorch:
-torch
-
 requests~=2.32.5
 joblib~=1.5.1
 PyYAML~=6.0.2
 tqdm~=4.67.1
-
-# Type stubs for static analysis
-pandas-stubs
-types-requests
-joblib-stubs
-scikit-learn-stubs
-types-tqdm
-types-PyYAML
