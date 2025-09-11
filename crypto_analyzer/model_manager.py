@@ -15,8 +15,8 @@ def _ensure_models_dir(dir: Path) -> Path:
     models_dir = MODELS_ROOT.resolve()
     if not resolved.is_dir():
         raise ValueError(f"{dir} is not a directory")
-    if resolved != models_dir:
-        raise ValueError("dir must be project_root/models; subdirectories are not allowed")
+    if not resolved.is_relative_to(models_dir):
+        raise ValueError("dir must be inside project_root/models")
     return resolved
 
 
@@ -28,7 +28,7 @@ def list_artifacts(stem: str, dir: Path, patterns: Sequence[str] = ("*.joblib", 
     stem:
         Prefix of the file name without extension.
     dir:
-        Directory to search. Must be exactly ``PROJECT_ROOT / "models"``.
+        Directory to search. Must reside under ``PROJECT_ROOT/models``.
     patterns:
         Glob patterns of file types to consider.
     """
@@ -81,7 +81,7 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     action.add_argument("--list", action="store_true", help="List artifacts")
     action.add_argument("--purge", action="store_true", help="Purge artifacts")
     parser.add_argument("--stem", required=True, help="File name stem to match")
-    parser.add_argument("--dir", type=Path, required=True, help="Path to project models/ directory")
+    parser.add_argument("--dir", type=Path, required=True, help="Directory under models/")
     confirm = parser.add_mutually_exclusive_group()
     confirm.add_argument("--dry-run", action="store_true", help="Do not delete anything")
     confirm.add_argument("--confirm", action="store_true", help="Actually delete files")
@@ -100,7 +100,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     files = purge_artifacts(args.stem, args.dir, confirm=args.confirm)
     for f in files:
         print(f)
-    if args.dry_run:
+    if args.dry_run or not args.confirm:
         print("Dry run - no files deleted")
     return 0
 
