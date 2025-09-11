@@ -1,13 +1,14 @@
 import json
 import logging
 import os
-from typing import Any, Dict, cast
+from typing import Any, cast
 
 import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 
 from ml.model_utils import evaluate_model
+
 from .oob import fit_incremental_forest, halving_random_search
 
 MODEL_PATH = "ml/model.joblib"
@@ -85,11 +86,9 @@ def train_model(
         else:
             logger.warning("CUDA not available, falling back to CPU")
 
-    params: Dict[str, Any] = {}
+    params: dict[str, Any] = {}
     if tune:
-        params = halving_random_search(
-            X_train, y_train, RandomForestClassifier, random_state
-        )
+        params = halving_random_search(X_train, y_train, RandomForestClassifier, random_state)
 
     if oob_tol is not None:
         clf, oob_scores = fit_incremental_forest(
@@ -114,9 +113,7 @@ def train_model(
         )
         clf.fit(X_train, y_train)
         with open(log_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {"params": clf.get_params(), "oob_scores": [float(clf.oob_score_)]}, f
-            )
+            json.dump({"params": clf.get_params(), "oob_scores": [float(clf.oob_score_)]}, f)
 
     # Evaluate on validation data
     evaluate_model(clf, X_val, y_val)

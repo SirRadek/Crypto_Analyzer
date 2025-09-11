@@ -15,7 +15,7 @@ def load_yaml_config(config_path):
     """
     Loads configuration from a YAML file.
     """
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         return yaml.safe_load(f)
 
 

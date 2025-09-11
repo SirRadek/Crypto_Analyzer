@@ -1,22 +1,22 @@
 import os
 import sys
 
-sys.path.append(os.getcwd())  # noqa: E402
+sys.path.append(os.getcwd())
 
-import json  # noqa: E402
-from pathlib import Path  # noqa: E402
-from typing import cast  # noqa: E402
+import json
+from pathlib import Path
+from typing import cast
 
-import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
-from sklearn.datasets import make_classification  # noqa: E402
-from sklearn.ensemble import RandomForestClassifier  # noqa: E402
-from sklearn.metrics import brier_score_loss  # noqa: E402
+import numpy as np
+import pandas as pd
+from sklearn.datasets import make_classification
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import brier_score_loss
 
-from analysis.feature_engineering import FEATURE_COLUMNS, create_features  # noqa: E402
-from main import prepare_targets  # noqa: E402
-from ml.meta import fit_meta_classifier, fit_meta_regressor, predict_meta  # noqa: E402
-from ml.predict import predict_ml  # noqa: E402
+from analysis.feature_engineering import FEATURE_COLUMNS, create_features
+from main import prepare_targets
+from ml.meta import fit_meta_classifier, fit_meta_regressor, predict_meta
+from ml.predict import predict_ml
 
 
 def _synthetic_prices(n: int = 200) -> pd.DataFrame:
@@ -72,9 +72,7 @@ def test_classifier_deterministic_oob(tmp_path: Path) -> None:
     )
     assert np.isclose(f1_1, f1_2)
     assert all(c.estimator.oob_score_ > 0 for c in model1.calibrated_classifiers_)
-    preds = predict_meta(
-        train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "m1.joblib")
-    )
+    preds = predict_meta(train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "m1.joblib"))
     assert isinstance(preds, np.ndarray)
     assert preds.shape[0] == len(train_df)
 
@@ -110,9 +108,7 @@ def test_regressor_deterministic_oob(tmp_path: Path) -> None:
     assert isinstance(mae_1, float) and isinstance(mae_2, float)
     assert np.isclose(mae_1, mae_2)
     assert model1.oob_score_ > 0
-    preds = predict_meta(
-        train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "r1.joblib")
-    )
+    preds = predict_meta(train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "r1.joblib"))
     assert isinstance(preds, np.ndarray)
     assert preds.shape[0] == len(train_df)
 
@@ -199,9 +195,7 @@ def test_integration_small_sample(tmp_path: Path) -> None:
         model_path=str(tmp_path / "meta_cls.joblib"),
         proba=True,
     )
-    prices = predict_meta(
-        train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "meta_reg.joblib")
-    )
+    prices = predict_meta(train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "meta_reg.joblib"))
     assert isinstance(probas, np.ndarray)
     assert isinstance(prices, np.ndarray)
     assert probas.shape[0] == prices.shape[0] == len(train_df)

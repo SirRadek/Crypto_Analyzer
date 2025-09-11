@@ -5,6 +5,8 @@ from ml.predict import predict_ml
 def combine_predictions(
     df,
     feature_cols,
+    *,
+    model_paths=None,
     method="majority",
     use_meta_only=True,
     usage_path="ml/model_usage.json",
@@ -44,9 +46,7 @@ def combine_predictions(
     else:
         from ml.predict import predict_weighted
 
-        ml_preds = predict_weighted(
-            df, feature_cols, model_paths, usage_path=usage_path
-        )
+        ml_preds = predict_weighted(df, feature_cols, model_paths, usage_path=usage_path)
 
     if method == "majority":
         final_pred = ((rule_preds + ml_preds) > 0).astype(int)

@@ -1,7 +1,7 @@
 import glob
 import os
-from joblib import dump, load
 
+from joblib import dump, load
 
 for path in glob.glob(os.path.join("*.pkl")):
     model = load(path)  # načti do RAM

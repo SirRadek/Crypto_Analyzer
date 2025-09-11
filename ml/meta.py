@@ -1,14 +1,15 @@
-import json
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Tuple, Union, Literal
+from __future__ import annotations
 
-import joblib
-import numpy as np
-import pandas as pd
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import f1_score, mean_absolute_error
-from sklearn.model_selection import TimeSeriesSplit
+import json
+from collections.abc import Callable, Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:  # pragma: no cover
+    import numpy as np
+    import pandas as pd
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.ensemble import RandomForestRegressor
 
 
 def _save_metadata(
@@ -36,16 +37,21 @@ def fit_meta_classifier(
     n_estimators: int = 200,
     threshold_path: str = "ml/threshold.json",
     threshold_func: Callable[[np.ndarray, pd.Series], float] | None = None,
-) -> Tuple[CalibratedClassifierCV, float]:
+) -> tuple[CalibratedClassifierCV, float]:
     """Train and persist the meta classification model with calibration.
 
     Returns the fitted calibrated model and mean F1 score from ``TimeSeriesSplit``.
     ``threshold_path`` stores a JSON file with the optimal decision threshold.
     """
 
-    method: Literal["isotonic", "sigmoid"] = (
-        "isotonic" if len(y) > 50_000 else "sigmoid"
-    )
+    import joblib
+    import numpy as np
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import f1_score
+    from sklearn.model_selection import TimeSeriesSplit
+
+    method: Literal["isotonic", "sigmoid"] = "isotonic" if len(y) > 50_000 else "sigmoid"
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     scores: list[float] = []
@@ -90,7 +96,7 @@ def fit_meta_classifier(
 
 def fit_meta_regressor(
     X: pd.DataFrame,
-    y: Union[pd.Series, pd.DataFrame],
+    y: pd.Series | pd.DataFrame,
     feature_cols: Iterable[str],
     *,
     model_path: str = "ml/meta_model_reg.joblib",
@@ -102,7 +108,7 @@ def fit_meta_regressor(
     random_state: int = 42,
     n_estimators: int = 200,
     multi_output: bool = False,
-) -> Tuple[RandomForestRegressor, Union[float, Dict[int, float]]]:
+) -> tuple[RandomForestRegressor, float | dict[int, float]]:
     """Train and persist the meta regression model.
 
     Parameters
@@ -122,6 +128,12 @@ def fit_meta_regressor(
         Mean MAE or per-horizon MAE depending on ``multi_output``.
     """
 
+    import joblib
+    import numpy as np
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.metrics import mean_absolute_error
+    from sklearn.model_selection import TimeSeriesSplit
+
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     maes: list[Any] = []
     for train_idx, test_idx in tscv.split(X):
@@ -135,9 +147,7 @@ def fit_meta_regressor(
         reg.fit(X.iloc[train_idx], y.iloc[train_idx])
         pred = reg.predict(X.iloc[test_idx])
         if multi_output:
-            maes.append(
-                mean_absolute_error(y.iloc[test_idx], pred, multioutput="raw_values")
-            )
+            maes.append(mean_absolute_error(y.iloc[test_idx], pred, multioutput="raw_values"))
         else:
             maes.append(float(mean_absolute_error(y.iloc[test_idx], pred)))
 
@@ -170,12 +180,12 @@ def predict_meta(
     return_pi: bool = False,
     quantiles: Iterable[float] = (0.05, 0.95),
     log_pi_width: bool = False,
-) -> Union[
-    np.ndarray,
-    Dict[int, np.ndarray],
-    Tuple[np.ndarray, Dict[float, np.ndarray]],
-    Tuple[Dict[int, np.ndarray], Dict[float, Dict[int, np.ndarray]]],
-]:
+) -> (
+    np.ndarray
+    | dict[int, np.ndarray]
+    | tuple[np.ndarray, dict[float, np.ndarray]]
+    | tuple[dict[int, np.ndarray], dict[float, dict[int, np.ndarray]]]
+):
     """Predict using a stored meta model with batching and memory mapping.
 
     Parameters
@@ -194,10 +204,11 @@ def predict_meta(
         of the extreme interval.
     """
 
+    import joblib
+    import numpy as np
+
     if proba and (multi_output or return_pi):
-        raise ValueError(
-            "`proba` cannot be combined with `multi_output` or `return_pi`"
-        )
+        raise ValueError("`proba` cannot be combined with `multi_output` or `return_pi`")
 
     model = joblib.load(model_path, mmap_mode="r")
     X = df[list(feature_cols)]
@@ -206,7 +217,7 @@ def predict_meta(
         if not hasattr(model, "estimators_"):
             raise ValueError("Model does not support prediction intervals")
         preds: list[np.ndarray] = []
-        q_preds: Dict[float, list[np.ndarray]] = {q: [] for q in quantiles}
+        q_preds: dict[float, list[np.ndarray]] = {q: [] for q in quantiles}
         ests = model.estimators_
         qs = list(quantiles)
         for start in range(0, len(X), batch_size):
@@ -224,7 +235,7 @@ def predict_meta(
         q_arrs = {q: np.concatenate(v, axis=0) for q, v in q_preds.items()}
         if multi_output:
             pred_dict = {i + 1: pred_arr[:, i] for i in range(pred_arr.shape[1])}
-            q_dict: Dict[float, Dict[int, np.ndarray]] = {}
+            q_dict: dict[float, dict[int, np.ndarray]] = {}
             for q, arr in q_arrs.items():
                 q_dict[q] = {i + 1: arr[:, i] for i in range(arr.shape[1])}
             return pred_dict, q_dict

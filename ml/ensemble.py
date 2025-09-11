@@ -11,8 +11,8 @@ reported so they can be considered for removal.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, Tuple, Type
 
 import joblib
 import numpy as np
@@ -21,7 +21,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 try:
     from numpy.core._exceptions import _ArrayMemoryError
 
-    _MEM_ERRORS: Tuple[Type[BaseException], ...] = (MemoryError, _ArrayMemoryError)
+    _MEM_ERRORS: tuple[type[BaseException], ...] = (MemoryError, _ArrayMemoryError)
 except Exception:  # pragma: no cover
     _MEM_ERRORS = (MemoryError,)
 
@@ -49,15 +49,15 @@ META_REG_PATH = BASE_DIR / "meta_regressor.pkl"
 # ---------------------------------------------------------------------------
 
 
-def load_usage_counts(path: Path = USAGE_PATH) -> Dict[str, int]:
+def load_usage_counts(path: Path = USAGE_PATH) -> dict[str, int]:
     """Return mapping of model path to usage counts."""
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
-def save_usage_counts(counts: Dict[str, int], path: Path = USAGE_PATH) -> None:
+def save_usage_counts(counts: dict[str, int], path: Path = USAGE_PATH) -> None:
     """Persist usage counts to disk."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(counts, f, indent=2)
@@ -71,7 +71,7 @@ def increment_usage(model_names: Iterable[str], path: Path = USAGE_PATH) -> None
     save_usage_counts(counts, path)
 
 
-def load_performance(path: Path = PERF_PATH) -> Dict[str, float]:
+def load_performance(path: Path = PERF_PATH) -> dict[str, float]:
     """Load validation accuracy scores for models.
 
     The file is expected to contain a JSON mapping of model path to its
@@ -79,7 +79,7 @@ def load_performance(path: Path = PERF_PATH) -> Dict[str, float]:
     """
 
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
@@ -90,10 +90,10 @@ def load_performance(path: Path = PERF_PATH) -> Dict[str, float]:
 
 
 def compute_weights(
-    usage_counts: Dict[str, int],
-    performance: Dict[str, float],
+    usage_counts: dict[str, int],
+    performance: dict[str, float],
     model_names: Iterable[str],
-) -> Tuple[np.ndarray, list]:
+) -> tuple[np.ndarray, list]:
     """Return normalized weights and list of zero-weight models.
 
     The weight for each model is defined as
@@ -122,7 +122,7 @@ def compute_weights(
     scores = np.array([performance.get(n, 0) for n in names], dtype=float)
     weights = counts * scores
 
-    zero_weight = [n for n, w in zip(names, weights) if w == 0]
+    zero_weight = [n for n, w in zip(names, weights, strict=False) if w == 0]
     if weights.sum() == 0:
         weights = np.ones_like(weights)
     return weights / weights.sum(), zero_weight
@@ -152,7 +152,7 @@ def predict_weighted(
     weights, zero_weight = compute_weights(usage_counts, performance, names)
     X = df[feature_cols]
     preds = np.zeros(len(df))
-    for path, w in zip(names, weights):
+    for path, w in zip(names, weights, strict=False):
         model = _safe_load(path)
         preds += model.predict(X) * w
         del model
@@ -172,7 +172,7 @@ def _stack_features(df, feature_cols, horizon_col, model_paths, weights):
 
     X_base = df[feature_cols]
     X_meta = df[feature_cols + [horizon_col]].copy()
-    for path, w in zip(model_paths, weights):
+    for path, w in zip(model_paths, weights, strict=False):
         model = _safe_load(path)
         preds = model.predict(X_base)
         X_meta[path] = preds * w

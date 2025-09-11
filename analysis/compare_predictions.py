@@ -24,9 +24,7 @@ def backfill_actuals_and_errors(
         params=(symbol,),
     )
 
-    merged = preds.merge(
-        actuals, left_on="target_time_ms", right_on="ts_ms", how="left"
-    )
+    merged = preds.merge(actuals, left_on="target_time_ms", right_on="ts_ms", how="left")
     merged.rename(columns={"close": "y_true"}, inplace=True)
 
     cur = conn.cursor()
