@@ -137,13 +137,19 @@ def fit_meta_regressor(
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     maes: list[Any] = []
     for train_idx, test_idx in tscv.split(X):
-        reg = RandomForestRegressor(
+        base_reg = RandomForestRegressor(
             n_estimators=n_estimators,
             oob_score=True,
             warm_start=True,
             n_jobs=-1,
             random_state=random_state,
         )
+        if multi_output:
+            from sklearn.multioutput import MultiOutputRegressor
+
+            reg = MultiOutputRegressor(base_reg)
+        else:
+            reg = base_reg
         reg.fit(X.iloc[train_idx], y.iloc[train_idx])
         pred = reg.predict(X.iloc[test_idx])
         if multi_output:
@@ -151,14 +157,25 @@ def fit_meta_regressor(
         else:
             maes.append(float(mean_absolute_error(y.iloc[test_idx], pred)))
 
-    final_model = RandomForestRegressor(
+    base_final = RandomForestRegressor(
         n_estimators=n_estimators,
         oob_score=True,
         warm_start=True,
         n_jobs=-1,
         random_state=random_state,
     )
-    final_model.fit(X, y)
+    if multi_output:
+        from sklearn.multioutput import MultiOutputRegressor
+
+        final_model = MultiOutputRegressor(base_final)
+        final_model.fit(X, y)
+        # Expose a single oob_score_ like the single-output model
+        final_model.oob_score_ = float(
+            np.mean([est.oob_score_ for est in final_model.estimators_])
+        )
+    else:
+        final_model = base_final
+        final_model.fit(X, y)
     joblib.dump(final_model, model_path)
     _save_metadata(feature_cols, version, feature_list_path, version_path)
 
