@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+from io import BytesIO
+from pathlib import Path
 from typing import Any, cast
 
 import joblib
@@ -8,6 +10,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 
 from ml.model_utils import evaluate_model
+from crypto_analyzer.model_manager import atomic_write
 
 from .oob import fit_incremental_forest, halving_random_search
 
@@ -81,7 +84,9 @@ def train_model(
                 clf.fit(X_train_f, y_train_f)
                 X_val_f = cudf.from_pandas(X_val.astype("float32"))
                 evaluate_model(clf, X_val_f, cudf.Series(y_val.astype("float32")))
-                joblib.dump(clf, model_path)
+                buffer = BytesIO()
+                joblib.dump(clf, buffer)
+                atomic_write(Path(model_path), buffer.getvalue())
                 return clf
         else:
             logger.warning("CUDA not available, falling back to CPU")
@@ -112,13 +117,15 @@ def train_model(
             **params,
         )
         clf.fit(X_train, y_train)
-        with open(log_path, "w", encoding="utf-8") as f:
-            json.dump({"params": clf.get_params(), "oob_scores": [float(clf.oob_score_)]}, f)
+        log_bytes = json.dumps({"params": clf.get_params(), "oob_scores": [float(clf.oob_score_)]}).encode("utf-8")
+        atomic_write(Path(log_path), log_bytes)
 
     # Evaluate on validation data
     evaluate_model(clf, X_val, y_val)
 
-    joblib.dump(clf, model_path)
+    buffer = BytesIO()
+    joblib.dump(clf, buffer)
+    atomic_write(Path(model_path), buffer.getvalue())
     print(f"Model saved to {model_path}")
     return clf
 
