@@ -29,6 +29,7 @@ def list_artifacts(stem: str, dir: Path, patterns: Sequence[str] = ("*.joblib", 
         Prefix of the file name without extension.
     dir:
         Directory to search. Must be exactly ``PROJECT_ROOT / "models"``.
+
     patterns:
         Glob patterns of file types to consider.
     """
