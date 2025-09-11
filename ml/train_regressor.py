@@ -1,5 +1,7 @@
 import logging
 import os
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import joblib
@@ -7,6 +9,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 from .oob import fit_incremental_forest, halving_random_search
 from .train import _gpu_available
+from crypto_analyzer.model_manager import atomic_write
 
 MODEL_PATH = "ml/model_reg.joblib"
 MAX_MODEL_BYTES = 200 * 1024**3  # 200 GB guard
@@ -76,7 +79,9 @@ def train_regressor(
                 X_f = cudf.from_pandas(X.astype("float32"))
                 y_f = cudf.Series(y.astype("float32"))
                 model.fit(X_f, y_f, sample_weight=sample_weight)
-                joblib.dump(model, model_path, compress=False)
+                buffer = BytesIO()
+                joblib.dump(model, buffer, compress=False)
+                atomic_write(Path(model_path), buffer.getvalue())
                 return model
         else:
             logger.warning("CUDA not available, falling back to CPU")
@@ -97,7 +102,9 @@ def train_regressor(
             log_path=log_path,
             **(params or {}),
         )
-        joblib.dump(model, model_path, compress=False)
+        buffer = BytesIO()
+        joblib.dump(model, buffer, compress=False)
+        atomic_write(Path(model_path), buffer.getvalue())
         return model
 
     if params is None:
@@ -113,7 +120,9 @@ def train_regressor(
         params["n_estimators"] = n
         model = RandomForestRegressor(**params)
         model.fit(X, y, sample_weight=sample_weight)
-        joblib.dump(model, model_path, compress=False)
+        buffer = BytesIO()
+        joblib.dump(model, buffer, compress=False)
+        atomic_write(Path(model_path), buffer.getvalue())
 
         size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
         size_mb = os.path.getsize(model_path) / (1024**2)
@@ -145,3 +154,90 @@ def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
             print("Memory low; retrying regressor load with mmap")
             return joblib.load(model_path, mmap_mode="r")
         raise
+
+
+# ---------------------------------------------------------------------------
+# CLI helpers
+# ---------------------------------------------------------------------------
+
+
+import argparse
+import json
+import traceback
+from datetime import datetime
+from typing import Iterable
+
+from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Train regressor")
+    period = parser.add_mutually_exclusive_group()
+    period.add_argument("--train-window")
+    period.add_argument("--train-start")
+    parser.add_argument("--train-end")
+    parser.add_argument("--horizon")
+    parser.add_argument("--step")
+    eval_group = parser.add_mutually_exclusive_group()
+    eval_group.add_argument("--eval-split")
+    eval_group.add_argument("--eval-frac", type=float)
+    parser.add_argument("--reset-metadata", action="store_true")
+    return parser
+
+
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.train_start and not args.train_end:
+        parser.error("--train-start requires --train-end")
+    if args.train_end and not args.train_start:
+        parser.error("--train-end requires --train-start")
+    if args.train_window and (args.train_start or args.train_end):
+        parser.error("--train-window is mutually exclusive with --train-start/--train-end")
+    return args
+
+
+def _reset_metadata() -> None:
+    MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+    for name in ["model_usage.json", "model_performance.json"]:
+        path = MODELS_ROOT / name
+        atomic_write(path, b"{}")
+        json.loads(path.read_text())
+
+
+def _log_run(config: dict[str, object]) -> None:
+    runs_dir = PROJECT_ROOT / "logs" / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    data = json.dumps({"config": config}, indent=2).encode("utf-8")
+    atomic_write(runs_dir / f"run_{ts}.json", data)
+
+
+def _log_failure(stem: str, exc: BaseException) -> None:
+    fails = PROJECT_ROOT / "logs" / "failures.jsonl"
+    fails.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "stem": stem,
+        "exc_type": type(exc).__name__,
+        "message": str(exc),
+        "hash": hash(traceback.format_exc()),
+    }
+    with fails.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.reset_metadata:
+        _reset_metadata()
+    try:
+        _log_run(vars(args))
+    except Exception as exc:  # pragma: no cover
+        _log_failure("regressor", exc)
+        raise
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

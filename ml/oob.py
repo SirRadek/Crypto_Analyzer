@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from typing import Any
 
 from sklearn.experimental import enable_halving_search_cv  # noqa: F401
@@ -95,7 +96,11 @@ def fit_incremental_forest(
             break
 
     if log_path:
-        with open(log_path, "w", encoding="utf-8") as f:
-            json.dump({"params": model.get_params(), "oob_scores": oob_scores}, f)
+        data = json.dumps({"params": model.get_params(), "oob_scores": oob_scores}).encode(
+            "utf-8"
+        )
+        from crypto_analyzer.model_manager import atomic_write
+
+        atomic_write(Path(log_path), data)
 
     return model, oob_scores
