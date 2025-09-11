@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from io import BytesIO
 from pathlib import Path
 
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from crypto_analyzer.model_manager import atomic_write
 
 try:
     from numpy.core._exceptions import _ArrayMemoryError
@@ -58,9 +60,9 @@ def load_usage_counts(path: Path = USAGE_PATH) -> dict[str, int]:
 
 
 def save_usage_counts(counts: dict[str, int], path: Path = USAGE_PATH) -> None:
-    """Persist usage counts to disk."""
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(counts, f, indent=2)
+    """Persist usage counts to disk atomically."""
+    data = json.dumps(counts, indent=2).encode("utf-8")
+    atomic_write(path, data)
 
 
 def increment_usage(model_names: Iterable[str], path: Path = USAGE_PATH) -> None:
@@ -200,7 +202,9 @@ def train_meta_classifier(
     y = df[target_col]
     meta = RandomForestClassifier(n_estimators=200, random_state=42)
     meta.fit(X_meta, y)
-    joblib.dump(meta, meta_model_path)
+    buffer = BytesIO()
+    joblib.dump(meta, buffer)
+    atomic_write(meta_model_path, buffer.getvalue())
     if zero_weight:
         print(f"Models with zero weight (consider removing): {zero_weight}")
     return meta
@@ -226,7 +230,9 @@ def train_meta_regressor(
     y = df[target_col]
     meta = RandomForestRegressor(n_estimators=200, random_state=42)
     meta.fit(X_meta, y)
-    joblib.dump(meta, meta_model_path)
+    buffer = BytesIO()
+    joblib.dump(meta, buffer)
+    atomic_write(meta_model_path, buffer.getvalue())
     if zero_weight:
         print(f"Models with zero weight (consider removing): {zero_weight}")
     return meta
