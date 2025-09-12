@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 
 # Only a minimal subset of indicators is required for the Core-18 feature set.
 # Keeping the imports explicit makes the dependency surface obvious and helps
@@ -67,6 +66,15 @@ def create_features(df):
     df["tod_cos"] = np.cos(2 * np.pi * minute / 1440)
 
     df = df.fillna(0)
+
+    # --- Targets -------------------------------------------------------------
+    horizon = 24  # 120 minutes at 5-minute bars
+    df["delta_log_120m"] = np.log(df["close"].shift(-horizon) / df["close"])
+    df["delta_lin_120m"] = df["close"].shift(-horizon) - df["close"]
+
+    # Downcast all float columns to float32 to save memory
+    float_cols = df.select_dtypes(include="float64").columns
+    df[float_cols] = df[float_cols].astype(np.float32)
 
     return df
 

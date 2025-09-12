@@ -28,7 +28,7 @@ def timestamp_to_datetime(ts):
     return datetime.fromtimestamp(ts / 1000.0)
 
 
-def set_cpu_limit(cores: int) -> 20:
+def set_cpu_limit(cores: int) -> None:
     """Limit the process to ``cores`` CPU cores if possible.
 
     If ``psutil`` or CPU affinity is not available, the function silently
