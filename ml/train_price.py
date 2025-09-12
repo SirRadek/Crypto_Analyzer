@@ -31,6 +31,27 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
+def _resolve_feature_names(cfg_or_list: Any) -> list[str]:
+    """
+    Accept either:
+      - TrainConfig with features.path (JSON list of columns), or
+      - sequence of feature names (list/tuple/pd.Index).
+    """
+    if isinstance(cfg_or_list, (list, tuple)):
+        return [str(c) for c in cfg_or_list]
+    try:
+        import pandas as _pd  # lazy
+        if isinstance(cfg_or_list, _pd.Index):
+            return [str(c) for c in list(cfg_or_list)]
+    except Exception:
+        pass
+    # Assume TrainConfig-like with .features.path
+    path = Path(cfg_or_list.features.path)
+    with open(path, encoding="utf-8") as f:
+        names = json.load(f)
+    if not isinstance(names, list):
+        raise ValueError("feature list JSON must be a list[str]")
+    return [str(x) for x in names]
 
 def _to_f32(arr: Any) -> np.ndarray:
     """Return a float32 numpy array, densifying sparse inputs if needed."""
@@ -66,12 +87,27 @@ def _validate_features(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFram
 
 
 def train_price(
-    df: pd.DataFrame, config: TrainConfig, outdir: str | Path
+    df: pd.DataFrame, config: TrainConfig | list[str], outdir: str | Path
 ) -> tuple[dict[str, float], pd.DataFrame]:
     df = create_features(df)
-    with open(config.features.path, encoding="utf-8") as f:
-        feature_cols = json.load(f)
-    target_col = "delta_log_120m" if config.target_kind == "log" else "delta_lin_120m"
+    feature_cols = _resolve_feature_names(config)
+    # When config is a list (tests), default to log target and sensible params.
+    if isinstance(config, list):
+        target_kind = "log"
+        horizon_min = 120
+        embargo = 24
+        n_jobs = 1
+        quant_low = 0.1
+        quant_high = 0.9
+    else:
+        target_kind = config.target_kind
+        horizon_min = config.horizon_min
+        embargo = config.embargo
+        n_jobs = config.n_jobs
+        quant_low = config.quantiles["low"]
+        quant_high = config.quantiles["high"]
+
+    target_col = "delta_log_120m" if target_kind == "log" else "delta_lin_120m"
     df = df.dropna(subset=[target_col])
     X = _validate_features(df, feature_cols)
     y = df[target_col].astype("float32")
@@ -83,19 +119,19 @@ def train_price(
     metrics = []
     reg_models, q10_models, q90_models = [], [], []
     start_time = time.monotonic()
-    steps = config.horizon_min // 5
+    steps = horizon_min // 5
 
-    for fold, (train_idx, test_idx) in enumerate(time_folds(len(df), embargo=config.embargo)):
+    for fold, (train_idx, test_idx) in enumerate(time_folds(len(df), embargo=embargo)):
         X_train, y_train = X_matrix[train_idx], y.iloc[train_idx]
         X_test, y_test = X_matrix[test_idx], y.iloc[test_idx]
         dtrain = xgb.DMatrix(_to_f32(X_train), label=_to_f32(y_train))
         dtest = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_test))
         reg_params, reg_rounds = build_reg()
-        q10_params, q_rounds = build_quantile(config.quantiles["low"])
-        q90_params, q90_rounds = build_quantile(config.quantiles["high"])
-        reg_params["nthread"] = config.n_jobs
-        q10_params["nthread"] = config.n_jobs
-        q90_params["nthread"] = config.n_jobs
+        q10_params, q_rounds = build_quantile(quant_low)
+        q90_params, q90_rounds = build_quantile(quant_high)
+        reg_params["nthread"] = n_jobs
+        q10_params["nthread"] = n_jobs
+        q90_params["nthread"] = n_jobs
         reg = xgb.train(
             reg_params,
             dtrain,
@@ -127,9 +163,9 @@ def train_price(
         delta_hat = reg.predict(dtest)
         low_hat = q10.predict(dtest)
         high_hat = q90.predict(dtest)
-        p_hat = to_price(last_price, delta_hat, kind=config.target_kind)
-        p_low = to_price(last_price, low_hat, kind=config.target_kind)
-        p_high = to_price(last_price, high_hat, kind=config.target_kind)
+        p_hat = to_price(last_price, delta_hat, kind=target_kind)
+        p_low = to_price(last_price, low_hat, kind=target_kind)
+        p_high = to_price(last_price, high_hat, kind=target_kind)
         p_low, p_high = np.minimum(p_low, p_high), np.maximum(p_low, p_high)
         p_hat = clip_inside(p_hat, p_low, p_high)
         target_price = df["close"].shift(-steps).iloc[test_idx].values
@@ -163,10 +199,10 @@ def train_price(
     out_path.mkdir(parents=True, exist_ok=True)
 
     reg_params, reg_rounds = build_reg()
-    q10_params, q_rounds = build_quantile(config.quantiles["low"])
-    q90_params, q90_rounds = build_quantile(config.quantiles["high"])
+    q10_params, q_rounds = build_quantile(quant_low)
+    q90_params, q90_rounds = build_quantile(quant_high)
     for p in (reg_params, q10_params, q90_params):
-        p["nthread"] = config.n_jobs
+        p["nthread"] = n_jobs
     dall = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y))
     reg_final = xgb.train(reg_params, dall, reg_rounds, verbose_eval=False)
     q10_final = xgb.train(q10_params, dall, q_rounds, verbose_eval=False)
@@ -189,9 +225,9 @@ def train_price(
     fi.to_csv(out_path / "feature_importance.csv", index=False)
 
     meta = {
-        "horizon_min": config.horizon_min,
-        "target_kind": config.target_kind,
-        "quantiles": config.quantiles,
+        "horizon_min": horizon_min,
+        "target_kind": target_kind,
+        "quantiles": {"low": quant_low, "high": quant_high},
         "data": {"n_samples": int(len(df))},
         "metrics": avg_metrics,
         "backtest": bt["metrics"],

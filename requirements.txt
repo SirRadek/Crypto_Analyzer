@@ -17,6 +17,7 @@ shap
 fastapi
 uvicorn
 httpx
+vulture>=2.7
 
 # Type stubs for static analysis
 pandas-stubs
