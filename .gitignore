@@ -4,6 +4,11 @@ __pycache__/
 .venv/ venv/ env/
 .vscode/ .idea/ *.iml
 
+models/
+data/
+*.joblib
+.env
+
 ml/*.pkl
 ml/*.joblib
 

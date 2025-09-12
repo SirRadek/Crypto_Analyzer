@@ -1,28 +1,22 @@
-name: tests
-on: [push, pull_request]
+name: CI
+
+on:
+  push:
+  pull_request:
+
 jobs:
-  tests:
+  lint-test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install -e ".[dev]"
-      - run: pre-commit run -a
-      - run: pytest -q
-      - run: mypy .
-      - run: deptry .
-      - run: vulture . --exclude tests --min-confidence 70 || true
-  importtime:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install -e ".[dev]"
-      - run: chmod +x tools/check_import_time.sh
-      - run: ./tools/check_import_time.sh
-      - uses: actions/upload-artifact@v4
         with:
-          name: importtime
-          path: ml/importtime.json
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e .[dev]
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy . --strict
+      - run: pytest -q
