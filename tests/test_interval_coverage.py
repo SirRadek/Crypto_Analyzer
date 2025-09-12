@@ -1,7 +1,6 @@
 import numpy as np
 import xgboost as xgb
 
-
 from ml.xgb_price import build_quantile, build_reg
 
 
@@ -20,8 +19,11 @@ def test_interval_coverage():
     for p in (reg_params, q10_params, q90_params):
         p.update({"max_depth": 3, "nthread": 1})
     reg_rounds = q_rounds = q90_rounds = 50
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-    dtest = xgb.DMatrix(X_test)
+    dtrain = xgb.DMatrix(
+        np.asarray(X_train, dtype=np.float32),
+        label=np.asarray(y_train, dtype=np.float32),
+    )
+    dtest = xgb.DMatrix(np.asarray(X_test, dtype=np.float32))
     _ = xgb.train(reg_params, dtrain, reg_rounds, verbose_eval=False)
     q10 = xgb.train(q10_params, dtrain, q_rounds, verbose_eval=False)
     q90 = xgb.train(q90_params, dtrain, q90_rounds, verbose_eval=False)

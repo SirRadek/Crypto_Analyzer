@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "crypto-analyzer"
 version = "0.1.0"
 description = "Utilities for crypto market analysis"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
-    "pandas~=2.3.2",
-    "numpy~=2.3.2",
+    "pandas>=2.2",
+    "numpy>=1.26",
     "scikit-learn~=1.7.1",
     "scipy~=1.16.2",
     "requests~=2.32.5",
@@ -40,7 +40,6 @@ dev = [
     "types-tqdm",
     "types-PyYAML",
 ]
-gpu = ["cuml", "cudf"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -78,16 +77,17 @@ DEP002 = [
 select = ["E","W","F","I","UP","B","C4","SIM","NPY","RUF100"]
 extend-select = ["F401","F403"]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 ignore_missing_imports = true
 warn_unused_ignores = true
 no_implicit_optional = true
 warn_redundant_casts = true
 warn_return_any = true
+disallow_untyped_defs = true
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py313"]

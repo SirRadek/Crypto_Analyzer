@@ -1,27 +1,26 @@
+import argparse
+import gc
+import json
 import logging
+import math
 import os
+import resource
+import traceback
+import typing
 from collections.abc import Sequence
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import joblib
-from sklearn.ensemble import RandomForestRegressor
+import numpy as np
+import xgboost as xgb
 
-from crypto_analyzer.model_manager import atomic_write
-
-from .oob import fit_incremental_forest, halving_random_search
-from .train import _gpu_available
+from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
 MODEL_PATH = "ml/meta_model_reg.joblib"
-MAX_MODEL_BYTES = 100 * 1024**3  # 200 GB guard
-
-
 logger = logging.getLogger(__name__)
-
-
-def _fits_size(path: str, max_bytes: int = MAX_MODEL_BYTES) -> bool:
-    return os.path.exists(path) and os.path.getsize(path) <= max_bytes
 
 
 try:
@@ -38,108 +37,168 @@ def _should_mmap(path: str) -> bool:
         import psutil
 
         size = os.path.getsize(path)
-        avail = psutil.virtual_memory().available
+        avail = int(psutil.virtual_memory().available)
         return size > 0.5 * avail
     except Exception:
         return False
 
 
-def train_regressor(
+def train_regressor(  # type: ignore[no-untyped-def]
     X,
     y,
     model_path: str = MODEL_PATH,
     sample_weight=None,
     params: dict[str, Any] | None = None,
-    fallback_estimators: tuple[int, ...] = (600, 400, 200, 100),
     use_gpu: bool = False,
-    tune: bool = False,
-    oob_tol: float | None = None,
-    oob_step: int = 50,
-    max_estimators: int = 400,
-    log_path: str = "ml/oob_reg.json",
-):
+    train_window: int | None = None,
+) -> xgb.XGBRegressor:
+    """Train an XGBoost regressor with deterministic defaults and OOM fallback.
+
+    The function always casts inputs to ``float32`` and constructs ``xgb.DMatrix``
+    objects to minimise RAM usage. Default hyperparameters favour stability and
+    mirror the user's specification. On ``MemoryError`` the training is retried
+    according to the sequence:
+
+    ``GPU → CPU n_jobs=1 → reduce n_estimators by 30% → max_depth −2``.
+
+    Each fallback logs the reason alongside the current peak RSS.
     """
-    Train a regressor and ensure the saved model file <= 200 GB.
-    Will try a sequence of n_estimators (fallback_estimators) until size fits.
 
-    Parameters
-    ----------
-    use_gpu : bool
-        If ``True`` and CUDA with ``cuml`` is available, train a GPU RandomForest.
-        Otherwise, a CPU-based ``RandomForestRegressor`` is used.
-    """
-    if use_gpu:
-        if _gpu_available():
-            try:  # pragma: no cover - optional dependency
-                import cudf  # type: ignore
-                from cuml.ensemble import RandomForestRegressor as cuRF  # type: ignore
-            except Exception:  # pragma: no cover - optional dependency
-                logger.warning("cuml not available, falling back to CPU")
-            else:
-                params_gpu = params or dict(n_estimators=fallback_estimators[0], random_state=42)
-                model = cuRF(**params_gpu)
-                X_f = cudf.from_pandas(X.astype("float32"))
-                y_f = cudf.Series(y.astype("float32"))
-                model.fit(X_f, y_f, sample_weight=sample_weight)
-                buffer = BytesIO()
-                joblib.dump(model, buffer, compress=False)
-                atomic_write(Path(model_path), buffer.getvalue())
-                return model
-        else:
-            logger.warning("CUDA not available, falling back to CPU")
+    if train_window is not None:
+        X = X[-train_window:]
+        y = y[-train_window:]
+        if sample_weight is not None:
+            sample_weight = sample_weight[-train_window:]
 
-    if tune:
-        tuned = halving_random_search(X, y, RandomForestRegressor, random_state=42)
-        params = {**(params or {}), **tuned}
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.float32)
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=np.float32)
 
-    if oob_tol is not None:
-        model, oob_scores = fit_incremental_forest(
-            X,
-            y,
-            RandomForestRegressor,
-            step=oob_step,
-            max_estimators=max_estimators,
-            tol=oob_tol,
-            random_state=42,
-            log_path=log_path,
-            **(params or {}),
-        )
-        buffer = BytesIO()
-        joblib.dump(model, buffer, compress=False)
-        atomic_write(Path(model_path), buffer.getvalue())
-        return model
+    xgb.set_config(verbosity=0)
 
-    if params is None:
-        params = dict(
-            n_estimators=fallback_estimators[0],
-            random_state=42,
-            n_jobs=-1,
-            min_samples_leaf=2,
-            verbose=0,
-        )
+    n_feat = X.shape[1]
+    colsample_default = min(1.0, math.sqrt(n_feat) / n_feat)
 
-    for n in fallback_estimators:
-        params["n_estimators"] = n
-        model = RandomForestRegressor(**params)
-        model.fit(X, y, sample_weight=sample_weight)
-        buffer = BytesIO()
-        joblib.dump(model, buffer, compress=False)
-        atomic_write(Path(model_path), buffer.getvalue())
+    params = params.copy() if params else {}
+    params.setdefault("tree_method", "hist")
+    params.setdefault("device", "cuda" if use_gpu else "cpu")
+    params.setdefault("max_depth", 8)
+    params.setdefault("n_estimators", 600)
+    params.setdefault("subsample", 0.8)
+    params.setdefault("colsample_bytree", min(0.8, colsample_default))
+    params.setdefault("early_stopping_rounds", 50)
+    params.setdefault("nthread", -1)
+    params.setdefault("random_state", 42)
+    params.setdefault("verbosity", 0)
 
-        size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
-        size_mb = os.path.getsize(model_path) / (1024**2)
-        print(f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)")
-        if size_ok:
-            return model
-        else:
-            print(f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees...")
+    n_estimators = params.pop("n_estimators")
+    early_rounds = params.pop("early_stopping_rounds")
 
-    raise RuntimeError(
-        "Could not save model under the size limit; try reducing complexity further."
+    # evaluation split for early stopping
+    eval_size = max(1, int(0.2 * len(X)))
+    X_train, X_val = X[:-eval_size], X[-eval_size:]
+    y_train, y_val = y[:-eval_size], y[-eval_size:]
+    if sample_weight is not None:
+        sw_train, sw_val = sample_weight[:-eval_size], sample_weight[-eval_size:]
+    else:
+        sw_train = sw_val = None
+    dtrain = xgb.DMatrix(
+        np.asarray(X_train, dtype=np.float32),
+        label=np.asarray(y_train, dtype=np.float32),
+        weight=None if sw_train is None else np.asarray(sw_train, dtype=np.float32),
+    )
+    deval = xgb.DMatrix(
+        np.asarray(X_val, dtype=np.float32),
+        label=np.asarray(y_val, dtype=np.float32),
+        weight=None if sw_val is None else np.asarray(sw_val, dtype=np.float32),
     )
 
+    # parameters for the sklearn wrapper used only for returning the model
+    sk_params = {
+        "max_depth": params.get("max_depth"),
+        "subsample": params.get("subsample"),
+        "colsample_bytree": params.get("colsample_bytree"),
+        "tree_method": params.get("tree_method"),
+        "device": params.get("device"),
+        "n_jobs": params.get("nthread"),
+        "random_state": params.get("random_state"),
+        "verbosity": params.get("verbosity"),
+        "n_estimators": n_estimators,
+    }
+    # remove None values
+    sk_params = {k: v for k, v in sk_params.items() if v is not None}
 
-def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
+    reduced_estimators = False
+    while True:
+        try:
+            booster = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=n_estimators,
+                evals=[(deval, "eval")],
+                early_stopping_rounds=early_rounds,
+            )
+            model = xgb.XGBRegressor(**sk_params)
+            model._Booster = booster
+            model._n_features_in = X.shape[1]
+            buffer = BytesIO()
+            joblib.dump(model, buffer, compress=False)
+            atomic_write(Path(model_path), buffer.getvalue())
+            return model
+        except xgb.core.XGBoostError as exc:
+            if params.get("device") == "cuda":
+                logger.warning("CUDA not available, falling back to CPU")
+                params["device"] = "cpu"
+                sk_params["device"] = "cpu"
+                continue
+            raise exc
+        except _MEM_ERRORS as exc:  # pragma: no cover - depends on resources
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            if params.get("device") == "cuda":
+                logger.warning("OOM on GPU, falling back to CPU n_jobs=1; peak RSS=%.0fMB", peak)
+                params["device"] = "cpu"
+                params["nthread"] = 1
+                sk_params["device"] = "cpu"
+                sk_params["n_jobs"] = 1
+            elif params.get("nthread", -1) != 1:
+                logger.warning(
+                    "OOM with n_jobs=%s, retrying with n_jobs=1; peak RSS=%.0fMB",
+                    params.get("nthread"),
+                    peak,
+                )
+                params["nthread"] = 1
+                sk_params["n_jobs"] = 1
+            elif not reduced_estimators and n_estimators > 1:
+                new_estimators = max(1, int(n_estimators * 0.7))
+                logger.warning(
+                    "OOM; reducing n_estimators %d→%d; peak RSS=%.0fMB",
+                    n_estimators,
+                    new_estimators,
+                    peak,
+                )
+                n_estimators = new_estimators
+                sk_params["n_estimators"] = n_estimators
+                reduced_estimators = True
+            elif params.get("max_depth", 0) > 1:
+                new_depth = max(1, params["max_depth"] - 2)
+                logger.warning(
+                    "OOM; reducing max_depth %d→%d; peak RSS=%.0fMB",
+                    params["max_depth"],
+                    new_depth,
+                    peak,
+                )
+                params["max_depth"] = new_depth
+                sk_params["max_depth"] = new_depth
+            else:
+                raise exc
+            gc.collect()
+            continue
+
+
+def load_regressor(
+    model_path: str = MODEL_PATH, mmap_mode: str | None = None
+) -> xgb.XGBRegressor:
     """Load a previously trained regressor with graceful OOM handling."""
 
     if not os.path.exists(model_path):
@@ -150,25 +209,21 @@ def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
         mode = "r"
 
     try:
-        return joblib.load(model_path, mmap_mode=mode)  # type: ignore[arg-type]
+        return typing.cast(
+            xgb.XGBRegressor, joblib.load(model_path, mmap_mode=mode)  # type: ignore[arg-type]
+        )
     except _MEM_ERRORS:
         if mode != "r":
             print("Memory low; retrying regressor load with mmap")
-            return joblib.load(model_path, mmap_mode="r")
+            return typing.cast(
+                xgb.XGBRegressor, joblib.load(model_path, mmap_mode="r")
+            )
         raise
 
 
 # ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------
-
-
-import argparse
-import json
-import traceback
-from datetime import datetime
-
-from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT
 
 
 def _build_parser() -> argparse.ArgumentParser:

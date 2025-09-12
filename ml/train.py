@@ -9,8 +9,8 @@ import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 
-from ml.model_utils import evaluate_model
 from crypto_analyzer.model_manager import atomic_write
+from ml.model_utils import evaluate_model
 
 from .oob import fit_incremental_forest, halving_random_search
 
@@ -61,9 +61,6 @@ def train_model(
         Fraction of data to use for validation during training.
     random_state : int
         Reproducibility seed.
-    use_gpu : bool
-        If ``True`` and CUDA with ``cuml`` is available, train a GPU RandomForest.
-        Otherwise, silently fall back to the CPU implementation.
     """
 
     X_train, X_val, y_train, y_val = train_test_split(
@@ -71,25 +68,10 @@ def train_model(
     )
 
     if use_gpu:
-        if _gpu_available():
-            try:  # pragma: no cover - optional dependency
-                import cudf  # type: ignore
-                from cuml.ensemble import RandomForestClassifier as cuRF  # type: ignore
-            except Exception:  # pragma: no cover - optional dependency
-                logger.warning("cuml not available, falling back to CPU")
-            else:
-                X_train_f = cudf.from_pandas(X_train.astype("float32"))
-                y_train_f = cudf.Series(y_train.astype("float32"))
-                clf = cuRF(random_state=random_state)
-                clf.fit(X_train_f, y_train_f)
-                X_val_f = cudf.from_pandas(X_val.astype("float32"))
-                evaluate_model(clf, X_val_f, cudf.Series(y_val.astype("float32")))
-                buffer = BytesIO()
-                joblib.dump(clf, buffer)
-                atomic_write(Path(model_path), buffer.getvalue())
-                return clf
-        else:
-            logger.warning("CUDA not available, falling back to CPU")
+        logger.warning("GPU training not supported, falling back to CPU")
+
+    X_train = X_train.astype("float32", copy=False)
+    X_val = X_val.astype("float32", copy=False)
 
     params: dict[str, Any] = {}
     if tune:
@@ -117,7 +99,9 @@ def train_model(
             **params,
         )
         clf.fit(X_train, y_train)
-        log_bytes = json.dumps({"params": clf.get_params(), "oob_scores": [float(clf.oob_score_)]}).encode("utf-8")
+        log_bytes = json.dumps(
+            {"params": clf.get_params(), "oob_scores": [float(clf.oob_score_)]}
+        ).encode("utf-8")
         atomic_write(Path(log_path), log_bytes)
 
     # Evaluate on validation data
