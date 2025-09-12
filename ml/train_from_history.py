@@ -11,7 +11,9 @@ towards the present.
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -55,24 +57,38 @@ def train_from_history(
     end_ts = pd.Timestamp(end)
     step = timedelta(minutes=step_minutes)
 
-    while current + step <= end_ts:
-        train_df = df[df["timestamp"] <= current]
-        if len(train_df) < 10:
+    log_dir = Path("logs/runs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    run_file = log_dir / f"history_{symbol}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    with run_file.open("w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["cutoff", "mae"])
+
+        while current + step <= end_ts:
+            train_df = df[df["timestamp"] <= current]
+            if len(train_df) < 10:
+                current += step
+                continue
+            X = train_df[FEATURE_COLUMNS]
+            y = train_df["target"]
+            try:
+                model = train_regressor(X, y, use_gpu=use_gpu)
+            except MemoryError:
+                model = train_regressor(X, y, use_gpu=False, params={"nthread": 1})
+                use_gpu = False
+
+            # Optional evaluation on the next window to gauge progress
+            eval_mask = (df["timestamp"] > current) & (df["timestamp"] <= current + step)
+            eval_df = df.loc[eval_mask]
+            err = None
+            if not eval_df.empty:
+                preds = model.predict(eval_df[FEATURE_COLUMNS])
+                err = float(np.abs(preds - eval_df["target"]).mean())
+                print(f"{current} → MAE={err:.4f}")
+            writer.writerow([current.isoformat(), "" if err is None else f"{err:.6f}"])
+            fh.flush()
+
             current += step
-            continue
-        X = train_df[FEATURE_COLUMNS]
-        y = train_df["target"]
-        model = train_regressor(X, y, use_gpu=use_gpu)
-
-        # Optional evaluation on the next window to gauge progress
-        eval_mask = (df["timestamp"] > current) & (df["timestamp"] <= current + step)
-        eval_df = df.loc[eval_mask]
-        if not eval_df.empty:
-            preds = model.predict(eval_df[FEATURE_COLUMNS])
-            err = np.abs(preds - eval_df["target"]).mean()
-            print(f"{current} → MAE={err:.4f}")
-
-        current += step
 
 
 def main(argv: list[str] | None = None) -> int:
