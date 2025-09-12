@@ -1,6 +1,11 @@
+import argparse
+import gc
+import json
 import logging
 import os
+import traceback
 from collections.abc import Sequence
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -8,7 +13,7 @@ from typing import Any
 import joblib
 from sklearn.ensemble import RandomForestRegressor
 
-from crypto_analyzer.model_manager import atomic_write
+from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
 from .oob import fit_incremental_forest, halving_random_search
 from .train import _gpu_available
@@ -76,7 +81,10 @@ def train_regressor(
             except Exception:  # pragma: no cover - optional dependency
                 logger.warning("cuml not available, falling back to CPU")
             else:
-                params_gpu = params or dict(n_estimators=fallback_estimators[0], random_state=42)
+                params_gpu = params or {
+                    "n_estimators": fallback_estimators[0],
+                    "random_state": 42,
+                }
                 model = cuRF(**params_gpu)
                 X_f = cudf.from_pandas(X.astype("float32"))
                 y_f = cudf.Series(y.astype("float32"))
@@ -110,21 +118,26 @@ def train_regressor(
         return model
 
     if params is None:
-        params = dict(
-            n_estimators=fallback_estimators[0],
-            random_state=42,
-            n_jobs=-1,
-            min_samples_leaf=2,
-            verbose=0,
-        )
+        params = {
+            "n_estimators": fallback_estimators[0],
+            "random_state": 42,
+            "n_jobs": -1,
+            "min_samples_leaf": 2,
+            "verbose": 0,
+        }
 
     for n in fallback_estimators:
         params["n_estimators"] = n
         model = RandomForestRegressor(**params)
-        model.fit(X, y, sample_weight=sample_weight)
-        buffer = BytesIO()
-        joblib.dump(model, buffer, compress=False)
-        atomic_write(Path(model_path), buffer.getvalue())
+        try:
+            model.fit(X, y, sample_weight=sample_weight)
+            buffer = BytesIO()
+            joblib.dump(model, buffer, compress=False)
+            atomic_write(Path(model_path), buffer.getvalue())
+        except _MEM_ERRORS:
+            print(f"OOM when training regressor with n_estimators={n}, trying fewer trees...")
+            gc.collect()
+            continue
 
         size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
         size_mb = os.path.getsize(model_path) / (1024**2)
@@ -161,14 +174,6 @@ def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
 # ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------
-
-
-import argparse
-import json
-import traceback
-from datetime import datetime
-
-from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT
 
 
 def _build_parser() -> argparse.ArgumentParser:
