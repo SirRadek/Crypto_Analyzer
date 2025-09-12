@@ -19,6 +19,7 @@ import xgboost as xgb
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
+
 MODEL_PATH = "ml/meta_model_reg.joblib"
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ def train_regressor(  # type: ignore[no-untyped-def]
     use_gpu: bool = False,
     train_window: int | None = None,
 ) -> xgb.XGBRegressor:
+
     """Train an XGBoost regressor with deterministic defaults and OOM fallback.
 
     The function always casts inputs to ``float32`` and constructs ``xgb.DMatrix``
