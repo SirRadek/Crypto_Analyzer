@@ -4,8 +4,7 @@ import json
 import logging
 import math
 import os
-import resource
-import traceback
+import psutil
 import typing
 from collections.abc import Sequence
 from datetime import datetime
@@ -154,7 +153,10 @@ def train_regressor(  # type: ignore[no-untyped-def]
                 continue
             raise exc
         except _MEM_ERRORS as exc:  # pragma: no cover - depends on resources
-            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            try:
+                peak = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+            except Exception:
+                peak = -1.0
             if params.get("device") == "cuda":
                 logger.warning("OOM on GPU, falling back to CPU n_jobs=1; peak RSS=%.0fMB", peak)
                 params["device"] = "cpu"

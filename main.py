@@ -109,9 +109,12 @@ def predict_price(model_dir="models/xgb_price", target_kind="log"):
     reg = joblib.load(Path(model_dir) / "reg.joblib", mmap_mode="r")
     q10 = joblib.load(Path(model_dir) / "q10.joblib", mmap_mode="r")
     q90 = joblib.load(Path(model_dir) / "q90.joblib", mmap_mode="r")
-    delta = reg.predict(X_last)[0]
-    low = q10.predict(X_last)[0]
-    high = q90.predict(X_last)[0]
+    X_last_reg = match_model_features(X_last, reg).astype("float32")
+    X_last_q10 = match_model_features(X_last, q10).astype("float32")
+    X_last_q90 = match_model_features(X_last, q90).astype("float32")
+    delta = reg.predict(X_last_reg)[0]
+    low = q10.predict(X_last_q10)[0]
+    high = q90.predict(X_last_q90)[0]
     p_hat = to_price(last_close, delta, kind=target_kind)
     p_low = to_price(last_close, low, kind=target_kind)
     p_high = to_price(last_close, high, kind=target_kind)
@@ -182,9 +185,9 @@ def main(train=True):
     cls_pred_cols = [f"cls_pred_{i}" for i in cls_indices]
     reg_pred_cols = [f"reg_pred_{i}" for i in reg_indices]
     feature_cols_meta = FEATURE_COLS + ["horizon"] + cls_pred_cols + reg_pred_cols
-    X_all = train_df[feature_cols_meta]
-    y_cls_all = train_df["target_cls"]
-    y_reg_all = train_df["target_reg"]
+    X_all = train_df[feature_cols_meta].astype("float32")
+    y_cls_all = train_df["target_cls"].astype("float32")
+    y_reg_all = train_df["target_reg"].astype("float32")
 
     model_path_cls = "ml/meta_model_cls.joblib"
     model_path_reg = "ml/meta_model_reg.joblib"
@@ -209,12 +212,12 @@ def main(train=True):
     last_base_preds = {}
     for path, idx, w in zip(cls_paths, cls_indices, cls_weights, strict=False):
         model = load_model(model_path=path)
-        feats = match_model_features(base_last, model)
+        feats = match_model_features(base_last, model).astype("float32")
         last_base_preds[f"cls_pred_{idx}"] = float(model.predict_proba(feats)[:, 1][0] * w)
         del model
     for path, idx, w in zip(reg_paths, reg_indices, reg_weights, strict=False):
         model = load_regressor(model_path=path)
-        feats = match_model_features(base_last, model)
+        feats = match_model_features(base_last, model).astype("float32")
         last_base_preds[f"reg_pred_{idx}"] = float(model.predict(feats)[0] * w)
         del model
 
@@ -225,8 +228,11 @@ def main(train=True):
             X_last["horizon"] = horizon
             for name, val in last_base_preds.items():
                 X_last[name] = val
-            prob_up = float(cls_model.predict_proba(X_last[feature_cols_meta])[:, 1][0])
-            reg_pred = float(reg_model.predict(X_last[feature_cols_meta])[0])
+            X_last_meta = X_last[feature_cols_meta].astype("float32")
+            X_last_cls = match_model_features(X_last_meta, cls_model).astype("float32")
+            X_last_reg = match_model_features(X_last_meta, reg_model).astype("float32")
+            prob_up = float(cls_model.predict_proba(X_last_cls)[:, 1][0])
+            reg_pred = float(reg_model.predict(X_last_reg)[0])
             last_close = float(last_row["close"].iloc[0])
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
