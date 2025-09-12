@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import yaml
 
 import ml.train_historic as th
 import ml.xgb_price as xgb_price
@@ -66,16 +67,26 @@ def test_train_historic(tmp_path, monkeypatch):
     data_path = tmp_path / "data.csv"
     df.to_csv(data_path, index=False)
     outdir = tmp_path / "models"
+    cfg = {
+        "horizon_min": 120,
+        "embargo": 24,
+        "target_kind": "log",
+        "xgb_params": {"reg": {}, "quantile": {}},
+        "quantiles": {"low": 0.1, "high": 0.9},
+        "fees": {"taker": 0.0004},
+        "features": {"path": "analysis/feature_list.json"},
+        "n_jobs": 1,
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg))
     th.main(
         [
-            "--horizon-min",
-            "120",
+            "--config",
+            str(cfg_path),
             "--start-date",
             "2024-01-01",
             "--end-date",
             "2024-01-10",
-            "--features",
-            "ml/feature_list.json",
             "--outdir",
             str(outdir),
             "--data",

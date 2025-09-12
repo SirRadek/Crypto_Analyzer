@@ -1,8 +1,17 @@
+from __future__ import annotations
+
+from typing import TypedDict
+
 import numpy as np
 import pandas as pd
 
 
-def run_backtest(df, fee=0.0004):
+class BacktestResult(TypedDict):
+    equity: pd.DataFrame
+    metrics: dict[str, float]
+
+
+def run_backtest(df: pd.DataFrame, fee: float = 0.0004) -> BacktestResult:
     """Run a simple long/short backtest based on price forecasts.
 
     Parameters

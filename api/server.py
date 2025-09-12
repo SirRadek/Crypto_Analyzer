@@ -7,6 +7,7 @@ import xgboost as xgb
 from fastapi import FastAPI
 
 from analysis.feature_engineering import FEATURE_COLUMNS, create_features
+from crypto_analyzer.schemas import PredictionResponse
 from ml.xgb_price import clip_inside, to_price
 
 MODEL_DIR = Path(os.getenv("MODEL_DIR", "models/xgb_price"))
@@ -19,7 +20,7 @@ q10 = joblib.load(MODEL_DIR / "q10.joblib", mmap_mode="r")
 q90 = joblib.load(MODEL_DIR / "q90.joblib", mmap_mode="r")
 
 
-def _load_last_row():
+def _load_last_row() -> tuple[pd.Timestamp, float, pd.DataFrame]:
     df = (
         pd.read_parquet(DATA_PATH)
         if DATA_PATH.endswith(".parquet")
@@ -33,8 +34,8 @@ def _load_last_row():
     return ts, last_price, X_last
 
 
-@app.get("/predict")
-def predict():
+@app.get("/predict", response_model=PredictionResponse)
+def predict() -> PredictionResponse:  # pragma: no cover - FastAPI handles response
     ts, last_price, X_last = _load_last_row()
     dlast = xgb.DMatrix(X_last)
     delta = reg.predict(dlast)[0]
@@ -45,9 +46,9 @@ def predict():
     p_high = to_price(last_price, high)
     p_low, p_high = min(p_low, p_high), max(p_low, p_high)
     p_hat = clip_inside(p_hat, p_low, p_high)
-    return {
-        "timestamp": str(ts),
-        "p_low": float(p_low),
-        "p_hat": float(p_hat),
-        "p_high": float(p_high),
-    }
+    return PredictionResponse(
+        timestamp=str(ts),
+        p_low=float(p_low),
+        p_hat=float(p_hat),
+        p_high=float(p_high),
+    )

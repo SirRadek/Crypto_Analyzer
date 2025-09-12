@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import numpy as np
@@ -9,9 +8,9 @@ import ml.xgb_price as xgb_price
 from crypto_analyzer.schemas import FeatureConfig, TrainConfig
 
 
-def test_model_meta(tmp_path, monkeypatch):
+def test_xgb_train_smoke(monkeypatch, tmp_path):
     rng = np.random.default_rng(0)
-    n = 300
+    n = 1050
     ts = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
     close = 100 + rng.normal(scale=1, size=n).cumsum()
     high = close + rng.random(n)
@@ -35,7 +34,7 @@ def test_model_meta(tmp_path, monkeypatch):
 
     def small_reg():
         params = {
-            "max_depth": 3,
+            "max_depth": 2,
             "eta": 0.1,
             "subsample": 0.8,
             "colsample_bytree": 0.8,
@@ -44,11 +43,11 @@ def test_model_meta(tmp_path, monkeypatch):
             "nthread": 1,
             "seed": 42,
         }
-        return params, 10
+        return params, 5
 
-    def small_quant(alpha):
+    def small_quant(alpha: float):
         params = {
-            "max_depth": 3,
+            "max_depth": 2,
             "eta": 0.1,
             "subsample": 0.8,
             "colsample_bytree": 0.8,
@@ -58,10 +57,11 @@ def test_model_meta(tmp_path, monkeypatch):
             "nthread": 1,
             "seed": 42,
         }
-        return params, 10
+        return params, 5
 
     monkeypatch.setattr(xgb_price, "build_reg", small_reg)
     monkeypatch.setattr(xgb_price, "build_quantile", small_quant)
+
     config = TrainConfig(
         horizon_min=120,
         embargo=24,
@@ -72,11 +72,7 @@ def test_model_meta(tmp_path, monkeypatch):
         features=FeatureConfig(path=Path("analysis/feature_list.json")),
         n_jobs=1,
     )
-    metrics, _ = tp.train_price(df, config, outdir=tmp_path)
-    meta_path = tmp_path / "model_meta.json"
-    assert meta_path.exists()
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)
-    assert meta["data"]["n_samples"] > 0
-    assert meta["horizon_min"] == 120
-    assert "metrics" in meta
+
+    metrics, preds = tp.train_price(df, config, outdir=tmp_path)
+    assert ((preds["p_hat"] >= preds["p_low"]) & (preds["p_hat"] <= preds["p_high"])).all()
+    assert "rmse" in metrics

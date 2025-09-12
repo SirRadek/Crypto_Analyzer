@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
@@ -6,7 +8,7 @@ import pandas as pd
 # speed up feature engineering.
 
 
-def create_features(df):
+def create_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add a lightweight set of technical, order-flow and time features.
 
     A shallow copy is used to avoid doubling memory usage while keeping the
@@ -113,7 +115,7 @@ def create_features(df):
     return df
 
 
-FEATURE_COLUMNS = [
+FEATURE_COLUMNS: list[str] = [
     "ofi_base",
     "ofi_quote",
     "tbr_base",

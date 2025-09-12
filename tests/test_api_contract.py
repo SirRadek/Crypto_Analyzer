@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -6,7 +7,7 @@ from fastapi.testclient import TestClient
 
 import ml.train_price as tp
 import ml.xgb_price as xgb_price
-from analysis.feature_engineering import FEATURE_COLUMNS
+from crypto_analyzer.schemas import FeatureConfig, TrainConfig
 
 
 def _small_models():
@@ -40,7 +41,7 @@ def _small_models():
     return small_reg, small_quant
 
 
-def test_api(tmp_path, monkeypatch):
+def test_api_contract(tmp_path, monkeypatch):
     small_reg, small_quant = _small_models()
     monkeypatch.setattr(xgb_price, "build_reg", small_reg)
     monkeypatch.setattr(xgb_price, "build_quantile", small_quant)
@@ -69,7 +70,17 @@ def test_api(tmp_path, monkeypatch):
     )
 
     model_dir = tmp_path / "models"
-    tp.train_price(df, FEATURE_COLUMNS, outdir=model_dir)
+    config = TrainConfig(
+        horizon_min=120,
+        embargo=24,
+        target_kind="log",
+        xgb_params={"reg": {}, "quantile": {}},
+        quantiles={"low": 0.1, "high": 0.9},
+        fees={"taker": 0.0004},
+        features=FeatureConfig(path=Path("analysis/feature_list.json")),
+        n_jobs=1,
+    )
+    tp.train_price(df, config, outdir=model_dir)
     data_path = tmp_path / "data.csv"
     df.to_csv(data_path, index=False)
 
@@ -83,3 +94,4 @@ def test_api(tmp_path, monkeypatch):
     assert res.status_code == 200
     j = res.json()
     assert {"timestamp", "p_low", "p_hat", "p_high"} <= j.keys()
+    assert j["p_low"] <= j["p_hat"] <= j["p_high"]

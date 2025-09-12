@@ -1,18 +1,18 @@
+from __future__ import annotations
+
 import argparse
-import json
 from pathlib import Path
 
 import pandas as pd
 
-from .train_price import train_price
+from .train_price import load_config, train_price
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Train models on a specific historical range")
-    parser.add_argument("--horizon-min", type=int, default=120)
+    parser.add_argument("--config", required=True)
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
-    parser.add_argument("--features", required=True)
     parser.add_argument("--outdir", default="models/historic")
     parser.add_argument("--data", required=True)
     args = parser.parse_args(argv)
@@ -24,10 +24,9 @@ def main(argv=None):
     )
     mask = (df["timestamp"] >= args.start_date) & (df["timestamp"] <= args.end_date)
     df = df.loc[mask]
-    with open(args.features, encoding="utf-8") as f:
-        feature_cols = json.load(f)
+    config = load_config(Path(args.config))
     outdir = Path(args.outdir) / f"{args.start_date}_{args.end_date}"
-    train_price(df, feature_cols, outdir=outdir)
+    train_price(df, config, outdir=outdir)
 
 
 if __name__ == "__main__":

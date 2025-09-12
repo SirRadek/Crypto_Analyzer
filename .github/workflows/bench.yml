@@ -1,4 +1,4 @@
-name: CI Benchmark
+name: Bench
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
+      - run: pip install -e .[dev]
       - name: Create synthetic data
         run: |
           python - <<'PY'
@@ -40,13 +40,29 @@ for i in range(1,3):
 df = pd.DataFrame(cols)
 df.to_csv('synthetic.csv', index=False)
 PY
+      - name: Create config
+        run: |
+          cat <<'CFG' > cfg.yaml
+horizon_min: 120
+embargo: 24
+target_kind: log
+xgb_params:
+  reg: {}
+  quantile: {}
+quantiles: {low: 0.1, high: 0.9}
+fees: {taker: 0.0004}
+features: {path: analysis/feature_list.json}
+n_jobs: 2
+CFG
       - name: Run benchmark
         run: |
-          /usr/bin/time -v python -m ml.train_price --horizon-min 120 --features ml/feature_list.json --data synthetic.csv --outdir models/ci 2>&1 | tee time.log
+          /usr/bin/time -v python -m ml.train_price --config cfg.yaml --data synthetic.csv --outdir models/ci 2>&1 | tee time.log
           tail -n 20 time.log
           peak=$(grep -oP 'Maximum resident set size \(kbytes\): \K\d+' time.log)
           if [ "$peak" -gt 16000000 ]; then echo "Memory limit exceeded: $peak"; exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
           name: benchmark-metrics
-          path: models/ci/model_meta.json
+          path: |
+            models/ci/model_meta.json
+            models/ci/metrics.json
