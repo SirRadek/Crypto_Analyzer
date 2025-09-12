@@ -11,6 +11,7 @@ requests~=2.32.5
 joblib~=1.5.1
 PyYAML~=6.0.2
 tqdm~=4.67.1
+xgboost>=2.0
 
 # Type stubs for static analysis
 pandas-stubs
@@ -19,4 +20,3 @@ joblib-stubs
 scikit-learn-stubs
 types-tqdm
 types-PyYAML
-

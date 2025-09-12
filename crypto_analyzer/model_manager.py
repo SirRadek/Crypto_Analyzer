@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Iterable, Sequence
 
-PROJECT_ROOT = Path(os.environ.get("CRYPTO_ANALYZER_PROJECT_ROOT", Path(__file__).resolve().parents[1]))
+PROJECT_ROOT = Path(
+    os.environ.get("CRYPTO_ANALYZER_PROJECT_ROOT", Path(__file__).resolve().parents[1])
+)
 MODELS_ROOT = PROJECT_ROOT / "models"
 
 
@@ -20,7 +22,9 @@ def _ensure_models_dir(dir: Path) -> Path:
     return resolved
 
 
-def list_artifacts(stem: str, dir: Path, patterns: Sequence[str] = ("*.joblib", "*.pkl", "*.npy", "*.bin")) -> list[Path]:
+def list_artifacts(
+    stem: str, dir: Path, patterns: Sequence[str] = ("*.joblib", "*.pkl", "*.npy", "*.bin")
+) -> list[Path]:
     """List model artifacts matching stem within a directory.
 
     Parameters
@@ -75,7 +79,8 @@ def atomic_write(path: Path, data: bytes) -> None:
 # CLI
 # ----------------------------------------------------------------------------
 
-def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage model artifacts")
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--list", action="store_true", help="List artifacts")
@@ -88,7 +93,7 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Iterable[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.list:
         files = list_artifacts(args.stem, args.dir)
