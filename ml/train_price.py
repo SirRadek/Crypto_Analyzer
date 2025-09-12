@@ -221,6 +221,5 @@ def main(argv: list[str] | None = None) -> None:
     df = pd.read_parquet(args.data) if args.data.endswith(".parquet") else pd.read_csv(args.data)
     train_price(df, config, args.outdir)
 
-
 if __name__ == "__main__":
     main()

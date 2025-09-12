@@ -11,6 +11,7 @@ def time_folds(
     """Yield time-based train/test indices with embargo."""
     indices = np.arange(n_samples)
     fold_size = n_samples // (n_splits + 1)
+
     for i in range(1, n_splits + 1):
         test_start = i * fold_size
         test_end = min((i + 1) * fold_size, n_samples)

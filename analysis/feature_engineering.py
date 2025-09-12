@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 
 # Only a minimal subset of indicators is required for the Core-18 feature set.
 # Keeping the imports explicit makes the dependency surface obvious and helps
