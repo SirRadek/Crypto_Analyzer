@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import resource
 import traceback
 from collections.abc import Sequence
 from datetime import datetime
@@ -13,7 +14,7 @@ from typing import Any
 
 import joblib
 import numpy as np
-from xgboost import XGBRegressor
+import xgboost as xgb
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
@@ -52,73 +53,141 @@ def train_regressor(
     use_gpu: bool = False,
     train_window: int | None = None,
 ):
-    """Train an XGBoost regressor with conservative defaults and OOM handling.
+    """Train an XGBoost regressor with deterministic defaults and OOM fallback.
 
-    The training data can be limited to the most recent ``train_window`` rows.
-    Inputs are converted to ``float32`` to reduce memory footprint. If ``use_gpu``
-    is ``True`` and a CUDA device is available, the model is trained with
-    ``tree_method='gpu_hist'``; otherwise ``'hist'`` is used. When a
-    ``MemoryError`` occurs, the function retries with ``n_jobs=1`` and, if
-    necessary, falls back to the CPU ``hist`` tree method.
+    The function always casts inputs to ``float32`` and constructs ``xgb.DMatrix``
+    objects to minimise RAM usage. Default hyperparameters favour stability and
+    mirror the user's specification. On ``MemoryError`` the training is retried
+    according to the sequence:
+
+    ``GPU → CPU n_jobs=1 → reduce n_estimators by 30% → max_depth −2``.
+
+    Each fallback logs the reason alongside the current peak RSS.
     """
 
     if train_window is not None:
         X = X[-train_window:]
         y = y[-train_window:]
+        if sample_weight is not None:
+            sample_weight = sample_weight[-train_window:]
 
-    X = X.astype("float32") if hasattr(X, "astype") else np.asarray(X, dtype=np.float32)
-    y = y.astype("float32") if hasattr(y, "astype") else np.asarray(y, dtype=np.float32)
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.float32)
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=np.float32)
+
+    xgb.set_config(verbosity=0)
 
     n_feat = X.shape[1]
-    colsample = min(1.0, math.sqrt(n_feat) / n_feat)
+    colsample_default = min(1.0, math.sqrt(n_feat) / n_feat)
 
     params = params.copy() if params else {}
-    params.setdefault("n_estimators", 200)
+    params.setdefault("tree_method", "hist")
+    params.setdefault("max_depth", 8)
+    params.setdefault("n_estimators", 600)
     params.setdefault("subsample", 0.8)
-    params.setdefault("max_depth", 16)
-    params["max_depth"] = min(params["max_depth"], 16)
-    params.setdefault("colsample_bytree", colsample)
-    params.setdefault("n_jobs", -1)
+    params.setdefault("colsample_bytree", min(0.8, colsample_default))
+    params.setdefault("early_stopping_rounds", 50)
+    params.setdefault("nthread", -1)
     params.setdefault("random_state", 42)
     params.setdefault("verbosity", 0)
 
     if use_gpu and _gpu_available():
-        params.setdefault("tree_method", "gpu_hist")
-        params.setdefault("predictor", "gpu_predictor")
+        params["tree_method"] = "gpu_hist"
+        params["predictor"] = "gpu_predictor"
+    elif use_gpu:
+        logger.warning("CUDA not available, falling back to CPU")
+        params["tree_method"] = "hist"
+
+    n_estimators = params.pop("n_estimators")
+    early_rounds = params.pop("early_stopping_rounds")
+
+    # evaluation split for early stopping
+    eval_size = max(1, int(0.2 * len(X)))
+    X_train, X_val = X[:-eval_size], X[-eval_size:]
+    y_train, y_val = y[:-eval_size], y[-eval_size:]
+    if sample_weight is not None:
+        sw_train, sw_val = sample_weight[:-eval_size], sample_weight[-eval_size:]
     else:
-        if use_gpu:
-            logger.warning("CUDA not available, falling back to CPU")
-        params.setdefault("tree_method", "hist")
+        sw_train = sw_val = None
+    dtrain = xgb.DMatrix(X_train, label=y_train, weight=sw_train)
+    deval = xgb.DMatrix(X_val, label=y_val, weight=sw_val)
 
-    attempts = [
-        (params["n_jobs"], params["tree_method"]),
-    ]
-    if params["n_jobs"] != 1:
-        attempts.append((1, params["tree_method"]))
-    if params["tree_method"] != "hist":
-        attempts.append((1, "hist"))
+    # parameters for the sklearn wrapper used only for returning the model
+    sk_params = {
+        "max_depth": params.get("max_depth"),
+        "subsample": params.get("subsample"),
+        "colsample_bytree": params.get("colsample_bytree"),
+        "tree_method": params.get("tree_method"),
+        "n_jobs": params.get("nthread"),
+        "random_state": params.get("random_state"),
+        "predictor": params.get("predictor", None),
+        "verbosity": params.get("verbosity"),
+        "n_estimators": n_estimators,
+    }
+    # remove None values
+    sk_params = {k: v for k, v in sk_params.items() if v is not None}
 
-    last_exc: BaseException | None = None
-    for n_jobs, tree_method in attempts:
-        params["n_jobs"] = n_jobs
-        params["tree_method"] = tree_method
-        if tree_method == "hist":
-            params.pop("predictor", None)
-        model = XGBRegressor(**params)
+    reduced_estimators = False
+    while True:
         try:
-            model.fit(X, y, sample_weight=sample_weight)
+            booster = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=n_estimators,
+                evals=[(deval, "eval")],
+                early_stopping_rounds=early_rounds,
+            )
+            model = xgb.XGBRegressor(**sk_params)
+            model._Booster = booster
+            model._n_features_in = X.shape[1]
+            buffer = BytesIO()
+            joblib.dump(model, buffer, compress=False)
+            atomic_write(Path(model_path), buffer.getvalue())
+            return model
         except _MEM_ERRORS as exc:  # pragma: no cover - depends on resources
-            last_exc = exc
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            if params.get("tree_method") == "gpu_hist":
+                logger.warning("OOM on GPU, falling back to CPU n_jobs=1; peak RSS=%.0fMB", peak)
+                params["tree_method"] = "hist"
+                params.pop("predictor", None)
+                params["nthread"] = 1
+                sk_params["tree_method"] = "hist"
+                sk_params.pop("predictor", None)
+                sk_params["n_jobs"] = 1
+            elif params.get("nthread", -1) != 1:
+                logger.warning(
+                    "OOM with n_jobs=%s, retrying with n_jobs=1; peak RSS=%.0fMB",
+                    params.get("nthread"),
+                    peak,
+                )
+                params["nthread"] = 1
+                sk_params["n_jobs"] = 1
+            elif not reduced_estimators and n_estimators > 1:
+                new_estimators = max(1, int(n_estimators * 0.7))
+                logger.warning(
+                    "OOM; reducing n_estimators %d→%d; peak RSS=%.0fMB",
+                    n_estimators,
+                    new_estimators,
+                    peak,
+                )
+                n_estimators = new_estimators
+                sk_params["n_estimators"] = n_estimators
+                reduced_estimators = True
+            elif params.get("max_depth", 0) > 1:
+                new_depth = max(1, params["max_depth"] - 2)
+                logger.warning(
+                    "OOM; reducing max_depth %d→%d; peak RSS=%.0fMB",
+                    params["max_depth"],
+                    new_depth,
+                    peak,
+                )
+                params["max_depth"] = new_depth
+                sk_params["max_depth"] = new_depth
+            else:
+                raise exc
             gc.collect()
             continue
-        buffer = BytesIO()
-        joblib.dump(model, buffer, compress=False)
-        atomic_write(Path(model_path), buffer.getvalue())
-        return model
-
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("Training failed without a specific exception")
 
 
 def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
