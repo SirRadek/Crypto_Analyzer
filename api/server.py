@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 import xgboost as xgb
 from fastapi import FastAPI
@@ -34,18 +35,22 @@ def _load_last_row() -> tuple[pd.Timestamp, float, pd.DataFrame]:
     return ts, last_price, X_last
 
 
-@app.get("/predict", response_model=PredictionResponse)
+@app.get("/predict", response_model=PredictionResponse)  # type: ignore[misc]
 def predict() -> PredictionResponse:  # pragma: no cover - FastAPI handles response
     ts, last_price, X_last = _load_last_row()
-    dlast = xgb.DMatrix(X_last)
-    delta = reg.predict(dlast)[0]
-    low = q10.predict(dlast)[0]
-    high = q90.predict(dlast)[0]
-    p_hat = to_price(last_price, delta)
-    p_low = to_price(last_price, low)
-    p_high = to_price(last_price, high)
-    p_low, p_high = min(p_low, p_high), max(p_low, p_high)
-    p_hat = clip_inside(p_hat, p_low, p_high)
+    dlast = xgb.DMatrix(np.asarray(X_last, dtype=np.float32))
+    delta = float(reg.predict(dlast)[0])
+    low = float(q10.predict(dlast)[0])
+    high = float(q90.predict(dlast)[0])
+    p_hat = float(to_price(last_price, delta))
+    p_low = float(to_price(last_price, low))
+    p_high = float(to_price(last_price, high))
+    p_low, p_high = (min(p_low, p_high), max(p_low, p_high))
+    p_hat = clip_inside(
+        np.array([p_hat], dtype=np.float32),
+        np.array([p_low], dtype=np.float32),
+        np.array([p_high], dtype=np.float32),
+    )[0]
     return PredictionResponse(
         timestamp=str(ts),
         p_low=float(p_low),

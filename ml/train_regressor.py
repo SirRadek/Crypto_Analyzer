@@ -19,7 +19,6 @@ import xgboost as xgb
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
-
 MODEL_PATH = "ml/meta_model_reg.joblib"
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,6 @@ def train_regressor(  # type: ignore[no-untyped-def]
     use_gpu: bool = False,
     train_window: int | None = None,
 ) -> xgb.XGBRegressor:
-
     """Train an XGBoost regressor with deterministic defaults and OOM fallback.
 
     The function always casts inputs to ``float32`` and constructs ``xgb.DMatrix``
@@ -105,8 +103,16 @@ def train_regressor(  # type: ignore[no-untyped-def]
         sw_train, sw_val = sample_weight[:-eval_size], sample_weight[-eval_size:]
     else:
         sw_train = sw_val = None
-    dtrain = xgb.DMatrix(X_train, label=y_train, weight=sw_train)
-    deval = xgb.DMatrix(X_val, label=y_val, weight=sw_val)
+    dtrain = xgb.DMatrix(
+        np.asarray(X_train, dtype=np.float32),
+        label=np.asarray(y_train, dtype=np.float32),
+        weight=None if sw_train is None else np.asarray(sw_train, dtype=np.float32),
+    )
+    deval = xgb.DMatrix(
+        np.asarray(X_val, dtype=np.float32),
+        label=np.asarray(y_val, dtype=np.float32),
+        weight=None if sw_val is None else np.asarray(sw_val, dtype=np.float32),
+    )
 
     # parameters for the sklearn wrapper used only for returning the model
     sk_params = {
@@ -135,7 +141,7 @@ def train_regressor(  # type: ignore[no-untyped-def]
             )
             model = xgb.XGBRegressor(**sk_params)
             model._Booster = booster
-            model._n_features_in = X.shape[1]  # type: ignore[attr-defined]
+            model._n_features_in = X.shape[1]
             buffer = BytesIO()
             joblib.dump(model, buffer, compress=False)
             atomic_write(Path(model_path), buffer.getvalue())

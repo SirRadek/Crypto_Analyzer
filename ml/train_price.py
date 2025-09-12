@@ -4,6 +4,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
@@ -31,6 +32,11 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+def _to_f32(arr: Any) -> np.ndarray:
+    """Return a float32 numpy array, densifying sparse inputs if needed."""
+    return np.asarray(arr.toarray() if sparse.issparse(arr) else arr, dtype=np.float32)
+
+
 def _log(stage: str, **kwargs: float | int) -> None:
     process = psutil.Process()
     payload = {
@@ -52,7 +58,7 @@ def _validate_features(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFram
     if missing:
         raise ValueError(f"Missing features: {missing}")
     X = df[feature_cols]
-    if X.dtypes.ne(np.float32).any():
+    if X.dtypes.astype(str).ne("float32").any():
         raise ValueError("Features must be float32")
     if X.isna().any().any():
         raise ValueError("NaN values in features")
@@ -82,8 +88,8 @@ def train_price(
     for fold, (train_idx, test_idx) in enumerate(time_folds(len(df), embargo=config.embargo)):
         X_train, y_train = X_matrix[train_idx], y.iloc[train_idx]
         X_test, y_test = X_matrix[test_idx], y.iloc[test_idx]
-        dtrain = xgb.DMatrix(X_train, label=y_train)
-        dtest = xgb.DMatrix(X_test, label=y_test)
+        dtrain = xgb.DMatrix(_to_f32(X_train), label=_to_f32(y_train))
+        dtest = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_test))
         reg_params, reg_rounds = build_reg()
         q10_params, q_rounds = build_quantile(config.quantiles["low"])
         q90_params, q90_rounds = build_quantile(config.quantiles["high"])
@@ -117,7 +123,7 @@ def train_price(
         reg_models.append(reg)
         q10_models.append(q10)
         q90_models.append(q90)
-        last_price = df["close"].iloc[test_idx].values
+        last_price = np.asarray(df["close"].iloc[test_idx].values, dtype=np.float32)
         delta_hat = reg.predict(dtest)
         low_hat = q10.predict(dtest)
         high_hat = q90.predict(dtest)
@@ -161,7 +167,7 @@ def train_price(
     q90_params, q90_rounds = build_quantile(config.quantiles["high"])
     for p in (reg_params, q10_params, q90_params):
         p["nthread"] = config.n_jobs
-    dall = xgb.DMatrix(X_matrix, label=y)
+    dall = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y))
     reg_final = xgb.train(reg_params, dall, reg_rounds, verbose_eval=False)
     q10_final = xgb.train(q10_params, dall, q_rounds, verbose_eval=False)
     q90_final = xgb.train(q90_params, dall, q90_rounds, verbose_eval=False)

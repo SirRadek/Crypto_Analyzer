@@ -4,8 +4,10 @@ import pandas as pd
 
 
 def backfill_actuals_and_errors(
-    db_path="db/data/crypto_data.sqlite", table_pred="prediction", symbol="BTCUSDT"
-):
+    db_path: str = "db/data/crypto_data.sqlite",
+    table_pred: str = "prediction",
+    symbol: str = "BTCUSDT",
+) -> None:
     conn = sqlite3.connect(db_path)
 
     preds = pd.read_sql(

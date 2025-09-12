@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 # Only a minimal subset of indicators is required for the Core-18 feature set.
 # Keeping the imports explicit makes the dependency surface obvious and helps
@@ -15,8 +16,8 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy(deep=False)
 
     # --- Order-flow & volume -------------------------------------------------
-    vol = df["volume"].replace(0, np.nan)
-    qvol = df["quote_asset_volume"].replace(0, np.nan)
+    vol = df["volume"].astype(float).replace(0, np.nan)
+    qvol = df["quote_asset_volume"].astype(float).replace(0, np.nan)
 
     df["tbr_base"] = df["taker_buy_base"] / vol
     tbr_quote = df["taker_buy_quote"] / qvol
@@ -31,14 +32,16 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     df["rel_close_vwap"] = (df["close"] - vwap).abs() / vwap
 
     # --- Returns & momentum ---------------------------------------------------
-    ret1 = np.log(df["close"] / df["close"].shift(1))
+    ret1 = pd.Series(
+        np.log(df["close"] / df["close"].shift(1)), index=df.index
+    )
     df["ret3"] = ret1.rolling(3).sum()
     df["ret12"] = ret1.rolling(12).sum()
 
     # --- Volatility -----------------------------------------------------------
     df["rv_5m"] = ret1.rolling(1).std()
     df["volatility_60m"] = ret1.rolling(12).std()
-    hl_log = np.log(df["high"] / df["low"])
+    hl_log = pd.Series(np.log(df["high"] / df["low"]), index=df.index)
     parkinson = (hl_log**2) / (4 * np.log(2))
     df["parkinson12"] = np.sqrt(parkinson.rolling(12).mean())
     tr = pd.concat(
@@ -110,6 +113,9 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     feature_only = df.drop(columns=target_cols, errors="ignore")
     if feature_only.isna().any().any():
         raise ValueError("NaN values present after feature engineering")
+    obj_cols = feature_only.select_dtypes(include="object").columns
+    if len(obj_cols) > 0:
+        raise TypeError(f"Object dtypes present after feature merge: {list(obj_cols)}")
 
     return df
 
