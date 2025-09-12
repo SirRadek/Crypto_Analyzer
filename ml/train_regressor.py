@@ -1,5 +1,6 @@
 import logging
 import os
+from collections.abc import Sequence
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -7,9 +8,10 @@ from typing import Any
 import joblib
 from sklearn.ensemble import RandomForestRegressor
 
+from crypto_analyzer.model_manager import atomic_write
+
 from .oob import fit_incremental_forest, halving_random_search
 from .train import _gpu_available
-from crypto_analyzer.model_manager import atomic_write
 
 MODEL_PATH = "ml/meta_model_reg.joblib"
 MAX_MODEL_BYTES = 100 * 1024**3  # 200 GB guard
@@ -165,7 +167,6 @@ import argparse
 import json
 import traceback
 from datetime import datetime
-from typing import Iterable
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT
 
@@ -185,7 +186,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.train_start and not args.train_end:
@@ -227,7 +228,7 @@ def _log_failure(stem: str, exc: BaseException) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
-def main(argv: Iterable[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.reset_metadata:
         _reset_metadata()
