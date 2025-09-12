@@ -108,3 +108,45 @@ def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
         raise ValueError(f"Unexpected row length for save_predictions: {row_len}")
     conn.commit()
     conn.close()
+
+
+def delete_unmatched_duplicates(db_path: str = DB_PATH, table_name: str = TABLE_NAME) -> int:
+    """Remove older duplicate predictions lacking ground truth.
+
+    For entries where ``y_true`` is ``NULL`` we may occasionally store the same
+    prediction multiple times (e.g. repeated model runs).  Such duplicates
+    cannot be paired with a true value yet and only waste space.  This helper
+    keeps the most recent row for each
+    ``(symbol, interval, horizon_steps, target_time_ms)`` combination and
+    deletes the rest.
+
+    Parameters
+    ----------
+    db_path : str, optional
+        Path to the SQLite database.
+    table_name : str, optional
+        Name of the predictions table.
+
+    Returns
+    -------
+    int
+        Number of deleted rows.
+    """
+
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute(
+        f"""
+        DELETE FROM {table_name}
+        WHERE y_true IS NULL
+          AND id NOT IN (
+            SELECT MAX(id) FROM {table_name}
+            WHERE y_true IS NULL
+            GROUP BY symbol, interval, horizon_steps, target_time_ms
+          )
+        """
+    )
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    return deleted

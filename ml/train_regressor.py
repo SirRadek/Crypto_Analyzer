@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import os
-import psutil
+import traceback
 import typing
 from collections.abc import Sequence
 from datetime import datetime
@@ -14,6 +14,7 @@ from typing import Any
 
 import joblib
 import numpy as np
+import psutil
 import xgboost as xgb
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
@@ -83,7 +84,8 @@ def train_regressor(  # type: ignore[no-untyped-def]
     params.setdefault("tree_method", "hist")
     params.setdefault("device", "cuda" if use_gpu else "cpu")
     params.setdefault("max_depth", 8)
-    params.setdefault("n_estimators", 600)
+    # Slightly more training by default for better accuracy
+    params.setdefault("n_estimators", 800)
     params.setdefault("subsample", 0.8)
     params.setdefault("colsample_bytree", min(0.8, colsample_default))
     params.setdefault("early_stopping_rounds", 50)
@@ -198,9 +200,7 @@ def train_regressor(  # type: ignore[no-untyped-def]
             continue
 
 
-def load_regressor(
-    model_path: str = MODEL_PATH, mmap_mode: str | None = None
-) -> xgb.XGBRegressor:
+def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None) -> xgb.XGBRegressor:
     """Load a previously trained regressor with graceful OOM handling."""
 
     if not os.path.exists(model_path):
@@ -212,14 +212,13 @@ def load_regressor(
 
     try:
         return typing.cast(
-            xgb.XGBRegressor, joblib.load(model_path, mmap_mode=mode)  # type: ignore[arg-type]
+            xgb.XGBRegressor,
+            joblib.load(model_path, mmap_mode=mode),  # type: ignore[arg-type]
         )
     except _MEM_ERRORS:
         if mode != "r":
             print("Memory low; retrying regressor load with mmap")
-            return typing.cast(
-                xgb.XGBRegressor, joblib.load(model_path, mmap_mode="r")
-            )
+            return typing.cast(xgb.XGBRegressor, joblib.load(model_path, mmap_mode="r"))
         raise
 
 

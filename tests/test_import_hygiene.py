@@ -2,6 +2,7 @@ import importlib
 import os
 import sys
 
+sys.path.append(os.getcwd())
 MAIN = os.environ.get("MAIN_MODULE", "crypto_analyzer")
 
 
