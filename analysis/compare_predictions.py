@@ -18,11 +18,16 @@ def backfill_actuals_and_errors(
         print("No predictions to backfill.")
         return
 
-    actuals = pd.read_sql(
-        "SELECT open_time AS ts_ms, close FROM prices WHERE symbol = ?",
-        conn,
-        params=(symbol,),
+    # Fetch only the rows from ``prices`` that correspond to the prediction
+    # timestamps instead of loading the entire table into memory.  This keeps
+    # the peak RAM usage small when the prices table grows large.
+    pred_times = preds["target_time_ms"].tolist()
+    placeholder = ",".join(["?"] * len(pred_times))
+    query = (
+        "SELECT open_time AS ts_ms, close FROM prices "
+        f"WHERE symbol = ? AND open_time IN ({placeholder})"
     )
+    actuals = pd.read_sql(query, conn, params=[symbol, *pred_times])
 
     merged = preds.merge(actuals, left_on="target_time_ms", right_on="ts_ms", how="left")
     merged.rename(columns={"close": "y_true"}, inplace=True)

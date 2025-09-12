@@ -7,8 +7,11 @@ import pandas as pd
 
 
 def create_features(df):
-    """Add a lightweight set of technical, order-flow and time features."""
-    df = df.copy()
+    """Add a lightweight set of technical, order-flow and time features.
+
+    A shallow copy is used to avoid doubling memory usage while keeping the
+    original ``df`` unmodified."""
+    df = df.copy(deep=False)
 
     # --- Order-flow & volume -------------------------------------------------
     vol = df["volume"].replace(0, np.nan)

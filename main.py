@@ -1,22 +1,22 @@
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from analysis.feature_engineering import create_features, FEATURE_COLUMNS
 from analysis.compare_predictions import backfill_actuals_and_errors
+from analysis.feature_engineering import FEATURE_COLUMNS, create_features
 from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
-from ml.train import train_model, load_model
-from ml.train_regressor import train_regressor, load_regressor
 from ml.model_utils import match_model_features
+from ml.train import load_model, train_model
+from ml.train_regressor import load_regressor, train_regressor
 from utils.config import CONFIG
-from utils.helpers import ensure_dir_exists
-from utils.progress import step, timed, p
+from utils.helpers import ensure_dir_exists, set_cpu_limit
+from utils.progress import p, step, timed
 
 SYMBOL = CONFIG.symbol
 DB_PATH = CONFIG.db_path
@@ -25,6 +25,8 @@ TABLE_PRED = CONFIG.table_pred
 INTERVAL = CONFIG.interval
 # number of future five-minute steps to predict, e.g. 24 -> next 2 hours
 FORWARD_STEPS = CONFIG.forward_steps
+CPU_LIMIT = CONFIG.cpu_limit
+REPEAT_COUNT = CONFIG.repeat_count
 INTERVAL_TO_MIN = {
     "1m": 1,
     "3m": 3,
@@ -46,7 +48,7 @@ REG_ACC_PATH = Path("ml/backtest_acc_reg.json")
 
 
 def _created_at_iso():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_name: str) -> int:
@@ -65,7 +67,6 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
     return deleted
 
 
-
 def list_model_paths(pattern: str, count: int):
     paths = []
     indices = []
@@ -81,19 +82,19 @@ def list_model_paths(pattern: str, count: int):
 
 def load_accuracy_weights(path: Path, indices):
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     else:
         data = {}
     return [float(data.get(str(i), 1.0)) for i in indices]
 
-
 def prepare_targets(df, forward_steps=1):
-    df = df.copy()
+    df = df.copy(deep=False)
     df["target_cls"] = (df["close"].shift(-forward_steps) > df["close"]).astype(int)
     df["target_reg"] = df["close"].shift(-forward_steps)
     df = df.dropna(subset=["target_cls", "target_reg"])
     return df
+
 
 def main(train=True):
     ensure_dir_exists("db/data")
@@ -102,6 +103,7 @@ def main(train=True):
     step(1, 8, "Import latest data")
     try:
         from db.btc_import import import_latest_data
+
         import_latest_data()
     except Exception as exc:
         p(f"btc_import failed: {exc}")
@@ -117,7 +119,7 @@ def main(train=True):
         df = create_features(df)
         p(f"  -> rows after features={len(df)}")
 
-    full_df = df.copy()
+    full_df = df.copy(deep=False)
 
     step(4, 8, "Backfill predictions & train/load models")
     create_predictions_table(DB_PATH, TABLE_PRED)
@@ -139,13 +141,13 @@ def main(train=True):
     train_df = pd.concat(horizon_dfs, ignore_index=True)
 
     base_feats = train_df[FEATURE_COLS]
-    for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
+    for path, idx, w in zip(cls_paths, cls_indices, cls_weights, strict=False):
         model = load_model(model_path=path)
         feats = match_model_features(base_feats, model)
         preds = model.predict_proba(feats)[:, 1] * w
         train_df[f"cls_pred_{idx}"] = preds
         del model
-    for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
+    for path, idx, w in zip(reg_paths, reg_indices, reg_weights, strict=False):
         model = load_regressor(model_path=path)
         feats = match_model_features(base_feats, model)
         preds = model.predict(feats) * w
@@ -180,14 +182,12 @@ def main(train=True):
     # Base model predictions for the latest row
     base_last = last_row[FEATURE_COLS]
     last_base_preds = {}
-    for path, idx, w in zip(cls_paths, cls_indices, cls_weights):
+    for path, idx, w in zip(cls_paths, cls_indices, cls_weights, strict=False):
         model = load_model(model_path=path)
         feats = match_model_features(base_last, model)
-        last_base_preds[f"cls_pred_{idx}"] = float(
-            model.predict_proba(feats)[:, 1][0] * w
-        )
+        last_base_preds[f"cls_pred_{idx}"] = float(model.predict_proba(feats)[:, 1][0] * w)
         del model
-    for path, idx, w in zip(reg_paths, reg_indices, reg_weights):
+    for path, idx, w in zip(reg_paths, reg_indices, reg_weights, strict=False):
         model = load_regressor(model_path=path)
         feats = match_model_features(base_last, model)
         last_base_preds[f"reg_pred_{idx}"] = float(model.predict(feats)[0] * w)
@@ -238,5 +238,8 @@ def main(train=True):
     total = time.perf_counter() - start
     p(f"Done in {total:.2f}s")
 
-if __name__ == '__main__':
-    main()
+
+if __name__ == "__main__":
+    set_cpu_limit(CPU_LIMIT)
+    for _ in range(REPEAT_COUNT):
+        main()

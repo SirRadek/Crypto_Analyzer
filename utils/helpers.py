@@ -26,3 +26,19 @@ def timestamp_to_datetime(ts):
     from datetime import datetime
 
     return datetime.fromtimestamp(ts / 1000.0)
+
+
+def set_cpu_limit(cores: int) -> 20:
+    """Limit the process to ``cores`` CPU cores if possible.
+
+    If ``psutil`` or CPU affinity is not available, the function silently
+    falls back without raising an error.
+    """
+    try:
+        import psutil
+
+        cores = max(1, int(cores))
+        proc = psutil.Process()
+        proc.cpu_affinity(list(range(cores)))
+    except Exception:
+        pass
