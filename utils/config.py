@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -11,7 +11,8 @@ class Config:
     table_pred: str = os.getenv("TABLE_PRED", "prediction")
     interval: str = os.getenv("INTERVAL", "5m")
     forward_steps: int = int(os.getenv("FORWARD_STEPS", "24"))
-
+    cpu_limit: int = int(os.getenv("CPU_LIMIT", str(os.cpu_count() or 20)))
+    repeat_count: int = int(os.getenv("REPEAT_COUNT", "50"))
 
 CONFIG = Config()
 

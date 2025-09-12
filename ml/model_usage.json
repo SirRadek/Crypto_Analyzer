@@ -1,8 +1,4 @@
 {
-  "ml\\model_reg.pkl": 596,
-  "ml\\model_reg_run0.pkl": 96,
-  "ml\\model_reg_run1.pkl": 96,
-  "ml\\model_reg_run2.pkl": 96,
-  "ml\\model_reg_run3.pkl": 96,
-  "ml\\model_reg_run4.pkl": 96
+  "ml\\meta_model_cls.joblib": 1,
+  "ml\\meta_model_reg.joblib": 1
 }

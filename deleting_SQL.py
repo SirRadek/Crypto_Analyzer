@@ -8,6 +8,8 @@ import time
 from utils.config import CONFIG
 
 TWO_YEARS_MS = 2 * 365 * 24 * 60 * 60 * 1000
+ONE_YEAR_MS = 1 * 365 * 24 * 60 * 60 * 1000
+HALF_YEAR_MS = 0.5 * 365 * 24 * 60 * 60 * 1000
 SIX_HOURS_MS = 6 * 60 * 60 * 1000
 
 
@@ -19,7 +21,7 @@ def delete_old_records(db_path: str = CONFIG.db_path) -> tuple[int, int]:
     """
 
     now_ms = int(time.time() * 1000)
-    prices_before = now_ms - TWO_YEARS_MS
+    prices_before = now_ms - ONE_YEAR_MS
     preds_before = now_ms - SIX_HOURS_MS
 
     with sqlite3.connect(db_path) as conn:
@@ -42,4 +44,3 @@ def delete_old_records(db_path: str = CONFIG.db_path) -> tuple[int, int]:
 
 
 __all__ = ["delete_old_records"]
-

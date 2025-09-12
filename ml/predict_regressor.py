@@ -1,16 +1,19 @@
 """Helpers for making predictions with regression models."""
 
-import numpy as np
+import importlib
+from typing import TYPE_CHECKING
 
-from .train_regressor import load_regressor
-from .predict import _load_usage_counts, _save_usage_counts
+if TYPE_CHECKING:  # pragma: no cover
+    pass
 
 
-def predict_prices(df, feature_cols, model_path="ml/model_reg.pkl"):
-    """Predict prices using a single regressor model."""
-    model = load_regressor(model_path)
-    X = df[feature_cols]
-    return model.predict(X)
+def _lazy_meta():
+    return importlib.import_module("ml.meta")
+
+
+def predict_prices(df, feature_cols, model_path="ml/meta_model_reg.joblib"):
+    """Predict prices using the meta regressor."""
+    return _lazy_meta().predict_meta(df, feature_cols, model_path)
 
 
 def predict_weighted_prices(
@@ -19,42 +22,16 @@ def predict_weighted_prices(
     model_paths,
     usage_path="ml/model_usage.json",
 ):
-    """Predict prices with multiple models combined by usage-based weights.
+    """Backward-compatible wrapper for weighted base-regressor ensembling."""
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Feature data for prediction.
-    feature_cols : list[str]
-        Columns used as features.
-    model_paths : list[str]
-        Paths to regressor models.
-    usage_path : str, optional
-        Location of JSON file storing model usage counts.
+    from .ensemble import predict_weighted as _predict_weighted
 
-    Returns
-    -------
-    numpy.ndarray
-        Weighted average predictions from all models.
-    """
-
-    counts = _load_usage_counts(usage_path)
-    counts = {path: counts.get(path, 0) for path in model_paths}
-    total = sum(counts.values())
-    if total == 0:
-        weights = {path: 1 / len(model_paths) for path in model_paths}
-    else:
-        weights = {path: counts[path] / total for path in model_paths}
-
-    models = {path: load_regressor(path) for path in model_paths}
-    X = df[feature_cols]
-    preds = np.array([models[path].predict(X) for path in model_paths])
-    weighted = np.average(
-        preds, axis=0, weights=[weights[path] for path in model_paths]
+    return _predict_weighted(
+        df,
+        feature_cols,
+        model_paths,
+        usage_counts_path=usage_path,
     )
 
-    for path in model_paths:
-        counts[path] = counts.get(path, 0) + len(df)
-    _save_usage_counts(counts, usage_path)
 
-    return weighted
+__all__ = ["predict_prices", "predict_weighted_prices"]

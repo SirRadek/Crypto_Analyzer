@@ -7,8 +7,10 @@ from tqdm import tqdm
 def p(msg: str):
     print(msg, flush=True)
 
+
 def step(i: int, n: int, msg: str):
     p(f"[{i}/{n}] {msg}")
+
 
 @contextmanager
 def timed(label: str):
@@ -19,6 +21,7 @@ def timed(label: str):
     finally:
         dt = time.perf_counter() - t0
         p(f"{label} done in {dt:.2f}s")
+
 
 def bar(iterable, desc: str, unit: str = "it"):
     return tqdm(iterable, desc=desc, unit=unit)
