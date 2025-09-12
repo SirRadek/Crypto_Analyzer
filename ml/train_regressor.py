@@ -6,6 +6,7 @@ import math
 import os
 import resource
 import traceback
+import typing
 from collections.abc import Sequence
 from datetime import datetime
 from io import BytesIO
@@ -18,7 +19,6 @@ import xgboost as xgb
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
-from .train import _gpu_available
 
 MODEL_PATH = "ml/meta_model_reg.joblib"
 logger = logging.getLogger(__name__)
@@ -38,13 +38,13 @@ def _should_mmap(path: str) -> bool:
         import psutil
 
         size = os.path.getsize(path)
-        avail = psutil.virtual_memory().available
+        avail = int(psutil.virtual_memory().available)
         return size > 0.5 * avail
     except Exception:
         return False
 
 
-def train_regressor(
+def train_regressor(  # type: ignore[no-untyped-def]
     X,
     y,
     model_path: str = MODEL_PATH,
@@ -52,7 +52,8 @@ def train_regressor(
     params: dict[str, Any] | None = None,
     use_gpu: bool = False,
     train_window: int | None = None,
-):
+) -> xgb.XGBRegressor:
+
     """Train an XGBoost regressor with deterministic defaults and OOM fallback.
 
     The function always casts inputs to ``float32`` and constructs ``xgb.DMatrix``
@@ -83,6 +84,7 @@ def train_regressor(
 
     params = params.copy() if params else {}
     params.setdefault("tree_method", "hist")
+    params.setdefault("device", "cuda" if use_gpu else "cpu")
     params.setdefault("max_depth", 8)
     params.setdefault("n_estimators", 600)
     params.setdefault("subsample", 0.8)
@@ -91,13 +93,6 @@ def train_regressor(
     params.setdefault("nthread", -1)
     params.setdefault("random_state", 42)
     params.setdefault("verbosity", 0)
-
-    if use_gpu and _gpu_available():
-        params["tree_method"] = "gpu_hist"
-        params["predictor"] = "gpu_predictor"
-    elif use_gpu:
-        logger.warning("CUDA not available, falling back to CPU")
-        params["tree_method"] = "hist"
 
     n_estimators = params.pop("n_estimators")
     early_rounds = params.pop("early_stopping_rounds")
@@ -119,9 +114,9 @@ def train_regressor(
         "subsample": params.get("subsample"),
         "colsample_bytree": params.get("colsample_bytree"),
         "tree_method": params.get("tree_method"),
+        "device": params.get("device"),
         "n_jobs": params.get("nthread"),
         "random_state": params.get("random_state"),
-        "predictor": params.get("predictor", None),
         "verbosity": params.get("verbosity"),
         "n_estimators": n_estimators,
     }
@@ -140,20 +135,25 @@ def train_regressor(
             )
             model = xgb.XGBRegressor(**sk_params)
             model._Booster = booster
-            model._n_features_in = X.shape[1]
+            model._n_features_in = X.shape[1]  # type: ignore[attr-defined]
             buffer = BytesIO()
             joblib.dump(model, buffer, compress=False)
             atomic_write(Path(model_path), buffer.getvalue())
             return model
+        except xgb.core.XGBoostError as exc:
+            if params.get("device") == "cuda":
+                logger.warning("CUDA not available, falling back to CPU")
+                params["device"] = "cpu"
+                sk_params["device"] = "cpu"
+                continue
+            raise exc
         except _MEM_ERRORS as exc:  # pragma: no cover - depends on resources
             peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-            if params.get("tree_method") == "gpu_hist":
+            if params.get("device") == "cuda":
                 logger.warning("OOM on GPU, falling back to CPU n_jobs=1; peak RSS=%.0fMB", peak)
-                params["tree_method"] = "hist"
-                params.pop("predictor", None)
+                params["device"] = "cpu"
                 params["nthread"] = 1
-                sk_params["tree_method"] = "hist"
-                sk_params.pop("predictor", None)
+                sk_params["device"] = "cpu"
                 sk_params["n_jobs"] = 1
             elif params.get("nthread", -1) != 1:
                 logger.warning(
@@ -190,7 +190,9 @@ def train_regressor(
             continue
 
 
-def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
+def load_regressor(
+    model_path: str = MODEL_PATH, mmap_mode: str | None = None
+) -> xgb.XGBRegressor:
     """Load a previously trained regressor with graceful OOM handling."""
 
     if not os.path.exists(model_path):
@@ -201,11 +203,15 @@ def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
         mode = "r"
 
     try:
-        return joblib.load(model_path, mmap_mode=mode)  # type: ignore[arg-type]
+        return typing.cast(
+            xgb.XGBRegressor, joblib.load(model_path, mmap_mode=mode)  # type: ignore[arg-type]
+        )
     except _MEM_ERRORS:
         if mode != "r":
             print("Memory low; retrying regressor load with mmap")
-            return joblib.load(model_path, mmap_mode="r")
+            return typing.cast(
+                xgb.XGBRegressor, joblib.load(model_path, mmap_mode="r")
+            )
         raise
 
 

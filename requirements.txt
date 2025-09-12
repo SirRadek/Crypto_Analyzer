@@ -1,6 +1,6 @@
 python-dotenv
-pandas~=2.3.2
-numpy~=2.3.2
+pandas>=2.2
+numpy>=1.26
 scikit-learn~=1.7.1
 scipy~=1.16.2
 matplotlib
