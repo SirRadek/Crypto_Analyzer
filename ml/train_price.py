@@ -23,7 +23,7 @@ def train_price(df, feature_cols, target_kind="log", outdir="models/xgb_price"):
     y = df[target_col].astype("float32")
 
     zero_ratio = float((X == 0).sum().sum() / X.size)
-    X_matrix = sparse.csr_matrix(X.values) if zero_ratio > 0.5 else X.values
+    X_matrix = sparse.csr_matrix(X.values) if zero_ratio > 0.6 else X.values
 
     preds = []
     metrics = []

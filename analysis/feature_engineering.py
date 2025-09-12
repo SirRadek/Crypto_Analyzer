@@ -90,11 +90,25 @@ def create_features(df):
     df["delta_log_120m"] = np.log(df["close"].shift(-horizon) / df["close"])
     df["delta_lin_120m"] = df["close"].shift(-horizon) - df["close"]
     df["delta_log_60m"] = np.log(df["close"].shift(-12) / df["close"])
+    df["delta_lin_60m"] = df["close"].shift(-12) - df["close"]
     df["delta_log_240m"] = np.log(df["close"].shift(-48) / df["close"])
+    df["delta_lin_240m"] = df["close"].shift(-48) - df["close"]
 
     # Downcast all float columns to float32 to save memory
     float_cols = df.select_dtypes(include="float64").columns
     df[float_cols] = df[float_cols].astype(np.float32)
+
+    target_cols = [
+        "delta_log_120m",
+        "delta_lin_120m",
+        "delta_log_60m",
+        "delta_lin_60m",
+        "delta_log_240m",
+        "delta_lin_240m",
+    ]
+    feature_only = df.drop(columns=target_cols, errors="ignore")
+    if feature_only.isna().any().any():
+        raise ValueError("NaN values present after feature engineering")
 
     return df
 
