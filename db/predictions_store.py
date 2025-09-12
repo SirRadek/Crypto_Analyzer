@@ -50,6 +50,10 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
     c.execute(
         f"CREATE INDEX IF NOT EXISTS idx_{table_name}_target_time ON {table_name}(target_time_ms)"
     )
+    c.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pred_time "
+        f"ON {table_name}(symbol, interval, horizon_steps, prediction_time_ms)"
+    )
     conn.commit()
     conn.close()
 
@@ -70,7 +74,7 @@ def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
         """,
             rows,
         )
-    elif row_len == 13 and isinstance(rows[0][5], (int, float)):
+    elif row_len == 13 and isinstance(rows[0][5], int | float):
         c.executemany(
             f"""
           INSERT INTO {table_name} (
@@ -108,3 +112,56 @@ def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
         raise ValueError(f"Unexpected row length for save_predictions: {row_len}")
     conn.commit()
     conn.close()
+
+
+def delete_unmatched_duplicates(db_path: str = DB_PATH, table_name: str = TABLE_NAME) -> int:
+    """Remove older duplicate predictions lacking ground truth.
+
+    For entries where ``y_true`` is ``NULL`` we may occasionally store the same
+    prediction multiple times (e.g. repeated model runs).  Such duplicates
+    cannot be paired with a true value yet and only waste space.  This helper
+    keeps the most recent row for each
+    ``(symbol, interval, horizon_steps, prediction_time_ms)`` combination and
+    deletes the rest.
+
+    Parameters
+    ----------
+    db_path : str, optional
+        Path to the SQLite database.
+    table_name : str, optional
+        Name of the predictions table.
+
+    Returns
+    -------
+    int
+        Number of deleted rows.
+    """
+
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pred_time "
+        f"ON {table_name}(symbol, interval, horizon_steps, prediction_time_ms)"
+    )
+    c.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY symbol, interval, horizon_steps, prediction_time_ms
+                    ORDER BY id DESC
+                ) AS rn
+            FROM {table_name}
+            WHERE y_true IS NULL
+        )
+        DELETE FROM {table_name}
+        WHERE id IN (
+            SELECT id FROM ranked WHERE rn > 1
+        )
+        """
+    )
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
