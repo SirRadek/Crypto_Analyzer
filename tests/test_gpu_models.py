@@ -8,7 +8,8 @@ import logging
 import pandas as pd
 import pytest
 from sklearn.datasets import make_classification, make_regression
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBRegressor
 
 from ml.train import _gpu_available as cls_gpu_available
 from ml.train import train_model
@@ -43,8 +44,8 @@ def test_regressor_gpu_fallback(monkeypatch, caplog):
     X, y = _reg_data()
     caplog.set_level(logging.WARNING)
     monkeypatch.setattr("ml.train_regressor._gpu_available", lambda: False)
-    model = train_regressor(X, y, use_gpu=True, fallback_estimators=(10,))
-    assert isinstance(model, RandomForestRegressor)
+    model = train_regressor(X, y, use_gpu=True)
+    assert isinstance(model, XGBRegressor)
     assert any("falling back to CPU" in r.message for r in caplog.records)
 
 
@@ -64,16 +65,8 @@ def test_gpu_shapes_equal():
         preds_gpu_cls = preds_gpu_cls.to_numpy()
     assert preds_gpu_cls.shape == preds_cpu_cls.shape
 
-    reg_gpu = train_regressor(
-        Xr,
-        yr,
-        use_gpu=True,
-        params=dict(n_estimators=10),
-        fallback_estimators=(10,),
-    )
-    reg_cpu = train_regressor(Xr, yr, params=dict(n_estimators=10), fallback_estimators=(10,))
-    preds_gpu_reg = reg_gpu.predict(cudf.from_pandas(Xr.astype("float32")))
+    reg_gpu = train_regressor(Xr, yr, use_gpu=True, params={"n_estimators": 10})
+    reg_cpu = train_regressor(Xr, yr, params={"n_estimators": 10})
+    preds_gpu_reg = reg_gpu.predict(Xr.astype("float32"))
     preds_cpu_reg = reg_cpu.predict(Xr)
-    if hasattr(preds_gpu_reg, "to_numpy"):
-        preds_gpu_reg = preds_gpu_reg.to_numpy()
     assert preds_gpu_reg.shape == preds_cpu_reg.shape

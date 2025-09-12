@@ -2,6 +2,7 @@ import argparse
 import gc
 import json
 import logging
+import math
 import os
 import traceback
 from collections.abc import Sequence
@@ -11,22 +12,15 @@ from pathlib import Path
 from typing import Any
 
 import joblib
-from sklearn.ensemble import RandomForestRegressor
+import numpy as np
+from xgboost import XGBRegressor
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
-from .oob import fit_incremental_forest, halving_random_search
 from .train import _gpu_available
 
 MODEL_PATH = "ml/meta_model_reg.joblib"
-MAX_MODEL_BYTES = 100 * 1024**3  # 200 GB guard
-
-
 logger = logging.getLogger(__name__)
-
-
-def _fits_size(path: str, max_bytes: int = MAX_MODEL_BYTES) -> bool:
-    return os.path.exists(path) and os.path.getsize(path) <= max_bytes
 
 
 try:
@@ -55,101 +49,76 @@ def train_regressor(
     model_path: str = MODEL_PATH,
     sample_weight=None,
     params: dict[str, Any] | None = None,
-    fallback_estimators: tuple[int, ...] = (600, 400, 200, 100),
     use_gpu: bool = False,
-    tune: bool = False,
-    oob_tol: float | None = None,
-    oob_step: int = 50,
-    max_estimators: int = 400,
-    log_path: str = "ml/oob_reg.json",
+    train_window: int | None = None,
 ):
-    """
-    Train a regressor and ensure the saved model file <= 200 GB.
-    Will try a sequence of n_estimators (fallback_estimators) until size fits.
+    """Train an XGBoost regressor with conservative defaults and OOM handling.
 
-    Parameters
-    ----------
-    use_gpu : bool
-        If ``True`` and CUDA with ``cuml`` is available, train a GPU RandomForest.
-        Otherwise, a CPU-based ``RandomForestRegressor`` is used.
+    The training data can be limited to the most recent ``train_window`` rows.
+    Inputs are converted to ``float32`` to reduce memory footprint. If ``use_gpu``
+    is ``True`` and a CUDA device is available, the model is trained with
+    ``tree_method='gpu_hist'``; otherwise ``'hist'`` is used. When a
+    ``MemoryError`` occurs, the function retries with ``n_jobs=1`` and, if
+    necessary, falls back to the CPU ``hist`` tree method.
     """
-    if use_gpu:
-        if _gpu_available():
-            try:  # pragma: no cover - optional dependency
-                import cudf  # type: ignore
-                from cuml.ensemble import RandomForestRegressor as cuRF  # type: ignore
-            except Exception:  # pragma: no cover - optional dependency
-                logger.warning("cuml not available, falling back to CPU")
-            else:
-                params_gpu = params or {
-                    "n_estimators": fallback_estimators[0],
-                    "random_state": 42,
-                }
-                model = cuRF(**params_gpu)
-                X_f = cudf.from_pandas(X.astype("float32"))
-                y_f = cudf.Series(y.astype("float32"))
-                model.fit(X_f, y_f, sample_weight=sample_weight)
-                buffer = BytesIO()
-                joblib.dump(model, buffer, compress=False)
-                atomic_write(Path(model_path), buffer.getvalue())
-                return model
-        else:
+
+    if train_window is not None:
+        X = X[-train_window:]
+        y = y[-train_window:]
+
+    X = X.astype("float32") if hasattr(X, "astype") else np.asarray(X, dtype=np.float32)
+    y = y.astype("float32") if hasattr(y, "astype") else np.asarray(y, dtype=np.float32)
+
+    n_feat = X.shape[1]
+    colsample = min(1.0, math.sqrt(n_feat) / n_feat)
+
+    params = params.copy() if params else {}
+    params.setdefault("n_estimators", 200)
+    params.setdefault("subsample", 0.8)
+    params.setdefault("max_depth", 16)
+    params["max_depth"] = min(params["max_depth"], 16)
+    params.setdefault("colsample_bytree", colsample)
+    params.setdefault("n_jobs", -1)
+    params.setdefault("random_state", 42)
+    params.setdefault("verbosity", 0)
+
+    if use_gpu and _gpu_available():
+        params.setdefault("tree_method", "gpu_hist")
+        params.setdefault("predictor", "gpu_predictor")
+    else:
+        if use_gpu:
             logger.warning("CUDA not available, falling back to CPU")
+        params.setdefault("tree_method", "hist")
 
-    if tune:
-        tuned = halving_random_search(X, y, RandomForestRegressor, random_state=42)
-        params = {**(params or {}), **tuned}
+    attempts = [
+        (params["n_jobs"], params["tree_method"]),
+    ]
+    if params["n_jobs"] != 1:
+        attempts.append((1, params["tree_method"]))
+    if params["tree_method"] != "hist":
+        attempts.append((1, "hist"))
 
-    if oob_tol is not None:
-        model, oob_scores = fit_incremental_forest(
-            X,
-            y,
-            RandomForestRegressor,
-            step=oob_step,
-            max_estimators=max_estimators,
-            tol=oob_tol,
-            random_state=42,
-            log_path=log_path,
-            **(params or {}),
-        )
+    last_exc: BaseException | None = None
+    for n_jobs, tree_method in attempts:
+        params["n_jobs"] = n_jobs
+        params["tree_method"] = tree_method
+        if tree_method == "hist":
+            params.pop("predictor", None)
+        model = XGBRegressor(**params)
+        try:
+            model.fit(X, y, sample_weight=sample_weight)
+        except _MEM_ERRORS as exc:  # pragma: no cover - depends on resources
+            last_exc = exc
+            gc.collect()
+            continue
         buffer = BytesIO()
         joblib.dump(model, buffer, compress=False)
         atomic_write(Path(model_path), buffer.getvalue())
         return model
 
-    if params is None:
-        params = {
-            "n_estimators": fallback_estimators[0],
-            "random_state": 42,
-            "n_jobs": -1,
-            "min_samples_leaf": 2,
-            "verbose": 0,
-        }
-
-    for n in fallback_estimators:
-        params["n_estimators"] = n
-        model = RandomForestRegressor(**params)
-        try:
-            model.fit(X, y, sample_weight=sample_weight)
-            buffer = BytesIO()
-            joblib.dump(model, buffer, compress=False)
-            atomic_write(Path(model_path), buffer.getvalue())
-        except _MEM_ERRORS:
-            print(f"OOM when training regressor with n_estimators={n}, trying fewer trees...")
-            gc.collect()
-            continue
-
-        size_ok = _fits_size(model_path, MAX_MODEL_BYTES)
-        size_mb = os.path.getsize(model_path) / (1024**2)
-        print(f"Regressor saved to {model_path} (n_estimators={n}, size={size_mb:.2f} MB)")
-        if size_ok:
-            return model
-        else:
-            print(f"Model exceeds {MAX_MODEL_BYTES/(1024**3):.0f} GB, retrying with fewer trees...")
-
-    raise RuntimeError(
-        "Could not save model under the size limit; try reducing complexity further."
-    )
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Training failed without a specific exception")
 
 
 def load_regressor(model_path: str = MODEL_PATH, mmap_mode: str | None = None):
