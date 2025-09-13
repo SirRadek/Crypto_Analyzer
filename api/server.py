@@ -17,8 +17,8 @@ DATA_PATH = os.getenv("DATA_PATH", "data/latest.parquet")
 app = FastAPI()
 
 reg = joblib.load(MODEL_DIR / "reg.joblib", mmap_mode="r")
-q10 = joblib.load(MODEL_DIR / "q10.joblib", mmap_mode="r")
-q90 = joblib.load(MODEL_DIR / "q90.joblib", mmap_mode="r")
+low = joblib.load(MODEL_DIR / "low.joblib", mmap_mode="r")
+high = joblib.load(MODEL_DIR / "high.joblib", mmap_mode="r")
 
 
 def _load_last_row() -> tuple[pd.Timestamp, float, pd.DataFrame]:
@@ -40,11 +40,11 @@ def predict() -> PredictionResponse:  # pragma: no cover - FastAPI handles respo
     ts, last_price, X_last = _load_last_row()
     dlast = xgb.DMatrix(np.asarray(X_last, dtype=np.float32))
     delta = float(reg.predict(dlast)[0])
-    low = float(q10.predict(dlast)[0])
-    high = float(q90.predict(dlast)[0])
+    low_delta = float(low.predict(dlast)[0])
+    high_delta = float(high.predict(dlast)[0])
     p_hat = float(to_price(last_price, delta))
-    p_low = float(to_price(last_price, low))
-    p_high = float(to_price(last_price, high))
+    p_low = float(to_price(last_price, low_delta))
+    p_high = float(to_price(last_price, high_delta))
     p_low, p_high = (min(p_low, p_high), max(p_low, p_high))
     p_hat = clip_inside(
         np.array([p_hat], dtype=np.float32),

@@ -3,7 +3,6 @@ import pandas as pd
 
 import ml.time_cv as time_cv
 import ml.train_price as tp
-import ml.xgb_price as xgb_price
 from analysis.feature_engineering import FEATURE_COLUMNS
 
 
@@ -32,41 +31,42 @@ def test_smoke_train_price(monkeypatch, tmp_path):
     )
 
     def small_reg():
-        model = xgb_price.xgb.XGBRegressor(
-            n_estimators=10,
-            max_depth=3,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            tree_method="hist",
-            n_jobs=1,
-            eval_metric="rmse",
-            random_state=42,
-        )
-        return model
+        params = {
+            "max_depth": 2,
+            "eta": 0.1,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "tree_method": "hist",
+            "eval_metric": "rmse",
+            "nthread": 1,
+            "seed": 42,
+        }
+        return params, 5
 
-    def small_quant(alpha):
-        model = xgb_price.xgb.XGBRegressor(
-            n_estimators=10,
-            max_depth=3,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            tree_method="hist",
-            n_jobs=1,
-            objective="reg:quantileerror",
-            quantile_alpha=alpha,
-            random_state=42,
-        )
-        return model
+    def small_bound(kind: str):
+        params = {
+            "max_depth": 2,
+            "eta": 0.1,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "tree_method": "hist",
+            "eval_metric": "rmse",
+            "nthread": 1,
+            "seed": 42,
+        }
+        return params, 5
 
-    monkeypatch.setattr(xgb_price, "build_reg", small_reg)
-    monkeypatch.setattr(xgb_price, "build_quantile", small_quant)
+    monkeypatch.setattr(tp, "build_reg", small_reg)
+    monkeypatch.setattr(tp, "build_bound", small_bound)
 
     def small_folds(n_samples, embargo=24):
         return time_cv.time_folds(n_samples, n_splits=2, embargo=embargo)
 
     monkeypatch.setattr(tp, "time_folds", small_folds)
 
-    _, preds = tp.train_price(df, FEATURE_COLUMNS, outdir=tmp_path)
-    assert ((preds["p_hat"] >= preds["p_low"]) & (preds["p_hat"] <= preds["p_high"])).all()
+    metrics, preds = tp.train_price(df, FEATURE_COLUMNS, outdir=tmp_path)
+    assert ((preds["p_low"] <= preds["p_hat"]) & (preds["p_hat"] <= preds["p_high"])).all()
+    assert (tmp_path / "low.joblib").exists()
+    assert (tmp_path / "high.joblib").exists()
+    cov = ((preds["target"] >= preds["p_low"]) & (preds["target"] <= preds["p_high"])).mean()
+    assert 0 <= cov <= 1

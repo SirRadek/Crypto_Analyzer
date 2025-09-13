@@ -107,11 +107,11 @@ def predict_price(model_dir="models/xgb_price", target_kind="log"):
     last_close = float(last_row["close"].iloc[0])
     X_last = last_row[FEATURE_COLS].astype("float32")
     reg = joblib.load(Path(model_dir) / "reg.joblib", mmap_mode="r")
-    q10 = joblib.load(Path(model_dir) / "q10.joblib", mmap_mode="r")
-    q90 = joblib.load(Path(model_dir) / "q90.joblib", mmap_mode="r")
+    low_model = joblib.load(Path(model_dir) / "low.joblib", mmap_mode="r")
+    high_model = joblib.load(Path(model_dir) / "high.joblib", mmap_mode="r")
     delta = reg.predict(X_last)[0]
-    low = q10.predict(X_last)[0]
-    high = q90.predict(X_last)[0]
+    low = low_model.predict(X_last)[0]
+    high = high_model.predict(X_last)[0]
     p_hat = to_price(last_close, delta, kind=target_kind)
     p_low = to_price(last_close, low, kind=target_kind)
     p_high = to_price(last_close, high, kind=target_kind)

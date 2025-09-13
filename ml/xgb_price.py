@@ -23,6 +23,27 @@ def build_reg() -> tuple[dict[str, float | int | str], int]:
     return params, 600
 
 
+def build_bound(kind: str) -> tuple[dict[str, float | int | str], int]:
+    """Return parameters for a lower or upper bound model.
+
+    The ``kind`` argument is accepted for API symmetry with callers but it
+    currently does not alter the returned parameters; tests monkeypatch this
+    function to provide lightweight models.  The default configuration mirrors
+    the regression setup and uses mean squared error training.
+    """
+    params: dict[str, float | int | str] = {
+        "max_depth": 8,
+        "eta": 0.04,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "tree_method": "hist",
+        "eval_metric": "rmse",
+        "nthread": 4,
+        "seed": 42,
+    }
+    return params, 800
+
+
 def build_quantile(alpha: float) -> tuple[dict[str, float | int | str], int]:
     params: dict[str, float | int | str] = {
         "max_depth": 8,
