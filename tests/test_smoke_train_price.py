@@ -32,36 +32,36 @@ def test_smoke_train_price(monkeypatch, tmp_path):
     )
 
     def small_reg():
-        model = xgb_price.xgb.XGBRegressor(
-            n_estimators=10,
-            max_depth=3,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            tree_method="hist",
-            n_jobs=1,
-            eval_metric="rmse",
-            random_state=42,
-        )
-        return model
+        params = {
+            "max_depth": 3,
+            "eta": 0.1,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "tree_method": "hist",
+            "eval_metric": "rmse",
+            "nthread": 1,
+            "seed": 42,
+        }
+        return params, 10
 
-    def small_quant(alpha):
-        model = xgb_price.xgb.XGBRegressor(
-            n_estimators=10,
-            max_depth=3,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            tree_method="hist",
-            n_jobs=1,
-            objective="reg:quantileerror",
-            quantile_alpha=alpha,
-            random_state=42,
-        )
-        return model
+    def small_bound():
+        params = {
+            "max_depth": 3,
+            "eta": 0.1,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "tree_method": "hist",
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
+            "nthread": 1,
+            "seed": 42,
+        }
+        return params, 10
 
     monkeypatch.setattr(xgb_price, "build_reg", small_reg)
-    monkeypatch.setattr(xgb_price, "build_quantile", small_quant)
+    monkeypatch.setattr(xgb_price, "build_bound", small_bound)
+    monkeypatch.setattr(tp, "build_reg", small_reg)
+    monkeypatch.setattr(tp, "build_bound", small_bound)
 
     def small_folds(n_samples, embargo=24):
         return time_cv.time_folds(n_samples, n_splits=2, embargo=embargo)

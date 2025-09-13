@@ -102,6 +102,14 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     horizon = 24  # 120 min při 5m svících
     df["delta_log_120m"] = np.log(df["close"].shift(-horizon) / df["close"]).astype(np.float32)
     df["delta_lin_120m"] = (df["close"].shift(-horizon) - df["close"]).astype(np.float32)
+    future_lows = pd.concat([df["low"].shift(-i) for i in range(1, horizon + 1)], axis=1)
+    future_highs = pd.concat([df["high"].shift(-i) for i in range(1, horizon + 1)], axis=1)
+    fmin = future_lows.min(axis=1)
+    fmax = future_highs.max(axis=1)
+    df["delta_low_log_120m"] = np.log(fmin / df["close"]).astype(np.float32)
+    df["delta_low_lin_120m"] = (fmin - df["close"]).astype(np.float32)
+    df["delta_high_log_120m"] = np.log(fmax / df["close"]).astype(np.float32)
+    df["delta_high_lin_120m"] = (fmax - df["close"]).astype(np.float32)
 
     df["delta_log_60m"] = np.log(df["close"].shift(-12) / df["close"]).astype(np.float32)
     df["delta_lin_60m"] = (df["close"].shift(-12) - df["close"]).astype(np.float32)
@@ -114,6 +122,10 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
         columns=[
             "delta_log_120m",
             "delta_lin_120m",
+            "delta_low_log_120m",
+            "delta_low_lin_120m",
+            "delta_high_log_120m",
+            "delta_high_lin_120m",
             "delta_log_60m",
             "delta_lin_60m",
             "delta_log_240m",

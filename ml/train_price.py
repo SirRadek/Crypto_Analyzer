@@ -20,7 +20,7 @@ from crypto_analyzer.schemas import TrainConfig
 
 from .backtest import run_backtest
 from .time_cv import time_folds
-from .xgb_price import build_quantile, build_reg, clip_inside, to_price
+from .xgb_price import build_bound, build_reg, clip_inside, to_price
 
 structlog.configure(
     processors=[
@@ -97,78 +97,90 @@ def train_price(
         horizon_min = 120
         embargo = 24
         n_jobs = 1
-        quant_low = 0.1
-        quant_high = 0.9
     else:
         target_kind = config.target_kind
         horizon_min = config.horizon_min
         embargo = config.embargo
         n_jobs = config.n_jobs
-        quant_low = config.quantiles["low"]
-        quant_high = config.quantiles["high"]
 
-    target_col = "delta_log_120m" if target_kind == "log" else "delta_lin_120m"
-    df = df.dropna(subset=[target_col])
+    target_mid = "delta_log_120m" if target_kind == "log" else "delta_lin_120m"
+    target_low = "delta_low_log_120m" if target_kind == "log" else "delta_low_lin_120m"
+    target_high = "delta_high_log_120m" if target_kind == "log" else "delta_high_lin_120m"
+    df = df.dropna(subset=[target_mid, target_low, target_high])
     X = _validate_features(df, feature_cols)
-    y = df[target_col].astype("float32")
+    y_mid = df[target_mid].astype("float32")
+    y_low = df[target_low].astype("float32")
+    y_high = df[target_high].astype("float32")
 
     zero_ratio = float((X == 0).sum().sum() / X.size)
     X_matrix = sparse.csr_matrix(X.values) if zero_ratio > 0.6 else X.values
 
     preds = []
     metrics = []
-    reg_models, q10_models, q90_models = [], [], []
+    reg_models, lo_models, hi_models = [], [], []
     start_time = time.monotonic()
     steps = horizon_min // 5
 
     for fold, (train_idx, test_idx) in enumerate(time_folds(len(df), embargo=embargo)):
-        X_train, y_train = X_matrix[train_idx], y.iloc[train_idx]
-        X_test, y_test = X_matrix[test_idx], y.iloc[test_idx]
-        dtrain = xgb.DMatrix(_to_f32(X_train), label=_to_f32(y_train))
-        dtest = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_test))
+        X_train, X_test = X_matrix[train_idx], X_matrix[test_idx]
+        y_mid_train, y_mid_test = y_mid.iloc[train_idx], y_mid.iloc[test_idx]
+        y_low_train, y_low_test = y_low.iloc[train_idx], y_low.iloc[test_idx]
+        y_high_train, y_high_test = y_high.iloc[train_idx], y_high.iloc[test_idx]
+
+        dtrain_mid = xgb.DMatrix(_to_f32(X_train), label=_to_f32(y_mid_train))
+        dtest_mid = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_mid_test))
+        dtrain_lo = xgb.DMatrix(_to_f32(X_train), label=_to_f32(y_low_train))
+        dtest_lo = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_low_test))
+        dtrain_hi = xgb.DMatrix(_to_f32(X_train), label=_to_f32(y_high_train))
+        dtest_hi = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_high_test))
+
         reg_params, reg_rounds = build_reg()
-        q10_params, q_rounds = build_quantile(quant_low)
-        q90_params, q90_rounds = build_quantile(quant_high)
+        lo_params, lo_rounds = build_bound()
+        hi_params, hi_rounds = build_bound()
         reg_params["nthread"] = n_jobs
-        q10_params["nthread"] = n_jobs
-        q90_params["nthread"] = n_jobs
+        lo_params["nthread"] = n_jobs
+        hi_params["nthread"] = n_jobs
+
         reg = xgb.train(
             reg_params,
-            dtrain,
+            dtrain_mid,
             reg_rounds,
-            evals=[(dtest, "test")],
+            evals=[(dtest_mid, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
-        q10 = xgb.train(
-            q10_params,
-            dtrain,
-            q_rounds,
-            evals=[(dtest, "test")],
+        lo_model = xgb.train(
+            lo_params,
+            dtrain_lo,
+            lo_rounds,
+            evals=[(dtest_lo, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
-        q90 = xgb.train(
-            q90_params,
-            dtrain,
-            q90_rounds,
-            evals=[(dtest, "test")],
+        hi_model = xgb.train(
+            hi_params,
+            dtrain_hi,
+            hi_rounds,
+            evals=[(dtest_hi, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
         reg_models.append(reg)
-        q10_models.append(q10)
-        q90_models.append(q90)
+        lo_models.append(lo_model)
+        hi_models.append(hi_model)
+
         last_price = np.asarray(df["close"].iloc[test_idx].values, dtype=np.float32)
-        delta_hat = reg.predict(dtest)
-        low_hat = q10.predict(dtest)
-        high_hat = q90.predict(dtest)
+        delta_hat = reg.predict(dtest_mid)
+        low_hat = lo_model.predict(dtest_lo)
+        high_hat = hi_model.predict(dtest_hi)
         p_hat = to_price(last_price, delta_hat, kind=target_kind)
         p_low = to_price(last_price, low_hat, kind=target_kind)
         p_high = to_price(last_price, high_hat, kind=target_kind)
         p_low, p_high = np.minimum(p_low, p_high), np.maximum(p_low, p_high)
         p_hat = clip_inside(p_hat, p_low, p_high)
         target_price = df["close"].shift(-steps).iloc[test_idx].values
+        real_low = to_price(last_price, y_low_test.values, kind=target_kind)
+        real_high = to_price(last_price, y_high_test.values, kind=target_kind)
         fold_df = pd.DataFrame(
             {
                 "timestamp": df["timestamp"].iloc[test_idx].values,
@@ -176,6 +188,8 @@ def train_price(
                 "p_hat": p_hat,
                 "p_high": p_high,
                 "target": target_price,
+                "real_low": real_low,
+                "real_high": real_high,
                 "last_price": last_price,
                 "fold": fold,
             }
@@ -185,33 +199,57 @@ def train_price(
         mae = float(np.mean(np.abs(p_hat - target_price)))
         coverage = float(np.mean((target_price >= p_low) & (target_price <= p_high)))
         width = float(np.mean(p_high - p_low))
-        metrics.append({"rmse": rmse, "mae": mae, "coverage": coverage, "width": width})
-        _log("fold", fold=fold, rmse=rmse, mae=mae, coverage=coverage)
+        low_mae = float(np.mean(np.abs(p_low - real_low)))
+        high_mae = float(np.mean(np.abs(p_high - real_high)))
+        metrics.append(
+            {
+                "rmse": rmse,
+                "mae": mae,
+                "coverage": coverage,
+                "width": width,
+                "low_mae": low_mae,
+                "high_mae": high_mae,
+            }
+        )
+        _log(
+            "fold",
+            fold=fold,
+            rmse=rmse,
+            mae=mae,
+            coverage=coverage,
+            low_mae=low_mae,
+            high_mae=high_mae,
+        )
 
     avg_metrics = {
         "rmse": float(np.mean([m["rmse"] for m in metrics])),
         "mae": float(np.mean([m["mae"] for m in metrics])),
         "coverage": float(np.mean([m["coverage"] for m in metrics])),
         "width": float(np.mean([m["width"] for m in metrics])),
+        "low_mae": float(np.mean([m["low_mae"] for m in metrics])),
+        "high_mae": float(np.mean([m["high_mae"] for m in metrics])),
     }
 
     out_path = Path(outdir)
     out_path.mkdir(parents=True, exist_ok=True)
 
     reg_params, reg_rounds = build_reg()
-    q10_params, q_rounds = build_quantile(quant_low)
-    q90_params, q90_rounds = build_quantile(quant_high)
-    for p in (reg_params, q10_params, q90_params):
+    lo_params, lo_rounds = build_bound()
+    hi_params, hi_rounds = build_bound()
+    for p in (reg_params, lo_params, hi_params):
         p["nthread"] = n_jobs
-    dall = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y))
-    reg_final = xgb.train(reg_params, dall, reg_rounds, verbose_eval=False)
-    q10_final = xgb.train(q10_params, dall, q_rounds, verbose_eval=False)
-    q90_final = xgb.train(q90_params, dall, q90_rounds, verbose_eval=False)
+    dall_mid = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_mid))
+    dall_low = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_low))
+    dall_high = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_high))
+    reg_final = xgb.train(reg_params, dall_mid, reg_rounds, verbose_eval=False)
+    low_final = xgb.train(lo_params, dall_low, lo_rounds, verbose_eval=False)
+    high_final = xgb.train(hi_params, dall_high, hi_rounds, verbose_eval=False)
     joblib.dump(reg_final, out_path / "reg.joblib")
-    joblib.dump(q10_final, out_path / "q10.joblib")
-    joblib.dump(q90_final, out_path / "q90.joblib")
+    joblib.dump(low_final, out_path / "low.joblib")
+    joblib.dump(high_final, out_path / "high.joblib")
     joblib.dump(
-        {"reg": reg_models, "q10": q10_models, "q90": q90_models}, out_path / "ensemble.joblib"
+        {"reg": reg_models, "low": lo_models, "high": hi_models},
+        out_path / "ensemble.joblib",
     )
 
     pred_df = pd.concat(preds, ignore_index=True).sort_values("timestamp")
@@ -227,7 +265,6 @@ def train_price(
     meta = {
         "horizon_min": horizon_min,
         "target_kind": target_kind,
-        "quantiles": {"low": quant_low, "high": quant_high},
         "data": {"n_samples": int(len(df))},
         "metrics": avg_metrics,
         "backtest": bt["metrics"],
