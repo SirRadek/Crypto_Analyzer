@@ -15,7 +15,7 @@ class TrainConfig(BaseModel):
     embargo: int = Field(..., ge=0)
     target_kind: Literal["log", "lin"] = "log"
     xgb_params: dict[str, dict[str, Any]]
-    quantiles: dict[str, float]
+    bounds: dict[str, float]
     fees: dict[str, float] | None = None
     features: FeatureConfig
     n_jobs: int = 4

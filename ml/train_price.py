@@ -31,6 +31,7 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
+
 def _resolve_feature_names(cfg_or_list: Any) -> list[str]:
     """
     Accept either:
@@ -41,6 +42,7 @@ def _resolve_feature_names(cfg_or_list: Any) -> list[str]:
         return [str(c) for c in cfg_or_list]
     try:
         import pandas as _pd  # lazy
+
         if isinstance(cfg_or_list, _pd.Index):
             return [str(c) for c in list(cfg_or_list)]
     except Exception:
@@ -52,6 +54,7 @@ def _resolve_feature_names(cfg_or_list: Any) -> list[str]:
     if not isinstance(names, list):
         raise ValueError("feature list JSON must be a list[str]")
     return [str(x) for x in names]
+
 
 def _to_f32(arr: Any) -> np.ndarray:
     """Return a float32 numpy array, densifying sparse inputs if needed."""
@@ -135,11 +138,9 @@ def train_price(
         dtest_hi = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_high_test))
 
         reg_params, reg_rounds = build_reg()
-        low_params, low_rounds = build_quantile(quant_low)
-        high_params, high_rounds = build_quantile(quant_high)
-        reg_params["nthread"] = n_jobs
-        low_params["nthread"] = n_jobs
-        high_params["nthread"] = n_jobs
+        b_params, b_rounds = build_bound()
+        for p in (reg_params, b_params):
+            p["nthread"] = n_jobs
 
         reg = xgb.train(
             reg_params,
@@ -150,18 +151,18 @@ def train_price(
             verbose_eval=False,
         )
         lowm = xgb.train(
-            low_params,
-            dtrain,
-            low_rounds,
-            evals=[(dtest, "test")],
+            b_params,
+            dtrain_lo,
+            b_rounds,
+            evals=[(dtest_lo, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
         highm = xgb.train(
-            high_params,
-            dtrain,
-            high_rounds,
-            evals=[(dtest, "test")],
+            b_params,
+            dtrain_hi,
+            b_rounds,
+            evals=[(dtest_hi, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
@@ -169,9 +170,9 @@ def train_price(
         low_models.append(lowm)
         high_models.append(highm)
         last_price = np.asarray(df["close"].iloc[test_idx].values, dtype=np.float32)
-        delta_hat = reg.predict(dtest)
-        low_hat = lowm.predict(dtest)
-        high_hat = highm.predict(dtest)
+        delta_hat = reg.predict(dtest_mid)
+        low_hat = lowm.predict(dtest_lo)
+        high_hat = highm.predict(dtest_hi)
         p_hat = to_price(last_price, delta_hat, kind=target_kind)
         p_low = to_price(last_price, low_hat, kind=target_kind)
         p_high = to_price(last_price, high_hat, kind=target_kind)
@@ -195,7 +196,7 @@ def train_price(
         )
         preds.append(fold_df)
         rmse = float(np.sqrt(np.mean((p_hat - target_price) ** 2)))
-        mae = float(np.mean(np.abs(p_hat - target_price)))
+        mid_mae = float(np.mean(np.abs(p_hat - target_price)))
         coverage = float(np.mean((target_price >= p_low) & (target_price <= p_high)))
         width = float(np.mean(p_high - p_low))
         low_mae = float(np.mean(np.abs(p_low - real_low)))
@@ -203,7 +204,7 @@ def train_price(
         metrics.append(
             {
                 "rmse": rmse,
-                "mae": mae,
+                "mid_mae": mid_mae,
                 "coverage": coverage,
                 "width": width,
                 "low_mae": low_mae,
@@ -214,7 +215,7 @@ def train_price(
             "fold",
             fold=fold,
             rmse=rmse,
-            mae=mae,
+            mid_mae=mid_mae,
             coverage=coverage,
             low_mae=low_mae,
             high_mae=high_mae,
@@ -222,7 +223,7 @@ def train_price(
 
     avg_metrics = {
         "rmse": float(np.mean([m["rmse"] for m in metrics])),
-        "mae": float(np.mean([m["mae"] for m in metrics])),
+        "mid_mae": float(np.mean([m["mid_mae"] for m in metrics])),
         "coverage": float(np.mean([m["coverage"] for m in metrics])),
         "width": float(np.mean([m["width"] for m in metrics])),
         "low_mae": float(np.mean([m["low_mae"] for m in metrics])),
@@ -233,14 +234,15 @@ def train_price(
     out_path.mkdir(parents=True, exist_ok=True)
 
     reg_params, reg_rounds = build_reg()
-    low_params, low_rounds = build_quantile(quant_low)
-    high_params, high_rounds = build_quantile(quant_high)
-    for p in (reg_params, low_params, high_params):
+    b_params, b_rounds = build_bound()
+    for p in (reg_params, b_params):
         p["nthread"] = n_jobs
-    dall = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y))
-    reg_final = xgb.train(reg_params, dall, reg_rounds, verbose_eval=False)
-    low_final = xgb.train(low_params, dall, low_rounds, verbose_eval=False)
-    high_final = xgb.train(high_params, dall, high_rounds, verbose_eval=False)
+    dall_mid = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_mid))
+    dall_lo = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_low))
+    dall_hi = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_high))
+    reg_final = xgb.train(reg_params, dall_mid, reg_rounds, verbose_eval=False)
+    low_final = xgb.train(b_params, dall_lo, b_rounds, verbose_eval=False)
+    high_final = xgb.train(b_params, dall_hi, b_rounds, verbose_eval=False)
     joblib.dump(reg_final, out_path / "reg.joblib")
     joblib.dump(low_final, out_path / "low.joblib")
     joblib.dump(high_final, out_path / "high.joblib")
@@ -275,7 +277,7 @@ def train_price(
         "train_complete",
         n_samples=len(df),
         rmse=avg_metrics["rmse"],
-        mae=avg_metrics["mae"],
+        mid_mae=avg_metrics["mid_mae"],
         coverage=avg_metrics["coverage"],
         pnl=bt["metrics"]["pnl"],
         sharpe=bt["metrics"]["sharpe"],
@@ -295,6 +297,7 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(Path(args.config))
     df = pd.read_parquet(args.data) if args.data.endswith(".parquet") else pd.read_csv(args.data)
     train_price(df, config, args.outdir)
+
 
 if __name__ == "__main__":
     main()
