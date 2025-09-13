@@ -196,8 +196,11 @@ def _predict_forward_steps(model_paths, state, steps, usage_path="ml/model_usage
             int(pd.Timestamp(target_time).value // 1_000_000),
             pred_local.strftime("%Y-%m-%d %H:%M:%S"),
             target_local.strftime("%Y-%m-%d %H:%M:%S"),
+            None,
             new_close,
-            None, None,
+            None,
+            None,
+            None,
             "RandomForestRegressor", FEATURES_VERSION_FWD,
             _created_at_iso()
         ))

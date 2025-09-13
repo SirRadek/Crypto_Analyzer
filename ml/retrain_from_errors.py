@@ -28,7 +28,7 @@ def _load_backfilled_errors(db_path: str, symbol: str) -> pd.DataFrame:
     """
     conn = sqlite3.connect(db_path)
     q = """
-    SELECT prediction_time_ms, target_time_ms, y_pred, y_true, abs_error
+    SELECT prediction_time_ms, target_time_ms, p_hat, y_true, abs_error
     FROM prediction
     WHERE symbol = ? AND y_true IS NOT NULL
     """

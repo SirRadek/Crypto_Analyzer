@@ -27,7 +27,7 @@ def combine_predictions(
     feature_cols: list[str],
     *,
     model_paths: list[str] | None = None,
-    method: str = "weighted",
+    method: str = "majority",
     use_meta_only: bool = True,
     usage_path: str = "ml/model_usage.json",
     # Ladění pro BTCUSDT 2h:
@@ -40,8 +40,8 @@ def combine_predictions(
     Kombinace pravidel a ML. Defaulty laděné na 2h BTCUSDT.
 
     method:
+      - "majority" (default): 1 pokud aspoň jeden dává 1
       - "weighted": w_ml*P_ml + w_rules*P_rules → threshold + hysteresis
-      - "majority": 1 pokud aspoň jeden dává 1
       - "strict"  : 1 jen když oba dávají 1
     """
     # Pravidla jako „pravděpodobnost“ {0,1}
@@ -56,9 +56,9 @@ def combine_predictions(
         ml_prob = pd.Series(np.asarray(ml_cls, dtype=np.float32), index=df.index)
 
     if method == "majority":
-        return ((rule_preds + (ml_prob >= 0.5).astype("float32")) > 0).astype("int8")
+        return ((rule_preds + (ml_prob >= 0.5).astype("float32")) > 0).astype("int64")
     if method == "strict":
-        return ((rule_preds + (ml_prob >= 0.5).astype("float32")) == 2).astype("int8")
+        return ((rule_preds + (ml_prob >= 0.5).astype("float32")) == 2).astype("int64")
     if method != "weighted":
         raise ValueError("Unknown combination method")
 
@@ -78,4 +78,4 @@ def combine_predictions(
         elif state == 1 and p <= lo:
             state = 0
         up[i] = state
-    return pd.Series(up, index=df.index)
+    return pd.Series(up, index=df.index).astype("int64")

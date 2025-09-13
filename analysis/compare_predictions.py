@@ -38,13 +38,13 @@ def backfill_actuals_and_errors(
     for _, r in merged.iterrows():
         if pd.notna(r.get("y_true")):
             row = cur.execute(
-                f"SELECT y_pred FROM {table_pred} WHERE id = ?", (int(r["id"]),)
+                f"SELECT p_hat FROM {table_pred} WHERE id = ?", (int(r["id"]),)
             ).fetchone()
             if row is None:
                 continue
-            y_pred = float(row[0])
+            p_hat = float(row[0])
             y_true = float(r["y_true"])
-            abs_err = abs(y_pred - y_true)
+            abs_err = abs(p_hat - y_true)
             cur.execute(
                 f"UPDATE {table_pred} SET y_true = ?, abs_error = ? WHERE id = ?",
                 (y_true, abs_err, int(r["id"])),
