@@ -78,4 +78,4 @@ def combine_predictions(
         elif state == 1 and p <= lo:
             state = 0
         up[i] = state
-    return pd.Series(up, index=df.index, dtype="int64")
+    return pd.Series(np.asarray(up, dtype=np.int64), index=df.index)

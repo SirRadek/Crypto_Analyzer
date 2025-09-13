@@ -117,7 +117,7 @@ def train_price(
 
     preds = []
     metrics = []
-    reg_models, lo_models, hi_models = [], [], []
+    reg_models, low_models, high_models = [], [], []
     start_time = time.monotonic()
     steps = horizon_min // 5
 
@@ -135,11 +135,11 @@ def train_price(
         dtest_hi = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_high_test))
 
         reg_params, reg_rounds = build_reg()
-        lo_params, lo_rounds = build_bound()
-        hi_params, hi_rounds = build_bound()
+        low_params, low_rounds = build_quantile(quant_low)
+        high_params, high_rounds = build_quantile(quant_high)
         reg_params["nthread"] = n_jobs
-        lo_params["nthread"] = n_jobs
-        hi_params["nthread"] = n_jobs
+        low_params["nthread"] = n_jobs
+        high_params["nthread"] = n_jobs
 
         reg = xgb.train(
             reg_params,
@@ -149,30 +149,29 @@ def train_price(
             early_stopping_rounds=50,
             verbose_eval=False,
         )
-        lo_model = xgb.train(
-            lo_params,
-            dtrain_lo,
-            lo_rounds,
-            evals=[(dtest_lo, "test")],
+        lowm = xgb.train(
+            low_params,
+            dtrain,
+            low_rounds,
+            evals=[(dtest, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
-        hi_model = xgb.train(
-            hi_params,
-            dtrain_hi,
-            hi_rounds,
-            evals=[(dtest_hi, "test")],
+        highm = xgb.train(
+            high_params,
+            dtrain,
+            high_rounds,
+            evals=[(dtest, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
         reg_models.append(reg)
-        lo_models.append(lo_model)
-        hi_models.append(hi_model)
-
+        low_models.append(lowm)
+        high_models.append(highm)
         last_price = np.asarray(df["close"].iloc[test_idx].values, dtype=np.float32)
-        delta_hat = reg.predict(dtest_mid)
-        low_hat = lo_model.predict(dtest_lo)
-        high_hat = hi_model.predict(dtest_hi)
+        delta_hat = reg.predict(dtest)
+        low_hat = lowm.predict(dtest)
+        high_hat = highm.predict(dtest)
         p_hat = to_price(last_price, delta_hat, kind=target_kind)
         p_low = to_price(last_price, low_hat, kind=target_kind)
         p_high = to_price(last_price, high_hat, kind=target_kind)
@@ -234,22 +233,19 @@ def train_price(
     out_path.mkdir(parents=True, exist_ok=True)
 
     reg_params, reg_rounds = build_reg()
-    lo_params, lo_rounds = build_bound()
-    hi_params, hi_rounds = build_bound()
-    for p in (reg_params, lo_params, hi_params):
+    low_params, low_rounds = build_quantile(quant_low)
+    high_params, high_rounds = build_quantile(quant_high)
+    for p in (reg_params, low_params, high_params):
         p["nthread"] = n_jobs
-    dall_mid = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_mid))
-    dall_low = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_low))
-    dall_high = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y_high))
-    reg_final = xgb.train(reg_params, dall_mid, reg_rounds, verbose_eval=False)
-    low_final = xgb.train(lo_params, dall_low, lo_rounds, verbose_eval=False)
-    high_final = xgb.train(hi_params, dall_high, hi_rounds, verbose_eval=False)
+    dall = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y))
+    reg_final = xgb.train(reg_params, dall, reg_rounds, verbose_eval=False)
+    low_final = xgb.train(low_params, dall, low_rounds, verbose_eval=False)
+    high_final = xgb.train(high_params, dall, high_rounds, verbose_eval=False)
     joblib.dump(reg_final, out_path / "reg.joblib")
     joblib.dump(low_final, out_path / "low.joblib")
     joblib.dump(high_final, out_path / "high.joblib")
     joblib.dump(
-        {"reg": reg_models, "low": lo_models, "high": hi_models},
-        out_path / "ensemble.joblib",
+        {"reg": reg_models, "low": low_models, "high": high_models}, out_path / "ensemble.joblib"
     )
 
     pred_df = pd.concat(preds, ignore_index=True).sort_values("timestamp")
