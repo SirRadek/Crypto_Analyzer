@@ -60,7 +60,7 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
         cur.execute(
-            f"DELETE FROM {table_name} WHERE symbol = ? AND prediction_time_ms >= ?",
+            f"DELETE FROM {table_name} WHERE symbol = ? AND target_time_ms >= ?",
             (symbol, int(from_ms)),
         )
         deleted = cur.rowcount if cur.rowcount is not None else 0
@@ -128,6 +128,7 @@ def main(train=True):
     step(1, 8, "Import latest data")
     try:
         from db.btc_import import import_latest_data
+
         import_latest_data()
     except Exception as exc:
         p(f"btc_import failed: {exc}")
@@ -207,7 +208,6 @@ def main(train=True):
     rows_to_save = []
     last_row = full_df.iloc[[-1]]
     pred_time = last_row["timestamp"].iloc[0]
-    pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
     # Base model predictions for the latest row
     base_last = last_row[FEATURE_COLS].astype("float32")
@@ -237,24 +237,14 @@ def main(train=True):
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
         target_time = pred_time + pd.Timedelta(minutes=horizon * INTERVAL_TO_MIN[INTERVAL])
-        targ_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
         row = (
             SYMBOL,
             INTERVAL,
-            horizon,
-            int(pred_time.value // 1_000_000),
             int(target_time.value // 1_000_000),
-            pred_local.strftime("%Y-%m-%d %H:%M:%S"),
-            targ_local.strftime("%Y-%m-%d %H:%M:%S"),
             float(combined_price),
-            float(reg_pred),
-            float(prob_up),
-            None,
-            None,
-            "XGB_cls_reg",
-            FEATURES_VERSION,
-            _created_at_iso(),
+            float(combined_price),
+            float(combined_price),
         )
         rows_to_save.append(row)
 

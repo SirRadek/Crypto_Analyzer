@@ -23,21 +23,19 @@ def _prepare_reg_target(df: pd.DataFrame, forward_steps: int) -> pd.DataFrame:
 
 
 def _load_backfilled_errors(db_path: str, symbol: str) -> pd.DataFrame:
-    """
-    Load predictions that already have y_true (i.e., backfilled) and their abs_error.
-    """
+    """Load predictions with backfilled true prices and absolute errors."""
     conn = sqlite3.connect(db_path)
     q = """
-    SELECT prediction_time_ms, target_time_ms, y_pred, y_true, abs_error
-    FROM prediction
-    WHERE symbol = ? AND y_true IS NOT NULL
+    SELECT target_time_ms, p_hat, y_true_hat, abs_error
+    FROM predictions
+    WHERE symbol = ? AND y_true_hat IS NOT NULL
     """
     dfp = pd.read_sql(q, conn, params=(symbol,))
     conn.close()
     if dfp.empty:
         return dfp
     # convert ms -> timestamp (aligns with features 'timestamp')
-    dfp["prediction_time"] = pd.to_datetime(dfp["prediction_time_ms"], unit="ms")
+    dfp["prediction_time"] = pd.to_datetime(dfp["target_time_ms"], unit="ms")
     return dfp
 
 
@@ -90,9 +88,9 @@ def retrain_with_error_weights(
     4) Retrain RandomForestRegressor with sample_weight and overwrite model_reg.joblib.
 
     cutoff_to_latest_backfilled=True:
-      Only use rows with timestamp <= last prediction_time that has y_true,
-      so you 'learn from mistakes' up to the latest validated time and avoid
-      training on unlabeled future.
+      Only use rows with timestamp <= last prediction_time that has a
+      backfilled ``y_true_hat`` so you 'learn from mistakes' up to the latest
+      validated time and avoid training on unlabeled future.
     """
     # 1) base data
     df = get_price_data(symbol, db_path=db_path)

@@ -15,6 +15,9 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
     c = conn.cursor()
     cols = {r[1] for r in c.execute(f"PRAGMA table_info({table_name})")}
     if {"p_hat", "p_low", "p_high"} <= cols:
+        if "abs_error" not in cols:
+            c.execute(f"ALTER TABLE {table_name} ADD COLUMN abs_error REAL")
+
         c.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} "
             f"ON {table_name}(symbol, interval, target_time_ms)"
@@ -34,16 +37,23 @@ CREATE TABLE IF NOT EXISTS {table_name}_new (
   p_high REAL,
   y_true_hat REAL,
   y_true_low REAL,
-  y_true_high REAL
+  y_true_high REAL,
+  abs_error REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} ON {table_name}_new(symbol, interval, target_time_ms);
 """
     )
     if cols:
-        c.execute(
-            f"INSERT OR IGNORE INTO {table_name}_new(symbol, interval, target_time_ms, p_hat, p_low, p_high) "
-            f"SELECT symbol, interval, target_time_ms, y_pred, y_pred_low, y_pred_high FROM {table_name}"
-        )
+        if {"y_pred", "y_pred_low", "y_pred_high"} <= cols:
+            src_extra = ", abs_error" if "abs_error" in cols else ""
+            dst_extra = ", abs_error" if "abs_error" in cols else ""
+            c.execute(
+                f"INSERT OR IGNORE INTO {table_name}_new("
+                "symbol, interval, target_time_ms, p_hat, p_low, p_high" + dst_extra + ") "
+                "SELECT symbol, interval, target_time_ms, y_pred, y_pred_low, y_pred_high"
+                + src_extra
+                + f" FROM {table_name}"
+            )
         c.execute(f"ALTER TABLE {table_name} RENAME TO {table_name}_backup")
     c.execute(f"ALTER TABLE {table_name}_new RENAME TO {table_name}")
     conn.commit()
@@ -74,12 +84,10 @@ def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
 def delete_unmatched_duplicates(db_path: str = DB_PATH, table_name: str = TABLE_NAME) -> int:
     """Remove older duplicate predictions lacking ground truth.
 
-    For entries where ``y_true`` is ``NULL`` we may occasionally store the same
-    prediction multiple times (e.g. repeated model runs).  Such duplicates
-    cannot be paired with a true value yet and only waste space.  This helper
-    keeps the most recent row for each
-    ``(symbol, interval, horizon_steps, prediction_time_ms)`` combination and
-    deletes the rest.
+    Rows may be inserted multiple times before the true value is known.  This
+    helper keeps the most recent row for each ``(symbol, interval,
+    target_time_ms)`` combination where the ground truth ``y_true_hat`` is still
+    missing.
 
     Parameters
     ----------
@@ -106,7 +114,7 @@ def delete_unmatched_duplicates(db_path: str = DB_PATH, table_name: str = TABLE_
             SELECT
                 id,
                 ROW_NUMBER() OVER (
-                    PARTITION BY symbol, interval, horizon_steps, prediction_time_ms
+                    PARTITION BY symbol, interval, target_time_ms
                     ORDER BY id DESC
                 ) AS rn
             FROM {table_name}
