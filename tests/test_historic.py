@@ -4,6 +4,7 @@ import yaml
 
 import ml.train_historic as th
 import ml.xgb_price as xgb_price
+import ml.train_price as tp
 
 
 def _small_models():
@@ -20,27 +21,29 @@ def _small_models():
         }
         return params, 5
 
-    def small_quant(alpha):
+    def small_bound():
         params = {
             "max_depth": 2,
             "eta": 0.1,
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "tree_method": "hist",
-            "objective": "reg:quantileerror",
-            "quantile_alpha": alpha,
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
             "nthread": 1,
             "seed": 42,
         }
         return params, 5
 
-    return small_reg, small_quant
+    return small_reg, small_bound
 
 
 def test_train_historic(tmp_path, monkeypatch):
-    small_reg, small_quant = _small_models()
+    small_reg, small_bound = _small_models()
     monkeypatch.setattr(xgb_price, "build_reg", small_reg)
-    monkeypatch.setattr(xgb_price, "build_quantile", small_quant)
+    monkeypatch.setattr(xgb_price, "build_bound", small_bound)
+    monkeypatch.setattr(tp, "build_reg", small_reg)
+    monkeypatch.setattr(tp, "build_bound", small_bound)
 
     rng = np.random.default_rng(0)
     n = 300
@@ -71,7 +74,7 @@ def test_train_historic(tmp_path, monkeypatch):
         "horizon_min": 120,
         "embargo": 24,
         "target_kind": "log",
-        "xgb_params": {"reg": {}, "quantile": {}},
+        "xgb_params": {"reg": {}, "bound": {}},
         "quantiles": {"low": 0.1, "high": 0.9},
         "fees": {"taker": 0.0004},
         "features": {"path": "analysis/feature_list.json"},

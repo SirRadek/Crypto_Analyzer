@@ -23,19 +23,36 @@ def build_reg() -> tuple[dict[str, float | int | str], int]:
     return params, 600
 
 
-def build_quantile(alpha: float) -> tuple[dict[str, float | int | str], int]:
+def build_bound() -> tuple[dict[str, float | int | str], int]:
     params: dict[str, float | int | str] = {
         "max_depth": 8,
         "eta": 0.04,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
         "tree_method": "hist",
-        "objective": "reg:quantileerror",
-        "quantile_alpha": alpha,
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
         "nthread": 4,
         "seed": 42,
     }
     return params, 800
+
+
+def build_bound() -> tuple[dict[str, float | int | str], int]:
+    params: dict[str, float | int | str] = {
+        "tree_method": "hist",
+        "device": "cuda",
+        "max_depth": 8,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "nthread": -1,
+        "random_state": 42,
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+    }
+    rounds = 800
+    return params, rounds
 
 
 def to_price(
@@ -52,3 +69,12 @@ def to_price(
 
 def clip_inside(p: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     return np.minimum(np.maximum(p, lo), hi)
+
+
+__all__ = [
+    "build_reg",
+    "build_quantile",
+    "build_bound",
+    "to_price",
+    "clip_inside",
+]
