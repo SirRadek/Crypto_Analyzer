@@ -11,31 +11,19 @@ except (TypeError, xgb.core.XGBoostError):  # pragma: no cover - older XGBoost
 
 def build_reg() -> tuple[dict[str, float | int | str], int]:
     params: dict[str, float | int | str] = {
+        "tree_method": "hist",
+        "device": "cuda",
         "max_depth": 8,
-        "eta": 0.05,
+        "learning_rate": 0.05,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
-        "tree_method": "hist",
-        "eval_metric": "rmse",
-        "nthread": 4,
-        "seed": 42,
-    }
-    return params, 600
-
-
-def build_bound() -> tuple[dict[str, float | int | str], int]:
-    params: dict[str, float | int | str] = {
-        "max_depth": 8,
-        "eta": 0.04,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "tree_method": "hist",
+        "nthread": -1,
+        "random_state": 42,
         "objective": "reg:squarederror",
         "eval_metric": "rmse",
-        "nthread": 4,
-        "seed": 42,
     }
-    return params, 800
+    rounds = 600
+    return params, rounds
 
 
 def build_bound() -> tuple[dict[str, float | int | str], int]:
@@ -71,10 +59,4 @@ def clip_inside(p: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     return np.minimum(np.maximum(p, lo), hi)
 
 
-__all__ = [
-    "build_reg",
-    "build_quantile",
-    "build_bound",
-    "to_price",
-    "clip_inside",
-]
+__all__ = ["build_reg", "build_bound", "to_price", "clip_inside"]

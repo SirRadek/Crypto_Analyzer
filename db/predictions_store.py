@@ -2,7 +2,7 @@ import os
 import sqlite3
 
 DB_PATH = "db/data/crypto_data.sqlite"  # same DB like prices
-TABLE_NAME = "prediction"  # new table for predictions
+TABLE_NAME = "predictions"
 
 
 def _ensure_dir(path):
@@ -13,47 +13,48 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
     _ensure_dir(db_path)
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute(
-        f"""
-    CREATE TABLE IF NOT EXISTS {table_name} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        interval TEXT NOT NULL,
-        horizon_steps INTEGER NOT NULL,
-        prediction_time_ms INTEGER NOT NULL,  -- t (time)
-        target_time_ms INTEGER NOT NULL,      -- t+H (time close)
-        prediction_time_cet TEXT,             -- Prague time (human readable)
-        target_time_cet TEXT,                 -- Prague time for target
-        y_pred REAL NOT NULL,                 -- predict price
-        y_pred_low REAL,                      -- min across ensemble
-        y_pred_high REAL,                     -- max across ensemble
-        y_true REAL,                          -- fill up at backfill
-        abs_error REAL,                       -- |y_pred - y_true|
-        model_name TEXT,
-        features_version TEXT,
-        created_at TEXT NOT NULL
-    );
-    """
-    )
-    # Ensure new columns exist if table was created previously without them
     cols = {r[1] for r in c.execute(f"PRAGMA table_info({table_name})")}
-    for col, coltype in (
-        ("prediction_time_cet", "TEXT"),
-        ("target_time_cet", "TEXT"),
-        ("y_pred_low", "REAL"),
-        ("y_pred_high", "REAL"),
-    ):
-        if col not in cols:
-            c.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
-    # useful indexes
-    c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name}(symbol)")
-    c.execute(
-        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_target_time ON {table_name}(target_time_ms)"
+    if {"p_hat", "p_low", "p_high"} <= cols:
+        if "abs_error" not in cols:
+            c.execute(f"ALTER TABLE {table_name} ADD COLUMN abs_error REAL")
+        c.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} "
+            f"ON {table_name}(symbol, interval, target_time_ms)"
+        )
+        conn.commit()
+        conn.close()
+        return
+    c.executescript(
+        f"""
+CREATE TABLE IF NOT EXISTS {table_name}_new (
+  id INTEGER PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  interval TEXT NOT NULL,
+  target_time_ms INTEGER NOT NULL,
+  p_hat REAL,
+  p_low REAL,
+  p_high REAL,
+  y_true_hat REAL,
+  y_true_low REAL,
+  y_true_high REAL,
+  abs_error REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} ON {table_name}_new(symbol, interval, target_time_ms);
+"""
     )
-    c.execute(
-        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pred_time "
-        f"ON {table_name}(symbol, interval, horizon_steps, prediction_time_ms)"
-    )
+    if cols:
+        if {"y_pred", "y_pred_low", "y_pred_high"} <= cols:
+            src_extra = ", abs_error" if "abs_error" in cols else ""
+            dst_extra = ", abs_error" if "abs_error" in cols else ""
+            c.execute(
+                f"INSERT OR IGNORE INTO {table_name}_new("
+                "symbol, interval, target_time_ms, p_hat, p_low, p_high" + dst_extra + ") "
+                "SELECT symbol, interval, target_time_ms, y_pred, y_pred_low, y_pred_high"
+                + src_extra
+                + f" FROM {table_name}"
+            )
+        c.execute(f"ALTER TABLE {table_name} RENAME TO {table_name}_backup")
+    c.execute(f"ALTER TABLE {table_name}_new RENAME TO {table_name}")
     conn.commit()
     conn.close()
 
@@ -63,53 +64,18 @@ def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
         return
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    row_len = len(rows[0])
-    if row_len == 11:
-        c.executemany(
-            f"""
-          INSERT INTO {table_name} (
-            symbol, interval, horizon_steps, prediction_time_ms, target_time_ms,
-            y_pred, y_true, abs_error, model_name, features_version, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    c.executemany(
+        f"""
+        INSERT INTO {table_name} (symbol, interval, target_time_ms, p_hat, p_low, p_high)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, interval, target_time_ms)
+        DO UPDATE SET
+          p_hat=excluded.p_hat,
+          p_low=excluded.p_low,
+          p_high=excluded.p_high
         """,
-            rows,
-        )
-    elif row_len == 13 and isinstance(rows[0][5], int | float):
-        c.executemany(
-            f"""
-          INSERT INTO {table_name} (
-            symbol, interval, horizon_steps, prediction_time_ms, target_time_ms,
-            y_pred, y_pred_low, y_pred_high,
-            y_true, abs_error, model_name, features_version, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            rows,
-        )
-    elif row_len == 13:
-        c.executemany(
-            f"""
-          INSERT INTO {table_name} (
-            symbol, interval, horizon_steps, prediction_time_ms, target_time_ms,
-            prediction_time_cet, target_time_cet,
-            y_pred, y_true, abs_error, model_name, features_version, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            rows,
-        )
-    elif row_len == 15:
-        c.executemany(
-            f"""
-          INSERT INTO {table_name} (
-            symbol, interval, horizon_steps, prediction_time_ms, target_time_ms,
-            prediction_time_cet, target_time_cet,
-            y_pred, y_pred_low, y_pred_high,
-            y_true, abs_error, model_name, features_version, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            rows,
-        )
-    else:
-        raise ValueError(f"Unexpected row length for save_predictions: {row_len}")
+        rows,
+    )
     conn.commit()
     conn.close()
 
@@ -117,12 +83,10 @@ def save_predictions(rows, db_path=DB_PATH, table_name=TABLE_NAME):
 def delete_unmatched_duplicates(db_path: str = DB_PATH, table_name: str = TABLE_NAME) -> int:
     """Remove older duplicate predictions lacking ground truth.
 
-    For entries where ``y_true`` is ``NULL`` we may occasionally store the same
-    prediction multiple times (e.g. repeated model runs).  Such duplicates
-    cannot be paired with a true value yet and only waste space.  This helper
-    keeps the most recent row for each
-    ``(symbol, interval, horizon_steps, prediction_time_ms)`` combination and
-    deletes the rest.
+    Rows may be inserted multiple times before the true value is known.  This
+    helper keeps the most recent row for each ``(symbol, interval,
+    target_time_ms)`` combination where the ground truth ``y_true_hat`` is still
+    missing.
 
     Parameters
     ----------
@@ -141,7 +105,7 @@ def delete_unmatched_duplicates(db_path: str = DB_PATH, table_name: str = TABLE_
     c = conn.cursor()
     c.execute(
         f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pred_time "
-        f"ON {table_name}(symbol, interval, horizon_steps, prediction_time_ms)"
+        f"ON {table_name}(symbol, interval, target_time_ms)"
     )
     c.execute(
         f"""
@@ -149,11 +113,11 @@ def delete_unmatched_duplicates(db_path: str = DB_PATH, table_name: str = TABLE_
             SELECT
                 id,
                 ROW_NUMBER() OVER (
-                    PARTITION BY symbol, interval, horizon_steps, prediction_time_ms
+                    PARTITION BY symbol, interval, target_time_ms
                     ORDER BY id DESC
                 ) AS rn
             FROM {table_name}
-            WHERE y_true IS NULL
+            WHERE y_true_hat IS NULL
         )
         DELETE FROM {table_name}
         WHERE id IN (

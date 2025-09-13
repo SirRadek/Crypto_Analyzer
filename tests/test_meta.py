@@ -69,7 +69,7 @@ def test_model_meta(tmp_path, monkeypatch):
         embargo=24,
         target_kind="log",
         xgb_params={"reg": {}, "bound": {}},
-        quantiles={"low": 0.1, "high": 0.9},
+        bounds={"low": 0.1, "high": 0.9},
         fees={"taker": 0.0004},
         features=FeatureConfig(path=Path("analysis/feature_list.json")),
         n_jobs=1,

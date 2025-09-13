@@ -1,27 +1,38 @@
 import sqlite3
 from collections import deque
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+from glob import glob
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-from glob import glob
 
 from analysis.compare_predictions import backfill_actuals_and_errors
 from analysis.feature_engineering import create_features
 from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
-from ml.train_regressor import train_regressor
 from ml.predict_regressor import predict_weighted_prices
+from ml.train_regressor import train_regressor
 
 try:
-    from utils.progress import step, timed, p
+    from utils.progress import p, step, timed
 except Exception:
-    def p(msg): print(msg, flush=True)
-    def step(i, n, msg): p(f"[{i}/{n}] {msg}")
+
+    def p(msg: str) -> Any:
+        print(msg, flush=True)
+
+    def step(i: int, n: int, msg: str) -> Any:
+        p(f"[{i}/{n}] {msg}")
+
     from contextlib import contextmanager
+
     @contextmanager
-    def timed(label): p(f"{label} ..."); yield; p(f"{label} done")
+    def timed(label):
+        p(f"{label} ...")
+        yield
+        p(f"{label} done")
+
 
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
@@ -34,21 +45,34 @@ PREDICT_HOURS = 2
 # Features available when rolling forward without full re-computation
 FEATURE_COLS = ["return_1d", "sma_7", "sma_14", "ema_7", "ema_14", "rsi_14"]
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
-INTERVAL_TO_MIN = {"1m":1,"3m":3,"5m":5,"15m":15,"30m":30,"1h":60,"2h":120,"4h":240,"1d":1440}
+INTERVAL_TO_MIN = {
+    "1m": 1,
+    "3m": 3,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "2h": 120,
+    "4h": 240,
+    "1d": 1440,
+}
 FEATURES_VERSION_FWD = "wf5yD1_future"
 
 
 def _created_at_iso():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _ensure_indexes(table_name: str):
-    conn = sqlite3.connect(DB_PATH); cur = conn.cursor()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
     cur.execute("CREATE INDEX IF NOT EXISTS idx_prices_open_time ON prices(open_time)")
-    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pred_time ON {table_name}(prediction_time_ms)")
-    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_target_time ON {table_name}(target_time_ms)")
+    cur.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_target_time ON {table_name}(target_time_ms)"
+    )
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name}(symbol)")
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 
 def _prepare_reg_target(df: pd.DataFrame, forward_steps: int) -> pd.DataFrame:
@@ -57,18 +81,24 @@ def _prepare_reg_target(df: pd.DataFrame, forward_steps: int) -> pd.DataFrame:
     return df
 
 
-def _weights_from_errors_for_range(train_df: pd.DataFrame, db_path: str, symbol: str, table_name: str,
-                                   alpha: float = 1.0, max_w: float = 3.0) -> pd.Series:
+def _weights_from_errors_for_range(
+    train_df: pd.DataFrame,
+    db_path: str,
+    symbol: str,
+    table_name: str,
+    alpha: float = 1.0,
+    max_w: float = 3.0,
+) -> pd.Series:
     if train_df.empty:
         return pd.Series(1.0, index=train_df.index)
     t0 = int(train_df["timestamp"].min().value // 1_000_000)
     t1 = int(train_df["timestamp"].max().value // 1_000_000)
     conn = sqlite3.connect(db_path)
     q = f"""
-      SELECT prediction_time_ms, abs_error
+      SELECT target_time_ms AS prediction_time_ms, abs_error
       FROM {table_name}
-      WHERE symbol = ? AND y_true IS NOT NULL
-        AND prediction_time_ms BETWEEN ? AND ?
+      WHERE symbol = ? AND y_true_hat IS NOT NULL
+        AND target_time_ms BETWEEN ? AND ?
     """
     dfp = pd.read_sql(q, conn, params=(symbol, t0, t1))
     conn.close()
@@ -83,8 +113,12 @@ def _weights_from_errors_for_range(train_df: pd.DataFrame, db_path: str, symbol:
     agg["weight"] = 1.0 + alpha * (agg["abs_error"] / eps)
     agg["weight"] = agg["weight"].clip(lower=0.5, upper=max_w)
     agg["prediction_time"] = pd.to_datetime(agg["prediction_time_ms"], unit="ms")
-    joined = train_df[["timestamp"]].merge(agg[["prediction_time","weight"]],
-                                           left_on="timestamp", right_on="prediction_time", how="left")
+    joined = train_df[["timestamp"]].merge(
+        agg[["prediction_time", "weight"]],
+        left_on="timestamp",
+        right_on="prediction_time",
+        how="left",
+    )
     w = joined["weight"].fillna(1.0)
     w.index = train_df.index
     return w
@@ -94,7 +128,7 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute(
-        f"DELETE FROM {table_name} WHERE symbol = ? AND prediction_time_ms >= ?",
+        f"DELETE FROM {table_name} WHERE symbol = ? AND target_time_ms >= ?",
         (symbol, int(from_ms)),
     )
     deleted = cur.rowcount if cur.rowcount is not None else 0
@@ -113,20 +147,30 @@ def _init_forward_state(df: pd.DataFrame):
     last_close = float(df["close"].iloc[-1])
     d7 = deque(df["close"].iloc[-7:].astype(float).tolist(), maxlen=7)
     d14 = deque(df["close"].iloc[-14:].astype(float).tolist(), maxlen=14)
-    sum7 = float(np.sum(d7)); sum14 = float(np.sum(d14))
+    sum7 = float(np.sum(d7))
+    sum14 = float(np.sum(d14))
     d288 = deque(df["close"].iloc[-288:].astype(float).tolist(), maxlen=288)
     ema7 = float(df["ema_7"].iloc[-1]) if "ema_7" in df.columns else last_close
     ema14 = float(df["ema_14"].iloc[-1]) if "ema_14" in df.columns else last_close
     period = 14
-    deltas = np.diff(df["close"].iloc[-(period+1):].astype(float).values)
+    deltas = np.diff(df["close"].iloc[-(period + 1) :].astype(float).values)
     gains = np.clip(deltas, 0, None)
     losses = np.clip(-deltas, 0, None)
     avg_gain = float(np.mean(gains)) if len(gains) > 0 else 0.0
     avg_loss = float(np.mean(losses)) if len(losses) > 0 else 0.0
-    return {"time": last_time, "close": last_close,
-            "sma7_deque": d7, "sma14_deque": d14, "sum7": sum7, "sum14": sum14,
-            "d288": d288, "ema7": ema7, "ema14": ema14,
-            "rsi_avg_gain": avg_gain, "rsi_avg_loss": avg_loss}
+    return {
+        "time": last_time,
+        "close": last_close,
+        "sma7_deque": d7,
+        "sma14_deque": d14,
+        "sum7": sum7,
+        "sum14": sum14,
+        "d288": d288,
+        "ema7": ema7,
+        "ema14": ema14,
+        "rsi_avg_gain": avg_gain,
+        "rsi_avg_loss": avg_loss,
+    }
 
 
 def _feat_from_state(state):
@@ -137,7 +181,8 @@ def _feat_from_state(state):
             r1d = (state["close"] / old) - 1.0
     sma7 = state["sum7"] / 7.0
     sma14 = state["sum14"] / 14.0
-    ag = state["rsi_avg_gain"]; al = state["rsi_avg_loss"]
+    ag = state["rsi_avg_gain"]
+    al = state["rsi_avg_loss"]
     if al == 0 and ag == 0:
         rsi = 50.0
     elif al == 0 and ag > 0:
@@ -166,7 +211,7 @@ def _update_state_with_pred(state, new_close):
     state["ema7"] = state["ema7"] + alpha7 * (new_close - state["ema7"])
     state["ema14"] = state["ema14"] + alpha14 * (new_close - state["ema14"])
     delta = new_close - prev_close
-    gain = max(delta, 0.0);
+    gain = max(delta, 0.0)
     loss = max(-delta, 0.0)
     period = 14
     state["rsi_avg_gain"] = (state["rsi_avg_gain"] * (period - 1) + gain) / period
@@ -184,23 +229,27 @@ def _predict_forward_steps(model_paths, state, steps, usage_path="ml/model_usage
         feats_vals = _feat_from_state(state)
         feats_df = pd.DataFrame([feats_vals], columns=FEATURE_COLS).astype(float)
         new_close = float(
-            predict_weighted_prices(
-                feats_df, FEATURE_COLS, model_paths, usage_path=usage_path
-            )[0]
+            predict_weighted_prices(feats_df, FEATURE_COLS, model_paths, usage_path=usage_path)[0]
         )
         pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
         target_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
-        rows.append((
-            SYMBOL, INTERVAL, FORWARD_STEPS,
-            int(pd.Timestamp(pred_time).value // 1_000_000),
-            int(pd.Timestamp(target_time).value // 1_000_000),
-            pred_local.strftime("%Y-%m-%d %H:%M:%S"),
-            target_local.strftime("%Y-%m-%d %H:%M:%S"),
-            new_close,
-            None, None,
-            "RandomForestRegressor", FEATURES_VERSION_FWD,
-            _created_at_iso()
-        ))
+        rows.append(
+            (
+                SYMBOL,
+                INTERVAL,
+                FORWARD_STEPS,
+                int(pd.Timestamp(pred_time).value // 1_000_000),
+                int(pd.Timestamp(target_time).value // 1_000_000),
+                pred_local.strftime("%Y-%m-%d %H:%M:%S"),
+                target_local.strftime("%Y-%m-%d %H:%M:%S"),
+                new_close,
+                None,
+                None,
+                "RandomForestRegressor",
+                FEATURES_VERSION_FWD,
+                _created_at_iso(),
+            )
+        )
         _update_state_with_pred(state, new_close)
     return rows
 
@@ -209,12 +258,13 @@ def main():
     step(1, 5, "Import latest data")
     try:
         from db.btc_import import import_latest_data
+
         import_latest_data()
     except Exception as exc:
         p(f"btc_import failed: {exc}")
 
     step(2, 5, f"Load full series for {SYMBOL}")
-    df = pd.DataFrame();
+    df = pd.DataFrame()
     last_ts = None
     with timed("Load + features + target"):
         df = get_price_data(SYMBOL, db_path=DB_PATH)
@@ -231,7 +281,9 @@ def main():
     create_predictions_table(DB_PATH, TABLE_PRED)
     _ensure_indexes(TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
-    deleted = _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
+    deleted = _delete_future_predictions(
+        DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED
+    )
     p(f"  -> cleanup: deleted {deleted} future prediction rows (>= {last_ts})")
 
     step(4, 5, "Train model on latest data")
@@ -241,10 +293,13 @@ def main():
         train_start = earliest
     latest_df = df[(df["timestamp"] >= train_start) & (df["timestamp"] <= last_ts)]
     X_latest, y_latest = latest_df[FEATURE_COLS], latest_df["target_close"]
-    weights = _weights_from_errors_for_range(latest_df, DB_PATH, SYMBOL, TABLE_PRED, alpha=1.0, max_w=5.0)
+    weights = _weights_from_errors_for_range(
+        latest_df, DB_PATH, SYMBOL, TABLE_PRED, alpha=1.0, max_w=5.0
+    )
     with timed("Train latest model"):
         train_regressor(
-            X_latest, y_latest,
+            X_latest,
+            y_latest,
             model_path="ml/model_reg.pkl",
             sample_weight=weights.values,
             params=dict(
