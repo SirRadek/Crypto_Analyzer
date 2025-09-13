@@ -23,15 +23,15 @@ def build_reg() -> tuple[dict[str, float | int | str], int]:
     return params, 600
 
 
-def build_quantile(alpha: float) -> tuple[dict[str, float | int | str], int]:
+def build_bound() -> tuple[dict[str, float | int | str], int]:
     params: dict[str, float | int | str] = {
         "max_depth": 8,
         "eta": 0.04,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
         "tree_method": "hist",
-        "objective": "reg:quantileerror",
-        "quantile_alpha": alpha,
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
         "nthread": 4,
         "seed": 42,
     }
