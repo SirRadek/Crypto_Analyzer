@@ -18,6 +18,7 @@ fastapi
 uvicorn
 httpx
 vulture>=2.7
+psutil>=5.9
 
 # Type stubs for static analysis
 pandas-stubs

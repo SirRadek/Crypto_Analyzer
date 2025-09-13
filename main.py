@@ -109,12 +109,9 @@ def predict_price(model_dir="models/xgb_price", target_kind="log"):
     reg = joblib.load(Path(model_dir) / "reg.joblib", mmap_mode="r")
     q10 = joblib.load(Path(model_dir) / "q10.joblib", mmap_mode="r")
     q90 = joblib.load(Path(model_dir) / "q90.joblib", mmap_mode="r")
-    X_last_reg = match_model_features(X_last, reg).astype("float32")
-    X_last_q10 = match_model_features(X_last, q10).astype("float32")
-    X_last_q90 = match_model_features(X_last, q90).astype("float32")
-    delta = reg.predict(X_last_reg)[0]
-    low = q10.predict(X_last_q10)[0]
-    high = q90.predict(X_last_q90)[0]
+    delta = reg.predict(X_last)[0]
+    low = q10.predict(X_last)[0]
+    high = q90.predict(X_last)[0]
     p_hat = to_price(last_close, delta, kind=target_kind)
     p_low = to_price(last_close, low, kind=target_kind)
     p_high = to_price(last_close, high, kind=target_kind)
@@ -131,7 +128,6 @@ def main(train=True):
     step(1, 8, "Import latest data")
     try:
         from db.btc_import import import_latest_data
-
         import_latest_data()
     except Exception as exc:
         p(f"btc_import failed: {exc}")
@@ -154,13 +150,13 @@ def main(train=True):
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
     _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
-    # Load base models and their validation weights
+
     cls_paths, cls_indices = list_model_paths("ml/meta_model_cls.joblib", CLS_MODEL_COUNT)
     reg_paths, reg_indices = list_model_paths("ml/meta_model_reg.joblib", REG_MODEL_COUNT)
     cls_weights = load_accuracy_weights(CLS_ACC_PATH, cls_indices)
     reg_weights = load_accuracy_weights(REG_ACC_PATH, reg_indices)
 
-    # Prepare training data including predictions from base models
+    # Sestavení trénovací tabulky přes více horizontů
     horizon_dfs = []
     for horizon in range(1, FORWARD_STEPS + 1):
         df_h = prepare_targets(full_df, forward_steps=horizon)
@@ -168,16 +164,19 @@ def main(train=True):
         horizon_dfs.append(df_h)
     train_df = pd.concat(horizon_dfs, ignore_index=True)
 
-    base_feats = train_df[FEATURE_COLS]
+    # Základní feature set
+    base_feats = train_df[FEATURE_COLS].astype("float32")
+
+    # Predikce bázových modelů → vstup do meta-modelu
     for path, idx, w in zip(cls_paths, cls_indices, cls_weights, strict=False):
         model = load_model(model_path=path)
-        feats = match_model_features(base_feats, model)
+        feats = match_model_features(base_feats, model).astype("float32")
         preds = model.predict_proba(feats)[:, 1] * w
         train_df[f"cls_pred_{idx}"] = preds
         del model
     for path, idx, w in zip(reg_paths, reg_indices, reg_weights, strict=False):
         model = load_regressor(model_path=path)
-        feats = match_model_features(base_feats, model)
+        feats = match_model_features(base_feats, model).astype("float32")
         preds = model.predict(feats) * w
         train_df[f"reg_pred_{idx}"] = preds
         del model
@@ -185,17 +184,20 @@ def main(train=True):
     cls_pred_cols = [f"cls_pred_{i}" for i in cls_indices]
     reg_pred_cols = [f"reg_pred_{i}" for i in reg_indices]
     feature_cols_meta = FEATURE_COLS + ["horizon"] + cls_pred_cols + reg_pred_cols
+
     X_all = train_df[feature_cols_meta].astype("float32")
-    y_cls_all = train_df["target_cls"].astype("float32")
+    y_cls_all = train_df["target_cls"].astype("int32")
     y_reg_all = train_df["target_reg"].astype("float32")
 
     model_path_cls = "ml/meta_model_cls.joblib"
     model_path_reg = "ml/meta_model_reg.joblib"
+
     if train:
         with timed("Train meta-classifier"):
-            cls_model = train_model(X_all, y_cls_all, model_path=model_path_cls)
+            # GPU preferováno, fallback řeší uvnitř train_model
+            cls_model = train_model(X_all, y_cls_all, model_path=model_path_cls, use_gpu=True)
         with timed("Train meta-regressor"):
-            reg_model = train_regressor(X_all, y_reg_all, model_path=model_path_reg)
+            reg_model = train_regressor(X_all, y_reg_all, model_path=model_path_reg, use_gpu=True)
     else:
         with timed("Load meta-classifier"):
             cls_model = load_model(model_path=model_path_cls)
@@ -208,7 +210,7 @@ def main(train=True):
     pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
 
     # Base model predictions for the latest row
-    base_last = last_row[FEATURE_COLS]
+    base_last = last_row[FEATURE_COLS].astype("float32")
     last_base_preds = {}
     for path, idx, w in zip(cls_paths, cls_indices, cls_weights, strict=False):
         model = load_model(model_path=path)
@@ -228,11 +230,9 @@ def main(train=True):
             X_last["horizon"] = horizon
             for name, val in last_base_preds.items():
                 X_last[name] = val
-            X_last_meta = X_last[feature_cols_meta].astype("float32")
-            X_last_cls = match_model_features(X_last_meta, cls_model).astype("float32")
-            X_last_reg = match_model_features(X_last_meta, reg_model).astype("float32")
-            prob_up = float(cls_model.predict_proba(X_last_cls)[:, 1][0])
-            reg_pred = float(reg_model.predict(X_last_reg)[0])
+            X_last = X_last[feature_cols_meta].astype("float32")
+            prob_up = float(cls_model.predict_proba(X_last)[:, 1][0])
+            reg_pred = float(reg_model.predict(X_last)[0])
             last_close = float(last_row["close"].iloc[0])
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
@@ -252,7 +252,7 @@ def main(train=True):
             float(prob_up),
             None,
             None,
-            "RF_cls_reg",
+            "XGB_cls_reg",
             FEATURES_VERSION,
             _created_at_iso(),
         )
