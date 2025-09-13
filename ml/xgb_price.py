@@ -38,6 +38,23 @@ def build_bound() -> tuple[dict[str, float | int | str], int]:
     return params, 800
 
 
+def build_bound() -> tuple[dict[str, float | int | str], int]:
+    params: dict[str, float | int | str] = {
+        "tree_method": "hist",
+        "device": "cuda",
+        "max_depth": 8,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "nthread": -1,
+        "random_state": 42,
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+    }
+    rounds = 800
+    return params, rounds
+
+
 def to_price(
     last_price: np.ndarray | float, delta: np.ndarray | float, kind: str = "log"
 ) -> np.ndarray:
@@ -52,3 +69,12 @@ def to_price(
 
 def clip_inside(p: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     return np.minimum(np.maximum(p, lo), hi)
+
+
+__all__ = [
+    "build_reg",
+    "build_quantile",
+    "build_bound",
+    "to_price",
+    "clip_inside",
+]

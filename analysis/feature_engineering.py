@@ -5,6 +5,8 @@ import pandas as pd
 
 # Lehký FE laděný pro 2h BTCUSDT. Bez těžkých závislostí, vše float32.
 
+H = 24  # 120min horizon in 5m candles
+
 
 def create_features(df: pd.DataFrame) -> pd.DataFrame:
     """Přidej technické, order-flow a časové rysy. Vše jako float32."""
@@ -97,6 +99,14 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- NaN handling před cíli ----------------------------------------------
     df = df.fillna(0.0)
+
+    # --- budoucí extrémy ------------------------------------------------------
+    fut_low = df["low"].shift(-H + 1).rolling(H).min().astype(np.float32)
+    fut_high = df["high"].shift(-H + 1).rolling(H).max().astype(np.float32)
+    df["delta_low_log_120m"] = np.log(fut_low / df["close"]).astype(np.float32)
+    df["delta_low_lin_120m"] = (fut_low - df["close"]).astype(np.float32)
+    df["delta_high_log_120m"] = np.log(fut_high / df["close"]).astype(np.float32)
+    df["delta_high_lin_120m"] = (fut_high - df["close"]).astype(np.float32)
 
     # --- cíle (60/120/240 min) -----------------------------------------------
     horizon = 24  # 120 min při 5m svících
