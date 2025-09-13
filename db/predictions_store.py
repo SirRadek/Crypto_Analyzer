@@ -17,6 +17,7 @@ def create_predictions_table(db_path=DB_PATH, table_name=TABLE_NAME):
     if {"p_hat", "p_low", "p_high"} <= cols:
         if "abs_error" not in cols:
             c.execute(f"ALTER TABLE {table_name} ADD COLUMN abs_error REAL")
+
         c.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} "
             f"ON {table_name}(symbol, interval, target_time_ms)"
