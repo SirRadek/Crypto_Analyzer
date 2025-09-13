@@ -3,8 +3,8 @@ import pandas as pd
 import yaml
 
 import ml.train_historic as th
-import ml.xgb_price as xgb_price
 import ml.train_price as tp
+import ml.xgb_price as xgb_price
 
 
 def _small_models():
@@ -75,7 +75,7 @@ def test_train_historic(tmp_path, monkeypatch):
         "embargo": 24,
         "target_kind": "log",
         "xgb_params": {"reg": {}, "bound": {}},
-        "quantiles": {"low": 0.1, "high": 0.9},
+        "bounds": {"low": 0.1, "high": 0.9},
         "fees": {"taker": 0.0004},
         "features": {"path": "analysis/feature_list.json"},
         "n_jobs": 1,

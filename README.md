@@ -11,6 +11,7 @@ A modular Python project for **cryptocurrency price analysis and prediction** us
 - Aggregates multiple ML models using usage-based weighting.
 - Forecast loop ensembles all regression models via usage-based weights.
 - Combines signals for final trading decision.
+- Bound-model pipeline outputs price interval `p_low` ≤ `p_hat` ≤ `p_high`.
 - Fully modular and easy to expand.
 
 ---

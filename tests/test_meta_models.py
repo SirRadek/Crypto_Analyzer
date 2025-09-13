@@ -138,7 +138,7 @@ def test_regressor_prediction_intervals(tmp_path: Path) -> None:
             FEATURE_COLUMNS,
             model_path=str(tmp_path / "rpi.joblib"),
             return_pi=True,
-            quantiles=(0.1, 0.5, 0.9),
+            # use default interval settings
         ),
     )
     assert isinstance(preds, np.ndarray)
@@ -201,7 +201,8 @@ def test_integration_small_sample(tmp_path: Path) -> None:
     assert probas.shape[0] == prices.shape[0] == len(train_df)
     # metadata files were saved
     assert (tmp_path / "features.json").exists()
-    assert json.load(open(tmp_path / "ver.json"))
+    with open(tmp_path / "ver.json") as f:
+        assert json.load(f)
     assert (tmp_path / "thr.json").exists()
 
 
@@ -328,5 +329,6 @@ def test_threshold_respected(tmp_path: Path) -> None:
         model_path=str(tmp_path / "th_model.joblib"),
         threshold_path=str(tmp_path / "threshold.json"),
     )
-    thr = json.load(open(tmp_path / "threshold.json"))["threshold"]
+    with open(tmp_path / "threshold.json") as f:
+        thr = json.load(f)["threshold"]
     assert np.array_equal(preds, (probas >= thr).astype(int))
