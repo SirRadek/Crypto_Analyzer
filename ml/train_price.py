@@ -117,7 +117,7 @@ def train_price(
 
     preds = []
     metrics = []
-    reg_models, q10_models, q90_models = [], [], []
+    reg_models, low_models, high_models = [], [], []
     start_time = time.monotonic()
     steps = horizon_min // 5
 
@@ -127,11 +127,11 @@ def train_price(
         dtrain = xgb.DMatrix(_to_f32(X_train), label=_to_f32(y_train))
         dtest = xgb.DMatrix(_to_f32(X_test), label=_to_f32(y_test))
         reg_params, reg_rounds = build_reg()
-        q10_params, q_rounds = build_quantile(quant_low)
-        q90_params, q90_rounds = build_quantile(quant_high)
+        low_params, low_rounds = build_quantile(quant_low)
+        high_params, high_rounds = build_quantile(quant_high)
         reg_params["nthread"] = n_jobs
-        q10_params["nthread"] = n_jobs
-        q90_params["nthread"] = n_jobs
+        low_params["nthread"] = n_jobs
+        high_params["nthread"] = n_jobs
         reg = xgb.train(
             reg_params,
             dtrain,
@@ -140,29 +140,29 @@ def train_price(
             early_stopping_rounds=50,
             verbose_eval=False,
         )
-        q10 = xgb.train(
-            q10_params,
+        lowm = xgb.train(
+            low_params,
             dtrain,
-            q_rounds,
+            low_rounds,
             evals=[(dtest, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
-        q90 = xgb.train(
-            q90_params,
+        highm = xgb.train(
+            high_params,
             dtrain,
-            q90_rounds,
+            high_rounds,
             evals=[(dtest, "test")],
             early_stopping_rounds=50,
             verbose_eval=False,
         )
         reg_models.append(reg)
-        q10_models.append(q10)
-        q90_models.append(q90)
+        low_models.append(lowm)
+        high_models.append(highm)
         last_price = np.asarray(df["close"].iloc[test_idx].values, dtype=np.float32)
         delta_hat = reg.predict(dtest)
-        low_hat = q10.predict(dtest)
-        high_hat = q90.predict(dtest)
+        low_hat = lowm.predict(dtest)
+        high_hat = highm.predict(dtest)
         p_hat = to_price(last_price, delta_hat, kind=target_kind)
         p_low = to_price(last_price, low_hat, kind=target_kind)
         p_high = to_price(last_price, high_hat, kind=target_kind)
@@ -199,19 +199,19 @@ def train_price(
     out_path.mkdir(parents=True, exist_ok=True)
 
     reg_params, reg_rounds = build_reg()
-    q10_params, q_rounds = build_quantile(quant_low)
-    q90_params, q90_rounds = build_quantile(quant_high)
-    for p in (reg_params, q10_params, q90_params):
+    low_params, low_rounds = build_quantile(quant_low)
+    high_params, high_rounds = build_quantile(quant_high)
+    for p in (reg_params, low_params, high_params):
         p["nthread"] = n_jobs
     dall = xgb.DMatrix(_to_f32(X_matrix), label=_to_f32(y))
     reg_final = xgb.train(reg_params, dall, reg_rounds, verbose_eval=False)
-    q10_final = xgb.train(q10_params, dall, q_rounds, verbose_eval=False)
-    q90_final = xgb.train(q90_params, dall, q90_rounds, verbose_eval=False)
+    low_final = xgb.train(low_params, dall, low_rounds, verbose_eval=False)
+    high_final = xgb.train(high_params, dall, high_rounds, verbose_eval=False)
     joblib.dump(reg_final, out_path / "reg.joblib")
-    joblib.dump(q10_final, out_path / "q10.joblib")
-    joblib.dump(q90_final, out_path / "q90.joblib")
+    joblib.dump(low_final, out_path / "low.joblib")
+    joblib.dump(high_final, out_path / "high.joblib")
     joblib.dump(
-        {"reg": reg_models, "q10": q10_models, "q90": q90_models}, out_path / "ensemble.joblib"
+        {"reg": reg_models, "low": low_models, "high": high_models}, out_path / "ensemble.joblib"
     )
 
     pred_df = pd.concat(preds, ignore_index=True).sort_values("timestamp")
