@@ -265,10 +265,31 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--predict", action="store_true")
+    # Training CLI options
+    parser.add_argument("--task", choices=["clf", "reg"], default=None)
+    parser.add_argument("--horizon", type=int, choices=[120, 240], default=120)
+    parser.add_argument("--gpu", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--eval_metric", default="logloss")
+    parser.add_argument("--n_estimators", type=int, default=200)
+    parser.add_argument("--max_depth", type=int, default=6)
+    parser.add_argument("--eta", type=float, default=0.1)
+    parser.add_argument("--subsample", type=float, default=1.0)
+    parser.add_argument("--colsample_bytree", type=float, default=1.0)
+    parser.add_argument("--min_child_weight", type=float, default=1.0)
+    parser.add_argument("--lambda", dest="reg_lambda", type=float, default=1.0)
+    parser.add_argument("--class_threshold", type=float, default=0.5)
+    parser.add_argument("--scale_pos_weight", type=float, default=1.0)
+    parser.add_argument("--half_life", type=float, default=30.0)
+    parser.add_argument("--run_id", type=str, default=None)
     args = parser.parse_args()
 
     set_cpu_limit(CPU_LIMIT)
-    if args.predict:
+    if args.task is not None:
+        from ml.train import main_cli as train_main
+
+        train_main(args)
+    elif args.predict:
         ts, p_low, p_hat, p_high = predict_price()
         print(f"{ts},{p_low:.2f},{p_hat:.2f},{p_high:.2f}")
     else:
