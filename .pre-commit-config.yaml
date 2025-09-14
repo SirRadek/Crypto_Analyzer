@@ -22,7 +22,7 @@ repos:
     rev: v2.2.6
     hooks:
       - id: codespell
-        args: ["-L", "onchain,taker,Defaulty"]
+        args: ["-L", "onchain,taker,mempool,USDT,Binance,basis,bps,SHAP,Defaulty"]
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.11.1
     hooks:

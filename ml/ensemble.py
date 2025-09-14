@@ -18,6 +18,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
 from crypto_analyzer.model_manager import atomic_write
 
 try:

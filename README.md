@@ -79,7 +79,7 @@ This creates the `db/data/crypto_data.sqlite` file with price data.
 
 On-chain metrics can be merged from public APIs:
 
-* [mempool.space](https://mempool.space/api/) – mempool stats (no key required)
+* [mempool.space](https://mempool.space/api/) – mempool stats (no key required; fetched automatically with `--use_onchain`)
 * [Glassnode](https://glassnode.com/) – exchange flows (API key optional)
 * [Whale Alert](https://developer.whale-alert.io/) – large transfers/mints (API key optional)
 
@@ -128,9 +128,10 @@ typical workflow for a 2‑hour classification horizon:
    python db/btc_import.py
    ```
 
-2. **(Optional) Merge on‑chain metrics** – fetch data via `api/onchain.py` and
-   store the resulting columns with the `onch_` prefix into the SQLite
-   `prices` table.
+2. **(Optional) Merge additional on‑chain metrics** – mempool stats are
+   fetched automatically, but other metrics (e.g. exchange flows) can be
+   retrieved via `api/onchain.py` and stored with the `onch_` prefix in the
+   SQLite `prices` table.
 
 3. **Feature engineering & target creation** – invoke the training pipeline
    which automatically builds all features and targets:
@@ -166,9 +167,9 @@ typical workflow for a 2‑hour classification horizon:
 
 ## Determinism & Repro
 
-Training pipelines use a fixed ``random_state`` (default ``42``) which is logged
-to ``run_config.json`` along with all other parameters to ensure runs are
-repeatable.
+Training routines default to ``random_state=42`` as defined in
+``ml/train.py``. The chosen value, together with other parameters, is logged to
+``outputs/run_config.json`` to ensure runs are repeatable.
 
 ## Troubleshooting
 
@@ -181,6 +182,7 @@ Install hooks and run them locally before committing:
 
 ```bash
 pip install pre-commit
+pre-commit install
 pre-commit run -a
 ```
 
