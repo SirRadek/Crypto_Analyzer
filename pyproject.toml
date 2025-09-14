@@ -8,19 +8,26 @@ version = "0.1.0"
 description = "Utilities for crypto market analysis"
 requires-python = ">=3.13"
 dependencies = [
-    "pandas>=2.2",
-    "numpy>=1.26",
-    "scikit-learn~=1.7.1",
-    "scipy~=1.16.2",
-    "requests~=2.32.5",
-    "joblib~=1.5.1",
-    "PyYAML~=6.0.2",
-    "tqdm~=4.67.1",
-    "xgboost>=2.0",
-    "shap",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "xgboost>=2.1,<4",
+    "shap>=0.46",
+    "numba",
+    "requests",
+    "pydantic",
+    "python-dateutil",
+    "tqdm",
+    "pyarrow",
+    "matplotlib",
+    "joblib",
+    "PyYAML",
     "fastapi",
     "uvicorn",
     "httpx",
+    "ta",
+    "torch",
 ]
 
 [project.optional-dependencies]

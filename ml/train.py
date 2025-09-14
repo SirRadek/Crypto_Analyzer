@@ -48,7 +48,7 @@ def train_model(
     """
     Trénuje meta-klasifikátor pomocí XGBoost (pandas+numpy only).
     - float32 vstupy
-    - GPU akcelerace přes device="cuda" s fallbackem na CPU
+    - GPU akcelerace přes tree_method="gpu_hist" a predictor="gpu_predictor" s fallbackem na CPU
     - early stopping (callbacks nebo early_stopping_rounds dle verze)
     """
     # Train/val split
@@ -71,8 +71,8 @@ def train_model(
         learning_rate=0.08,
         subsample=0.8,
         colsample_bytree=0.8,
-        tree_method="hist",
-        device=("cuda" if use_gpu else "cpu"),
+        tree_method=("gpu_hist" if use_gpu else "hist"),
+        predictor=("gpu_predictor" if use_gpu else "cpu_predictor"),
         n_jobs=-1,
         eval_metric="logloss",
         random_state=random_state,
@@ -86,7 +86,7 @@ def train_model(
         _fit_no_es(clf, X_train, y_train, X_val, y_val)
     except xgb.core.XGBoostError:
         logger.warning("CUDA not available or failed. Falling back to CPU.")
-        clf.set_params(device="cpu")
+        clf.set_params(tree_method="hist", predictor="cpu_predictor")
         _fit_no_es(clf, X_train, y_train, X_val, y_val)
 
     # Vyhodnocení a uložení
