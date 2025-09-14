@@ -15,7 +15,6 @@ from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
 from ml.model_utils import match_model_features
 from ml.train import load_model, train_model
-from ml.train_regressor import load_regressor, train_regressor
 from ml.xgb_price import clip_inside, to_price
 from utils.config import CONFIG
 from utils.helpers import ensure_dir_exists, set_cpu_limit
@@ -100,6 +99,124 @@ def prepare_targets(df, forward_steps=1):
     return df
 
 
+def run_pipeline(
+    task: str,
+    horizon: int,
+    use_onchain: bool,
+    txn_cost_bps: float,
+    split_params: dict,
+    gpu: bool,
+    out_dir: str,
+):
+    """Minimal end-to-end training pipeline.
+
+    Loads data from SQLite, performs feature engineering (optionally including
+    ``onch_`` columns), creates targets, splits the data, trains an XGBoost model
+    and stores artefacts in ``out_dir``.
+    """
+
+    ensure_dir_exists(out_dir)
+
+    df = get_price_data(SYMBOL, db_path=DB_PATH)
+    df = create_features(df)
+    if not use_onchain:
+        df = df.loc[:, ~df.columns.str.startswith("onch_")]
+
+    horizon_steps = horizon // 5
+    if task == "clf":
+        df["target"] = (df["close"].shift(-horizon_steps) > df["close"]).astype(np.int32)
+    else:
+        df["target"] = (df["close"].shift(-horizon_steps) - df["close"]).astype(np.float32)
+    df = df.dropna(subset=["target"])
+
+    base_cols = {
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_asset_volume",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "number_of_trades",
+    }
+    delta_cols = [c for c in df.columns if c.startswith("delta_")]
+    drop_cols = base_cols.union(delta_cols).union({"target"})
+    feature_cols = [c for c in df.columns if c not in drop_cols]
+
+    X = df[feature_cols].astype(np.float32)
+    y = df["target"]
+
+    from sklearn.model_selection import train_test_split
+
+    split_cfg = {"test_size": 0.2, "shuffle": False}
+    split_cfg.update(split_params)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, **split_cfg)
+
+    import xgboost as xgb
+
+    tree_method = "gpu_hist" if gpu else "hist"
+    if task == "clf":
+        model = xgb.XGBClassifier(n_estimators=50, tree_method=tree_method, eval_metric="logloss")
+    else:
+        model = xgb.XGBRegressor(n_estimators=50, tree_method=tree_method)
+    model.fit(X_train, y_train)
+
+    if task == "clf":
+        preds = model.predict_proba(X_test)[:, 1]
+    else:
+        preds = model.predict(X_test)
+
+    from sklearn.metrics import accuracy_score, mean_squared_error
+
+    if task == "clf":
+        metric_name = "accuracy"
+        metric_val = accuracy_score(y_test, (preds > 0.5).astype(int))
+    else:
+        metric_name = "mse"
+        metric_val = mean_squared_error(y_test, preds)
+
+    metrics = {metric_name: float(metric_val)}
+    with open(Path(out_dir) / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(metrics, f)
+
+    pred_df = pd.DataFrame(
+        {
+            "timestamp": df.loc[y_test.index, "timestamp"].reset_index(drop=True),
+            "y_true": y_test.reset_index(drop=True),
+            "y_pred": preds,
+        }
+    )
+    pred_df.to_csv(Path(out_dir) / f"predictions_{task}.csv", index=False)
+
+    try:
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots()
+        ax.plot(pred_df["y_true"].to_numpy(), label="true")
+        ax.plot(pred_df["y_pred"].to_numpy(), label="pred")
+        ax.legend()
+        fig.savefig(Path(out_dir) / f"pred_vs_actual_{task}.png")
+        plt.close(fig)
+    except Exception:
+        pass
+
+    model.save_model(Path(out_dir) / f"{task}_model.json")
+
+    run_cfg = {
+        "task": task,
+        "horizon": horizon,
+        "use_onchain": use_onchain,
+        "txn_cost_bps": txn_cost_bps,
+        "split_params": split_params,
+        "gpu": gpu,
+        "out_dir": out_dir,
+    }
+    with open(Path(out_dir) / "run_config.json", "w", encoding="utf-8") as f:
+        json.dump(run_cfg, f, indent=2)
+
+
 def predict_price(model_dir="models/xgb_price", target_kind="log"):
     df = get_price_data(SYMBOL, db_path=DB_PATH)
     df = create_features(df)
@@ -122,6 +239,8 @@ def predict_price(model_dir="models/xgb_price", target_kind="log"):
 
 
 def main(train=True):
+    from ml.train_regressor import load_regressor, train_regressor
+
     ensure_dir_exists("db/data")
     start = time.perf_counter()
 
@@ -265,30 +384,26 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--predict", action="store_true")
-    # Training CLI options
     parser.add_argument("--task", choices=["clf", "reg"], default=None)
     parser.add_argument("--horizon", type=int, choices=[120, 240], default=120)
+    parser.add_argument("--use_onchain", action="store_true")
+    parser.add_argument("--txn_cost_bps", type=float, default=0.0)
+    parser.add_argument("--split_params", type=str, default="{}")
     parser.add_argument("--gpu", action="store_true")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--eval_metric", default="logloss")
-    parser.add_argument("--n_estimators", type=int, default=200)
-    parser.add_argument("--max_depth", type=int, default=6)
-    parser.add_argument("--eta", type=float, default=0.1)
-    parser.add_argument("--subsample", type=float, default=1.0)
-    parser.add_argument("--colsample_bytree", type=float, default=1.0)
-    parser.add_argument("--min_child_weight", type=float, default=1.0)
-    parser.add_argument("--lambda", dest="reg_lambda", type=float, default=1.0)
-    parser.add_argument("--class_threshold", type=float, default=0.5)
-    parser.add_argument("--scale_pos_weight", type=float, default=1.0)
-    parser.add_argument("--half_life", type=float, default=30.0)
-    parser.add_argument("--run_id", type=str, default=None)
+    parser.add_argument("--out_dir", type=str, default="outputs")
     args = parser.parse_args()
 
     set_cpu_limit(CPU_LIMIT)
     if args.task is not None:
-        from ml.train import main_cli as train_main
-
-        train_main(args)
+        run_pipeline(
+            task=args.task,
+            horizon=args.horizon,
+            use_onchain=args.use_onchain,
+            txn_cost_bps=args.txn_cost_bps,
+            split_params=json.loads(args.split_params),
+            gpu=args.gpu,
+            out_dir=args.out_dir,
+        )
     elif args.predict:
         ts, p_low, p_hat, p_high = predict_price()
         print(f"{ts},{p_low:.2f},{p_hat:.2f},{p_high:.2f}")

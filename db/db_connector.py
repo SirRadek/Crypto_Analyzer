@@ -13,13 +13,17 @@ def get_price_data(
     end_ts: int | None = None,
     db_path: str = DEFAULT_DB_PATH,
 ):
+    """Load price (and optional on-chain) data for ``symbol`` from SQLite.
+
+    The function selects all columns from the ``prices`` table so that any
+    additional features (e.g. on-chain metrics prefixed ``onch_``) are loaded as
+    well.  The ``open_time`` column is renamed to ``timestamp`` and converted to
+    a timezone-aware ``datetime``.  Non-price helper columns such as ``symbol``
+    and ``interval`` are dropped if present.
+    """
+
     conn = sqlite3.connect(db_path)
-    query = (
-        "SELECT "
-        "open_time as timestamp, open, high, low, close, volume, "
-        "number_of_trades, quote_asset_volume, taker_buy_base, taker_buy_quote "
-        "FROM prices WHERE symbol = ?"
-    )
+    query = "SELECT * FROM prices WHERE symbol = ?"
     params = [symbol]
     if start_ts is not None:
         query += " AND open_time >= ?"
@@ -31,5 +35,13 @@ def get_price_data(
 
     df = pd.read_sql(query, conn, params=params)
     conn.close()
+
+    if "open_time" in df.columns:
+        df.rename(columns={"open_time": "timestamp"}, inplace=True)
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+
+    for col in ["symbol", "interval"]:
+        if col in df.columns:
+            df.drop(columns=[col], inplace=True)
+
     return df
