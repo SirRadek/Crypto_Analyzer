@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+import time
 
 import pandas as pd
 import requests
@@ -23,10 +24,32 @@ CONFIG = OnChainConfig()
 
 
 def _session() -> requests.Session:
-    retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    retries = Retry(total=0)
     s = requests.Session()
     s.mount("https://", HTTPAdapter(max_retries=retries))
     return s
+
+
+def _get_with_retry(
+    sess: requests.Session,
+    url: str,
+    *,
+    params: dict | None = None,
+    timeout: int = 10,
+    retries: int = 5,
+    backoff: float = 1.0,
+):
+    delay = backoff
+    for attempt in range(retries):
+        try:
+            resp = sess.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def _cache_path(prefix: str, start: datetime | None = None, end: datetime | None = None) -> Path:
@@ -48,10 +71,18 @@ def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
 
     sess = _session()
     params = {"start": int(start.timestamp()), "end": int(end.timestamp())}
-    tx = sess.get("https://mempool.space/api/v1/statistics/transactions", params=params, timeout=10)
-    fee = sess.get("https://mempool.space/api/v1/statistics/fees/median", params=params, timeout=10)
-    tx.raise_for_status()
-    fee.raise_for_status()
+    tx = _get_with_retry(
+        sess,
+        "https://mempool.space/api/v1/statistics/transactions",
+        params=params,
+        timeout=10,
+    )
+    fee = _get_with_retry(
+        sess,
+        "https://mempool.space/api/v1/statistics/fees/median",
+        params=params,
+        timeout=10,
+    )
     df_tx = pd.DataFrame(tx.json())
     df_fee = pd.DataFrame(fee.json())
     df = pd.merge(df_tx, df_fee, on="time", how="outer")
@@ -63,6 +94,10 @@ def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
     # time.
     df = df.resample("5T", label="right", closed="right").agg(
         {"tx_count": "sum", "median_fee": "median"}
+    )
+    df.rename(
+        columns={"tx_count": "onch_tx_count", "median_fee": "onch_median_fee"},
+        inplace=True,
     )
     df.to_parquet(cache_file)
     return df
@@ -89,21 +124,24 @@ def load_exchange_flows_1h(
         sess = _session()
         base = "https://api.glassnode.com/v1/metrics/exchanges"
         params = {"a": "BTC", "i": "1h", "api_key": key}
-        inflow = sess.get(f"{base}/inflow_sum", params=params, timeout=10)
-        outflow = sess.get(f"{base}/outflow_sum", params=params, timeout=10)
-        inflow.raise_for_status()
-        outflow.raise_for_status()
+        inflow = _get_with_retry(
+            sess, f"{base}/inflow_sum", params=params, timeout=10
+        )
+        outflow = _get_with_retry(
+            sess, f"{base}/outflow_sum", params=params, timeout=10
+        )
         df_in = pd.DataFrame(inflow.json())
         df_out = pd.DataFrame(outflow.json())
         df = pd.merge(df_in, df_out, on="t", how="outer", suffixes=("_in", "_out"))
         df["time"] = pd.to_datetime(df["t"], unit="s", utc=True)
         df = df.set_index("time").drop(columns=["t_in", "t_out"], errors="ignore")
-        df.rename(columns={"v_in": "inflow", "v_out": "outflow"}, inplace=True)
-        df["netflow"] = df["inflow"] - df["outflow"]
+        df.rename(columns={"v_in": "onch_inflow", "v_out": "onch_outflow"}, inplace=True)
+        df["onch_netflow"] = df["onch_inflow"] - df["onch_outflow"]
     else:
         raise ValueError("source must be 'csv' or 'glassnode'")
 
     df = df.resample("1H", label="right", closed="right").sum(min_count=1)
+    df.rename(columns={c: f"onch_{c}" for c in df.columns}, inplace=True)
     df.to_parquet(cache_file)
     return df
 
@@ -125,8 +163,9 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
         "currency": "usdt",
         "api_key": key,
     }
-    resp = sess.get("https://api.whale-alert.io/v1/transactions", params=params, timeout=10)
-    resp.raise_for_status()
+    resp = _get_with_retry(
+        sess, "https://api.whale-alert.io/v1/transactions", params=params, timeout=10
+    )
     data = resp.json().get("transactions", [])
     records: list[dict[str, float]] = []
     for tx in data:
@@ -136,13 +175,14 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.set_index("timestamp").sort_index()
-        df["count"] = 1
+        df["onch_usdt_count"] = 1
+        df.rename(columns={"usd": "onch_usd"}, inplace=True)
         df = df.resample("5T", label="right", closed="right").agg(
-            {"count": "sum", "usd": "sum"}
+            {"onch_usdt_count": "sum", "onch_usd": "sum"}
         )
     else:
         idx = pd.DatetimeIndex([], tz="UTC")
-        df = pd.DataFrame(columns=["count", "usd"], index=idx)
+        df = pd.DataFrame(columns=["onch_usdt_count", "onch_usd"], index=idx)
     df.to_parquet(cache_file)
     return df
 

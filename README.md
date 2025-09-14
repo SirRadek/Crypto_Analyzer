@@ -113,6 +113,41 @@ into the chosen `outputs/` directory.  Run configuration is logged as
 
 ---
 
+## Training on Historical Data
+
+The project can be trained end‑to‑end on past data to evaluate strategies or to
+produce models for later inference.  The following example demonstrates a
+typical workflow for a 2‑hour classification horizon:
+
+1. **Download candles** – adjust the symbol and date range in
+   `db/btc_import.py` and run:
+
+   ```bash
+   python db/btc_import.py
+   ```
+
+2. **(Optional) Merge on‑chain metrics** – fetch data via `api/onchain.py` and
+   store the resulting columns with the `onch_` prefix into the SQLite
+   `prices` table.
+
+3. **Feature engineering & target creation** – invoke the training pipeline
+   which automatically builds all features and targets:
+
+   ```bash
+   python main.py --task clf --horizon 120 --out_dir outputs --use_onchain
+   ```
+
+   The command writes predictions, metrics and diagnostic plots into the
+   `outputs/` directory.  Additional artefacts such as permutation and SHAP
+   importances are also exported for further analysis.
+
+4. **Inspect results** – review the generated CSV files and graphs in
+   `outputs/` to understand model performance and feature behaviour.  The file
+   `run_config.json` captures the exact parameters used for the run, ensuring
+   full reproducibility.
+
+---
+
 ## Customization
 
 * Add or change features in `analysis/feature_engineering.py`.
