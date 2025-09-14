@@ -57,7 +57,13 @@ def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
     df = pd.merge(df_tx, df_fee, on="time", how="outer")
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
     df = df.set_index("time").sort_index()
-    df = df.resample("5T").agg({"tx_count": "sum", "median_fee": "median"})
+    # label and close on the right edge so that a 5 minute bucket ending at
+    # ``t`` only contains information up to ``t``.  This prevents forward
+    # looking leakage when aligning with price candles labelled by their close
+    # time.
+    df = df.resample("5T", label="right", closed="right").agg(
+        {"tx_count": "sum", "median_fee": "median"}
+    )
     df.to_parquet(cache_file)
     return df
 
@@ -97,7 +103,7 @@ def load_exchange_flows_1h(
     else:
         raise ValueError("source must be 'csv' or 'glassnode'")
 
-    df = df.resample("1H").sum(min_count=1)
+    df = df.resample("1H", label="right", closed="right").sum(min_count=1)
     df.to_parquet(cache_file)
     return df
 
@@ -131,7 +137,9 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
     if not df.empty:
         df = df.set_index("timestamp").sort_index()
         df["count"] = 1
-        df = df.resample("5T").agg({"count": "sum", "usd": "sum"})
+        df = df.resample("5T", label="right", closed="right").agg(
+            {"count": "sum", "usd": "sum"}
+        )
     else:
         idx = pd.DatetimeIndex([], tz="UTC")
         df = pd.DataFrame(columns=["count", "usd"], index=idx)

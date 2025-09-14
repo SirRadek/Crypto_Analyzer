@@ -96,6 +96,44 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_weekend"] = is_weekend
     df["is_weekday"] = (1.0 - is_weekend).astype(np.float32)
 
+    # --- prefixed helper copies ----------------------------------------------
+    # Duplicate selected features using explicit prefixes so that downstream
+    # grouping (e.g. Group-SHAP) can rely on simple name patterns.  Keeping the
+    # original column names preserves back-compatibility with existing models
+    # and tests.
+    copy_map = {
+        "basis_annualized": "deriv_basis_annualized",
+        "oi_delta_15m": "deriv_oi_delta_15m",
+        "lob_imbalance_L1": "lob_imbalance_L1",
+        "lob_imbalance_L2": "lob_imbalance_L2",
+        "ret3": "mom_ret3",
+        "ret12": "mom_ret12",
+        "rv_5m": "vol_rv_5m",
+        "volatility_60m": "vol_volatility_60m",
+        "atr14": "vol_atr14",
+        "parkinson12": "vol_parkinson12",
+        "tod_sin": "time_tod_sin",
+        "tod_cos": "time_tod_cos",
+        "is_day": "time_is_day",
+        "is_night": "time_is_night",
+        "is_weekend": "time_is_weekend",
+        "is_weekday": "time_is_weekday",
+    }
+    for src, dst in copy_map.items():
+        if src in df.columns and dst not in df.columns:
+            df[dst] = df[src].astype(np.float32)
+
+    # --- z-scores and deltas for prefixed features ---------------------------
+    prefixes = ("onch_", "deriv_", "lob_", "mom_", "vol_", "time_")
+    for prefix in prefixes:
+        cols = [c for c in df.columns if c.startswith(prefix)]
+        for col in cols:
+            if f"z_{col}" not in df.columns:
+                z = (df[col] - df[col].rolling(36).mean()) / df[col].rolling(36).std()
+                df[f"z_{col}"] = z.astype(np.float32)
+            if f"d_{col}" not in df.columns:
+                df[f"d_{col}"] = df[col].diff().astype(np.float32)
+
     # --- NaN handling před cíli ----------------------------------------------
     df = df.fillna(0.0)
 
@@ -233,4 +271,19 @@ def assign_feature_groups(columns: list[str]) -> dict[str, str]:
         if not assigned:
             groups[col] = "other"
     return groups
+
+
+# -- Targets -----------------------------------------------------------------
+from .targets import make_targets as _make_targets
+
+
+def make_targets(df: pd.DataFrame, horizon: int = 120) -> pd.DataFrame:
+    """Convenience wrapper around :func:`analysis.targets.make_targets`.
+
+    Generates regression and classification targets for the given ``horizon``
+    (in minutes). By default a 120 minute horizon is used, matching the
+    feature engineering assumptions in this module.
+    """
+
+    return _make_targets(df, horizons_min=[horizon])
 
