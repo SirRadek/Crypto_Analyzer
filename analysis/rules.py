@@ -26,7 +26,7 @@ def combined_signal(
     """
     Kombinace základních signálů do jednoho indikátoru.
 
-    Defaulty laděné pro BTCUSDT 2h:
+    Defaultní hodnoty laděné pro BTCUSDT 2h:
       - SMA (trend) má váhu 0.6
       - RSI (momentum/oversold) má váhu 0.4
       - výstup 1, pokud vážený součet >= 0.5

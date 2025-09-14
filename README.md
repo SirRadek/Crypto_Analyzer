@@ -1,5 +1,7 @@
 # Crypto Analyzer
 
+[![CI](https://github.com/SirRadek/Crypto_Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/SirRadek/Crypto_Analyzer/actions/workflows/ci.yml)
+
 A modular Python project for **cryptocurrency price analysis and prediction** using both rule-based strategies and machine learning.
 
 ## Features
@@ -160,4 +162,29 @@ typical workflow for a 2‑hour classification horizon:
 ## Requirements
 
 * Python 3.13
-* [See `requirements.txt`](./requirements.txt)
+* [See `requirements.txt`](./requirements.txt) – notable pin: `xgboost>=2.1,<4`
+
+## Determinism & Repro
+
+Training pipelines use a fixed ``random_state`` (default ``42``) which is logged
+to ``run_config.json`` along with all other parameters to ensure runs are
+repeatable.
+
+## Troubleshooting
+
+XGBoost and PyTorch automatically fall back to CPU if no compatible CUDA wheel
+is available.
+
+## Development: pre-commit
+
+Install hooks and run them locally before committing:
+
+```bash
+pip install pre-commit
+pre-commit run -a
+```
+
+## No financial advice
+
+The project is provided for research and educational purposes only and does not
+constitute financial advice.
