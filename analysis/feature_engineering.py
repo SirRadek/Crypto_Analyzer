@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import re
 
 # Lehký FE laděný pro 2h BTCUSDT. Bez těžkých závislostí, vše float32.
 
@@ -180,3 +181,56 @@ FEATURE_COLUMNS: list[str] = [
     "is_weekend",
     "is_weekday",
 ]
+
+
+# Feature groups for Group-SHAP -------------------------------------------------
+# Mapping of human readable feature groups to regex patterns used to match
+# feature names.  The patterns are intentionally simple and favour readability
+# over full regex expressiveness.
+FEATURE_GROUPS: dict[str, list[str]] = {
+    "orderflow": [r"^tbr_", r"^ofi_", r"^cvd_", r"^taker_", r"rel_close_vwap", r"z_volume"],
+    "derivatives": [r"^oi_", r"^basis_", r"^funding_", r"^deriv_"],
+    "lob": [r"^lob_", r"^queue_", r"book_slope", r"^wall_"],
+    "momentum_vol": [
+        r"ret",
+        r"^rv_",
+        r"^volatility_",
+        r"^atr_",
+        r"^park_",
+        r"skew",
+        r"kurt",
+    ],
+    "time": [r"^tod_", r"^session_", r"funding_cycle", r"^dow_", r"^time_"],
+    "onchain": [r"^onch_"],
+    # exact matches to avoid mapping e.g. "open_interest" to this group
+    "price_ref": [r"^open$", r"^high$", r"^low$", r"^close$", r"^mid$"],
+}
+
+
+def assign_feature_groups(columns: list[str]) -> dict[str, str]:
+    """Assign each feature name in *columns* to a predefined group.
+
+    Parameters
+    ----------
+    columns:
+        Iterable of feature names.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping from feature name to its group. Features that do not match any
+        pattern are assigned to the ``"other"`` group.
+    """
+
+    groups: dict[str, str] = {}
+    for col in columns:
+        assigned = False
+        for group, patterns in FEATURE_GROUPS.items():
+            if any(re.search(pat, col) for pat in patterns):
+                groups[col] = group
+                assigned = True
+                break
+        if not assigned:
+            groups[col] = "other"
+    return groups
+
