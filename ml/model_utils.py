@@ -8,10 +8,10 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 
-
 # ---------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------
+
 
 def save_model(model: Any, path: str) -> None:
     """Persist model to path using joblib."""
@@ -29,6 +29,7 @@ def load_model(path: str) -> Any:
 # ---------------------------------------------------------------------
 # Feature alignment
 # ---------------------------------------------------------------------
+
 
 def _expected_feature_names(model: Any) -> List[str]:
     """
@@ -98,6 +99,7 @@ def match_model_features(
 # ---------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------
+
 
 def evaluate_model(
     model: Any,

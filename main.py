@@ -160,6 +160,17 @@ def run_pipeline(
     ensure_dir_exists(out_dir)
 
     df = get_price_data(SYMBOL, db_path=DB_PATH)
+    if use_onchain:
+        from api.onchain import fetch_mempool_5m
+
+        start = pd.to_datetime(df["timestamp"].min(), utc=True)
+        end = pd.to_datetime(df["timestamp"].max(), utc=True)
+        try:
+            onch = fetch_mempool_5m(start, end)
+            onch.index = onch.index.tz_localize(None)
+            df = df.merge(onch, left_on="timestamp", right_index=True, how="left")
+        except Exception as exc:  # pragma: no cover - network errors
+            logger.warning("mempool fetch failed: %s", exc)
     df = create_features(df)
     if not use_onchain:
         df = df.loc[:, ~df.columns.str.startswith("onch_")]

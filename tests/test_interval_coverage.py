@@ -13,8 +13,8 @@ def test_interval_coverage():
     y_high = y_mid + 2.0
     X_train, X_test = X[:1500], X[1500:]
     y_mid_train, y_mid_test = y_mid[:1500], y_mid[1500:]
-    y_low_train, y_low_test = y_low[:1500], y_low[1500:]
-    y_high_train, y_high_test = y_high[:1500], y_high[1500:]
+    y_low_train, _ = y_low[:1500], y_low[1500:]
+    y_high_train, _ = y_high[:1500], y_high[1500:]
 
     reg_params, reg_rounds = build_reg()
     lo_params, lo_rounds = build_bound()
@@ -34,7 +34,6 @@ def test_interval_coverage():
         np.asarray(X_train, dtype=np.float32),
         label=np.asarray(y_high_train, dtype=np.float32),
     )
-    dtest_mid = xgb.DMatrix(np.asarray(X_test, dtype=np.float32))
     dtest_lo = xgb.DMatrix(np.asarray(X_test, dtype=np.float32))
     dtest_hi = xgb.DMatrix(np.asarray(X_test, dtype=np.float32))
     _ = xgb.train(reg_params, dtrain_mid, reg_rounds, verbose_eval=False)
