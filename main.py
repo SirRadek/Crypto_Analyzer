@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 
 from analysis.compare_predictions import backfill_actuals_and_errors
-from analysis.feature_engineering import FEATURE_COLUMNS, create_features
+from analysis.feature_engineering import (
+    FEATURE_COLUMNS,
+    create_features,
+    assign_feature_groups,
+)
 from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
@@ -158,9 +162,18 @@ def run_pipeline(
 
     tree_method = "gpu_hist" if gpu else "hist"
     if task == "clf":
-        model = xgb.XGBClassifier(n_estimators=50, tree_method=tree_method, eval_metric="logloss")
+        model = xgb.XGBClassifier(
+            n_estimators=50,
+            tree_method=tree_method,
+            eval_metric="logloss",
+            random_state=42,
+        )
     else:
-        model = xgb.XGBRegressor(n_estimators=50, tree_method=tree_method)
+        model = xgb.XGBRegressor(
+            n_estimators=50,
+            tree_method=tree_method,
+            random_state=42,
+        )
     model.fit(X_train, y_train)
 
     if task == "clf":
@@ -192,6 +205,8 @@ def run_pipeline(
 
     try:
         import matplotlib.pyplot as plt
+        from sklearn.inspection import permutation_importance
+        import shap
 
         fig, ax = plt.subplots()
         ax.plot(pred_df["y_true"].to_numpy(), label="true")
@@ -199,6 +214,87 @@ def run_pipeline(
         ax.legend()
         fig.savefig(Path(out_dir) / f"pred_vs_actual_{task}.png")
         plt.close(fig)
+
+        # permutation importance -------------------------------------------------
+        perm = permutation_importance(
+            model, X_test, y_test, n_repeats=10, random_state=42
+        )
+        perm_df = pd.DataFrame(
+            {"feature": feature_cols, "importance": perm.importances_mean}
+        ).sort_values("importance", ascending=False)
+        perm_df.to_csv(Path(out_dir) / f"perm_importance_{task}.csv", index=False)
+        fig, ax = plt.subplots()
+        perm_df.plot.barh(x="feature", y="importance", ax=ax)
+        fig.tight_layout()
+        fig.savefig(Path(out_dir) / f"perm_importance_{task}.png")
+        plt.close(fig)
+
+        # SHAP values -----------------------------------------------------------
+        explainer = shap.Explainer(model, X_train)
+        shap_vals = explainer(X_test).values
+        shap_df = pd.DataFrame(shap_vals, columns=feature_cols)
+        shap_mean = (
+            shap_df.abs().mean().reset_index().rename(
+                columns={"index": "feature", 0: "mean_abs_shap"}
+            )
+        )
+        shap_mean.sort_values("mean_abs_shap", ascending=False).to_csv(
+            Path(out_dir) / f"shap_values_{task}.csv", index=False
+        )
+        shap.summary_plot(shap_vals, X_test, show=False)
+        plt.tight_layout()
+        plt.savefig(Path(out_dir) / f"shap_summary_{task}.png")
+        plt.close()
+
+        # Group SHAP & permutation ----------------------------------------------
+        groups = assign_feature_groups(feature_cols)
+        shap_mean["group"] = shap_mean["feature"].map(groups)
+        group_shap = (
+            shap_mean.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
+        )
+        group_shap.to_csv(Path(out_dir) / f"shap_group_{task}.csv")
+        fig, ax = plt.subplots()
+        group_shap.plot.barh(ax=ax)
+        fig.tight_layout()
+        fig.savefig(Path(out_dir) / f"shap_group_{task}.png")
+        plt.close(fig)
+
+        perm_df["group"] = perm_df["feature"].map(groups)
+        group_perm = (
+            perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
+        )
+        group_perm.to_csv(Path(out_dir) / f"perm_group_{task}.csv")
+        fig, ax = plt.subplots()
+        group_perm.plot.barh(ax=ax)
+        fig.tight_layout()
+        fig.savefig(Path(out_dir) / f"perm_group_{task}.png")
+        plt.close(fig)
+
+        # simple drift ----------------------------------------------------------
+        train_mean = pd.DataFrame(X_train.mean(), columns=["train_mean"])
+        test_mean = pd.DataFrame(X_test.mean(), columns=["test_mean"])
+        drift_df = train_mean.join(test_mean)
+        drift_df["mean_diff"] = drift_df["test_mean"] - drift_df["train_mean"]
+        drift_df.reset_index(inplace=True)
+        drift_df.rename(columns={"index": "feature"}, inplace=True)
+        drift_df.to_csv(Path(out_dir) / f"drift_{task}.csv", index=False)
+        fig, ax = plt.subplots()
+        drift_df.sort_values("mean_diff").plot.barh(x="feature", y="mean_diff", ax=ax)
+        fig.tight_layout()
+        fig.savefig(Path(out_dir) / f"drift_{task}.png")
+        plt.close(fig)
+
+        drift_df["group"] = drift_df["feature"].map(groups)
+        group_drift = (
+            drift_df.groupby("group")["mean_diff"].mean().sort_values(ascending=False)
+        )
+        group_drift.to_csv(Path(out_dir) / f"drift_group_{task}.csv")
+        fig, ax = plt.subplots()
+        group_drift.plot.barh(ax=ax)
+        fig.tight_layout()
+        fig.savefig(Path(out_dir) / f"drift_group_{task}.png")
+        plt.close(fig)
+
     except Exception:
         pass
 
@@ -212,6 +308,7 @@ def run_pipeline(
         "split_params": split_params,
         "gpu": gpu,
         "out_dir": out_dir,
+        "random_state": 42,
     }
     with open(Path(out_dir) / "run_config.json", "w", encoding="utf-8") as f:
         json.dump(run_cfg, f, indent=2)

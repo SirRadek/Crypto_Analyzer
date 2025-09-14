@@ -22,5 +22,9 @@
   "is_day",
   "is_night",
   "is_weekend",
-  "is_weekday"
+  "is_weekday",
+  "wall_bid_dist_bps",
+  "wall_bid_size_rel",
+  "wall_ask_dist_bps",
+  "wall_ask_size_rel"
 ]

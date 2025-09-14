@@ -18,6 +18,14 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     numeric = df.select_dtypes(include=["number"]).columns.drop(["timestamp"], errors="ignore")
     df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce").astype(np.float32)
 
+    # forward-fill on-chain metrics only within the same hour to avoid leakage
+    onch_cols = [c for c in df.columns if c.startswith("onch_")]
+    if onch_cols:
+        hour = pd.to_datetime(df["timestamp"]).dt.floor("H")
+        df[onch_cols] = (
+            df[onch_cols].groupby(hour).ffill().astype(np.float32)
+        )
+
     # --- order-flow & volume --------------------------------------------------
     vol = df["volume"].replace(0.0, np.nan)
     qvol = df["quote_asset_volume"].replace(0.0, np.nan)
@@ -82,6 +90,60 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
             df[imb_col] = (num / den).astype(np.float32)
         else:
             df[imb_col] = np.float32(0.0)
+
+    # --- LOB walls -----------------------------------------------------------
+    bid_px_cols = sorted([c for c in df.columns if c.startswith("lob_bid_price_")])
+    bid_sz_cols = sorted([c for c in df.columns if c.startswith("lob_bid_size_")])
+    ask_px_cols = sorted([c for c in df.columns if c.startswith("lob_ask_price_")])
+    ask_sz_cols = sorted([c for c in df.columns if c.startswith("lob_ask_size_")])
+
+    if bid_px_cols and bid_sz_cols:
+        bid_px = df[bid_px_cols].to_numpy(dtype=np.float32)
+        bid_sz = df[bid_sz_cols].to_numpy(dtype=np.float32)
+        mu = np.nanmean(bid_sz, axis=1, keepdims=True)
+        sig = np.nanstd(bid_sz, axis=1, keepdims=True)
+        mask = bid_sz > mu + 2 * sig
+        idx = np.argmax(np.where(mask, bid_sz, -np.inf), axis=1)
+        mid = df["close"].to_numpy(dtype=np.float32)
+        dist = np.where(
+            mask[np.arange(len(df)), idx],
+            ((mid - bid_px[np.arange(len(df)), idx]) / mid) * 1e4,
+            0.0,
+        )
+        rel = np.where(
+            mask[np.arange(len(df)), idx],
+            bid_sz[np.arange(len(df)), idx] / np.nansum(bid_sz, axis=1),
+            0.0,
+        )
+        df["wall_bid_dist_bps"] = dist.astype(np.float32)
+        df["wall_bid_size_rel"] = rel.astype(np.float32)
+    else:
+        df["wall_bid_dist_bps"] = np.float32(0.0)
+        df["wall_bid_size_rel"] = np.float32(0.0)
+
+    if ask_px_cols and ask_sz_cols:
+        ask_px = df[ask_px_cols].to_numpy(dtype=np.float32)
+        ask_sz = df[ask_sz_cols].to_numpy(dtype=np.float32)
+        mu = np.nanmean(ask_sz, axis=1, keepdims=True)
+        sig = np.nanstd(ask_sz, axis=1, keepdims=True)
+        mask = ask_sz > mu + 2 * sig
+        idx = np.argmax(np.where(mask, ask_sz, -np.inf), axis=1)
+        mid = df["close"].to_numpy(dtype=np.float32)
+        dist = np.where(
+            mask[np.arange(len(df)), idx],
+            ((ask_px[np.arange(len(df)), idx] - mid) / mid) * 1e4,
+            0.0,
+        )
+        rel = np.where(
+            mask[np.arange(len(df)), idx],
+            ask_sz[np.arange(len(df)), idx] / np.nansum(ask_sz, axis=1),
+            0.0,
+        )
+        df["wall_ask_dist_bps"] = dist.astype(np.float32)
+        df["wall_ask_size_rel"] = rel.astype(np.float32)
+    else:
+        df["wall_ask_dist_bps"] = np.float32(0.0)
+        df["wall_ask_size_rel"] = np.float32(0.0)
 
     # --- časové rysy ----------------------------------------------------------
     ts = df["timestamp"]
@@ -218,6 +280,10 @@ FEATURE_COLUMNS: list[str] = [
     "is_night",
     "is_weekend",
     "is_weekday",
+    "wall_bid_dist_bps",
+    "wall_bid_size_rel",
+    "wall_ask_dist_bps",
+    "wall_ask_size_rel",
 ]
 
 
