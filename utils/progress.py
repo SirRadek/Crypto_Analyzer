@@ -3,17 +3,25 @@ from contextlib import contextmanager
 
 from tqdm import tqdm
 
+from .helpers import get_logger
 
-def p(msg: str):
-    print(msg, flush=True)
+logger = get_logger(__name__)
 
 
-def step(i: int, n: int, msg: str):
+def p(msg: str) -> None:
+    """Log *msg* using the project logger."""
+    logger.info(msg)
+
+
+def step(i: int, n: int, msg: str) -> None:
+    """Log progress of step *i* out of *n* with message *msg*."""
     p(f"[{i}/{n}] {msg}")
 
 
 @contextmanager
 def timed(label: str):
+    """Context manager logging the runtime of a labeled block."""
+
     t0 = time.perf_counter()
     p(f"{label} ...")
     try:
@@ -24,4 +32,5 @@ def timed(label: str):
 
 
 def bar(iterable, desc: str, unit: str = "it"):
+    """Wrapper around ``tqdm`` for a progress bar."""
     return tqdm(iterable, desc=desc, unit=unit)

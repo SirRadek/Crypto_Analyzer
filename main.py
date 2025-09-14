@@ -2,6 +2,7 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 import joblib
@@ -9,11 +10,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.compare_predictions import backfill_actuals_and_errors
-from analysis.feature_engineering import (
-    FEATURE_COLUMNS,
-    create_features,
-    assign_feature_groups,
-)
+from analysis.feature_engineering import FEATURE_COLUMNS, assign_feature_groups, create_features
 from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
 from deleting_SQL import delete_old_records
@@ -21,8 +18,10 @@ from ml.model_utils import match_model_features
 from ml.train import load_model, train_model
 from ml.xgb_price import clip_inside, to_price
 from utils.config import CONFIG
-from utils.helpers import ensure_dir_exists, set_cpu_limit
+from utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
 from utils.progress import p, step, timed
+
+logger = get_logger(__name__)
 
 SYMBOL = CONFIG.symbol
 DB_PATH = CONFIG.db_path
@@ -53,11 +52,31 @@ CLS_ACC_PATH = Path("ml/backtest_acc_cls.json")
 REG_ACC_PATH = Path("ml/backtest_acc_reg.json")
 
 
-def _created_at_iso():
+def _created_at_iso() -> str:
+    """Return current UTC timestamp in ISO format."""
     return datetime.now(UTC).isoformat()
 
 
 def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_name: str) -> int:
+    """Remove predictions at or after ``from_ms``.
+
+    Parameters
+    ----------
+    db_path:
+        Path to SQLite database.
+    symbol:
+        Trading symbol.
+    from_ms:
+        Earliest timestamp (ms) to delete.
+    table_name:
+        Target table name.
+
+    Returns
+    -------
+    int
+        Number of deleted rows.
+    """
+
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
@@ -73,9 +92,11 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
     return deleted
 
 
-def list_model_paths(pattern: str, count: int):
-    paths = []
-    indices = []
+def list_model_paths(pattern: str, count: int) -> tuple[list[str], list[int]]:
+    """Return existing model paths following a numbered pattern."""
+
+    paths: list[str] = []
+    indices: list[int] = []
     for i in range(1, count + 1):
         path = pattern.format(i=i)
         if Path(path).exists():
@@ -86,7 +107,9 @@ def list_model_paths(pattern: str, count: int):
     return paths, indices
 
 
-def load_accuracy_weights(path: Path, indices):
+def load_accuracy_weights(path: Path, indices: Iterable[int]) -> list[float]:
+    """Load accuracy weights for the given model ``indices``."""
+
     if path.exists():
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -95,7 +118,9 @@ def load_accuracy_weights(path: Path, indices):
     return [float(data.get(str(i), 1.0)) for i in indices]
 
 
-def prepare_targets(df, forward_steps=1):
+def prepare_targets(df: pd.DataFrame, forward_steps: int = 1) -> pd.DataFrame:
+    """Create classification and regression targets for ``forward_steps`` ahead."""
+
     df = df.copy(deep=False)
     df["target_cls"] = (df["close"].shift(-forward_steps) > df["close"]).astype(int)
     df["target_reg"] = df["close"].shift(-forward_steps)
@@ -108,15 +133,28 @@ def run_pipeline(
     horizon: int,
     use_onchain: bool,
     txn_cost_bps: float,
-    split_params: dict,
+    split_params: dict[str, Any],
     gpu: bool,
     out_dir: str,
-):
+) -> None:
     """Minimal end-to-end training pipeline.
 
-    Loads data from SQLite, performs feature engineering (optionally including
-    ``onch_`` columns), creates targets, splits the data, trains an XGBoost model
-    and stores artefacts in ``out_dir``.
+    Parameters
+    ----------
+    task:
+        "clf" for classification or "reg" for regression.
+    horizon:
+        Prediction horizon in minutes.
+    use_onchain:
+        Whether to include ``onch_`` features.
+    txn_cost_bps:
+        Transaction cost in basis points.
+    split_params:
+        Parameters forwarded to :func:`sklearn.model_selection.train_test_split`.
+    gpu:
+        If ``True`` use GPU-accelerated XGBoost when available.
+    out_dir:
+        Directory where artefacts are written.
     """
 
     ensure_dir_exists(out_dir)
@@ -205,8 +243,8 @@ def run_pipeline(
 
     try:
         import matplotlib.pyplot as plt
-        from sklearn.inspection import permutation_importance
         import shap
+        from sklearn.inspection import permutation_importance
 
         fig, ax = plt.subplots()
         ax.plot(pred_df["y_true"].to_numpy(), label="true")
@@ -216,9 +254,7 @@ def run_pipeline(
         plt.close(fig)
 
         # permutation importance -------------------------------------------------
-        perm = permutation_importance(
-            model, X_test, y_test, n_repeats=10, random_state=42
-        )
+        perm = permutation_importance(model, X_test, y_test, n_repeats=10, random_state=42)
         perm_df = pd.DataFrame(
             {"feature": feature_cols, "importance": perm.importances_mean}
         ).sort_values("importance", ascending=False)
@@ -234,9 +270,10 @@ def run_pipeline(
         shap_vals = explainer(X_test).values
         shap_df = pd.DataFrame(shap_vals, columns=feature_cols)
         shap_mean = (
-            shap_df.abs().mean().reset_index().rename(
-                columns={"index": "feature", 0: "mean_abs_shap"}
-            )
+            shap_df.abs()
+            .mean()
+            .reset_index()
+            .rename(columns={"index": "feature", 0: "mean_abs_shap"})
         )
         shap_mean.sort_values("mean_abs_shap", ascending=False).to_csv(
             Path(out_dir) / f"shap_values_{task}.csv", index=False
@@ -249,9 +286,7 @@ def run_pipeline(
         # Group SHAP & permutation ----------------------------------------------
         groups = assign_feature_groups(feature_cols)
         shap_mean["group"] = shap_mean["feature"].map(groups)
-        group_shap = (
-            shap_mean.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
-        )
+        group_shap = shap_mean.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
         group_shap.to_csv(Path(out_dir) / f"shap_group_{task}.csv")
         fig, ax = plt.subplots()
         group_shap.plot.barh(ax=ax)
@@ -260,9 +295,7 @@ def run_pipeline(
         plt.close(fig)
 
         perm_df["group"] = perm_df["feature"].map(groups)
-        group_perm = (
-            perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
-        )
+        group_perm = perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
         group_perm.to_csv(Path(out_dir) / f"perm_group_{task}.csv")
         fig, ax = plt.subplots()
         group_perm.plot.barh(ax=ax)
@@ -285,9 +318,7 @@ def run_pipeline(
         plt.close(fig)
 
         drift_df["group"] = drift_df["feature"].map(groups)
-        group_drift = (
-            drift_df.groupby("group")["mean_diff"].mean().sort_values(ascending=False)
-        )
+        group_drift = drift_df.groupby("group")["mean_diff"].mean().sort_values(ascending=False)
         group_drift.to_csv(Path(out_dir) / f"drift_group_{task}.csv")
         fig, ax = plt.subplots()
         group_drift.plot.barh(ax=ax)
@@ -314,7 +345,11 @@ def run_pipeline(
         json.dump(run_cfg, f, indent=2)
 
 
-def predict_price(model_dir="models/xgb_price", target_kind="log"):
+def predict_price(
+    model_dir: str = "models/xgb_price", target_kind: str = "log"
+) -> tuple[pd.Timestamp, float, float, float]:
+    """Predict next price interval using pre-trained models."""
+
     df = get_price_data(SYMBOL, db_path=DB_PATH)
     df = create_features(df)
     last_row = df.iloc[[-1]]
@@ -335,7 +370,7 @@ def predict_price(model_dir="models/xgb_price", target_kind="log"):
     return ts, float(p_low), float(p_hat), float(p_high)
 
 
-def main(train=True):
+def main(train: bool = True) -> None:
     from ml.train_regressor import load_regressor, train_regressor
 
     ensure_dir_exists("db/data")
@@ -503,7 +538,7 @@ if __name__ == "__main__":
         )
     elif args.predict:
         ts, p_low, p_hat, p_high = predict_price()
-        print(f"{ts},{p_low:.2f},{p_hat:.2f},{p_high:.2f}")
+        logger.info("%s,%.2f,%.2f,%.2f", ts, p_low, p_hat, p_high)
     else:
         for _ in range(REPEAT_COUNT):
             main()

@@ -12,10 +12,10 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
-from utils.splitting import WalkForwardSplit
 
-from ml.model_utils import evaluate_model
 from crypto_analyzer.model_manager import atomic_write
+from ml.model_utils import evaluate_model
+from utils.splitting import WalkForwardSplit
 
 MODEL_PATH = "ml/meta_model_cls.joblib"
 
@@ -37,22 +37,34 @@ def train_model(
     X,
     y,
     model_path: str = MODEL_PATH,
-    tune: bool = False,              # zachováno kvůli rozhraní, netuníme zde
+    tune: bool = False,  # zachováno kvůli rozhraní, netuníme zde
     test_size: float = 0.2,
     random_state: int = 42,
-    use_gpu: bool = True,            # defaultně zapínáme GPU, fallback níž
-    oob_tol: float | None = None,    # zachováno kvůli kompatibilitě s voláním
-    oob_step: int = 50,              # nevyužito u XGBoost, ponecháno pro signaturu
-    max_estimators: int = 400,       # nevyužito u XGBoost, ponecháno pro signaturu
+    use_gpu: bool = True,  # defaultně zapínáme GPU, fallback níž
+    oob_tol: float | None = None,  # zachováno kvůli kompatibilitě s voláním
+    oob_step: int = 50,  # nevyužito u XGBoost, ponecháno pro signaturu
+    max_estimators: int = 400,  # nevyužito u XGBoost, ponecháno pro signaturu
     log_path: str = "ml/oob_cls.json",
     split: str = "holdout",
     wfs_params: dict[str, int] | None = None,
 ):
-    """
-    Trénuje meta-klasifikátor pomocí XGBoost (pandas+numpy only).
-    - float32 vstupy
-    - GPU akcelerace přes tree_method="gpu_hist" a predictor="gpu_predictor" s fallbackem na CPU
-    - early stopping (callbacks nebo early_stopping_rounds dle verze)
+    """Train meta-classifier using XGBoost.
+
+    Parameters
+    ----------
+    X, y:
+        Training data. ``X`` may be :class:`pandas.DataFrame` or
+        :class:`numpy.ndarray`.
+    model_path:
+        Path where the trained model will be stored.
+    tune, test_size, random_state, use_gpu, oob_tol, oob_step,
+    max_estimators, log_path, split, wfs_params:
+        Additional parameters retained for backwards compatibility.
+
+    Returns
+    -------
+    xgb.XGBClassifier
+        Trained model.
     """
     base_params: dict[str, Any] = dict(
         n_estimators=400,
@@ -135,7 +147,7 @@ def train_model(
         buffer = BytesIO()
         joblib.dump(clf, buffer)
         atomic_write(Path(model_path), buffer.getvalue())
-        print(f"Model saved to {model_path}")
+        logger.info("Model saved to %s", model_path)
         return clf
 
     # --- defaultní holdout split ---------------------------------------------
@@ -171,11 +183,24 @@ def train_model(
     buffer = BytesIO()
     joblib.dump(clf, buffer)
     atomic_write(Path(model_path), buffer.getvalue())
-    print(f"Model saved to {model_path}")
+    logger.info("Model saved to %s", model_path)
     return clf
 
 
-def load_model(model_path=MODEL_PATH):
+def load_model(model_path: str = MODEL_PATH):
+    """Load a model from ``model_path``.
+
+    Parameters
+    ----------
+    model_path:
+        Location of the saved model.
+
+    Returns
+    -------
+    Any
+        Loaded object.
+    """
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No model found at {model_path}")
     return joblib.load(model_path)
@@ -184,6 +209,7 @@ def load_model(model_path=MODEL_PATH):
 # ---------------------------------------------------------------------------
 # New generic training interface with CLI support
 # ---------------------------------------------------------------------------
+
 
 def _exp_weights(timestamps: Iterable[pd.Timestamp], half_life_days: float) -> np.ndarray:
     """Compute exponential weights with given half-life in days."""
@@ -292,9 +318,8 @@ def train_xgb(
     shap_vals = explainer.shap_values(X_sample)
     shap_abs = np.abs(shap_vals)
     shap_mean = shap_abs.mean(axis=0)
-    fi = (
-        pd.DataFrame({"feature": X_sample.columns, "mean_abs_shap": shap_mean})
-        .sort_values("mean_abs_shap", ascending=False)
+    fi = pd.DataFrame({"feature": X_sample.columns, "mean_abs_shap": shap_mean}).sort_values(
+        "mean_abs_shap", ascending=False
     )
     fi.to_csv(output_dir / "feature_importance_shap.csv", index=False)
 
@@ -313,9 +338,7 @@ def train_xgb(
 
     groups = assign_feature_groups(list(X_sample.columns))
     fi["group"] = fi["feature"].map(groups)
-    group_imp = (
-        fi.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
-    )
+    group_imp = fi.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
     total = group_imp.sum()
     group_df = (
         group_imp.to_frame(name="mean_abs_shap")
@@ -336,11 +359,7 @@ def train_xgb(
     from sklearn.metrics import log_loss, mean_squared_error
 
     block_size = max(1, len(X_test) // 10)
-    base_score = (
-        log_loss(y_test, preds)
-        if task == "clf"
-        else mean_squared_error(y_test, preds)
-    )
+    base_score = log_loss(y_test, preds) if task == "clf" else mean_squared_error(y_test, preds)
     perm_scores: dict[str, float] = {}
     rng = np.random.default_rng(seed)
     for col in X_test.columns:
@@ -362,10 +381,9 @@ def train_xgb(
             )
             scores.append(score)
         perm_scores[col] = float(np.mean(scores) - base_score)
-    perm_df = (
-        pd.DataFrame({"feature": perm_scores.keys(), "importance": perm_scores.values()})
-        .sort_values("importance", ascending=False)
-    )
+    perm_df = pd.DataFrame(
+        {"feature": perm_scores.keys(), "importance": perm_scores.values()}
+    ).sort_values("importance", ascending=False)
     perm_df.to_csv(output_dir / "permutation_importance.csv", index=False)
 
     # Drift computation (rolling 30d)
@@ -408,7 +426,9 @@ def parse_args(argv: Iterable[str] | None = None):
     parser.add_argument("--lambda", dest="reg_lambda", type=float, default=1.0)
     parser.add_argument("--class_threshold", type=float, default=0.5)
     parser.add_argument("--scale_pos_weight", type=float, default=1.0)
-    parser.add_argument("--half_life", type=float, default=30.0, help="Half-life in days for weights")
+    parser.add_argument(
+        "--half_life", type=float, default=30.0, help="Half-life in days for weights"
+    )
     parser.add_argument("--run_id", type=str, default=None)
     return parser.parse_args(argv)
 

@@ -1,18 +1,24 @@
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
-.venv/ venv/ env/
-.vscode/ .idea/ *.iml
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+*.iml
 
-models/
 data/
+outputs/
+cache/
+models/
 *.joblib
 .env
 
 ml/*.pkl
 ml/*.joblib
 
-# modely (ide?ln? LFS)
+# modely (ideálně LFS)
 *.pt
 *.pth
 *.ckpt

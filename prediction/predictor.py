@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from analysis.rules import combined_signal
 from typing import Iterable
+
 import numpy as np
 import pandas as pd
+
+from analysis.rules import combined_signal
 
 
 def _predict_ml_proba(df: pd.DataFrame, feature_cols: Iterable[str]) -> pd.Series:
@@ -13,8 +15,10 @@ def _predict_ml_proba(df: pd.DataFrame, feature_cols: Iterable[str]) -> pd.Serie
     Lazy import kvůli import_hygiene.
     """
     from ml.predict import predict_ml  # lazy
+
     try:
         from ml.predict import predict_ml_proba  # type: ignore
+
         proba = predict_ml_proba(df, feature_cols)
         return pd.Series(np.asarray(proba, dtype=np.float32), index=df.index)
     except Exception:
@@ -37,7 +41,7 @@ def combine_predictions(
     hysteresis: float = 0.02,
 ) -> pd.Series:
     """
-    Kombinace pravidel a ML. Defaulty laděné na 2h BTCUSDT.
+    Kombinace pravidel a ML. Defaultní hodnoty laděné na 2h BTCUSDT.
 
     method:
       - "weighted": w_ml*P_ml + w_rules*P_rules → threshold + hysteresis
@@ -52,6 +56,7 @@ def combine_predictions(
         ml_prob = _predict_ml_proba(df, feature_cols)  # [0,1]
     else:
         from ml.predict import predict_weighted  # lazy
+
         ml_cls = predict_weighted(df, feature_cols, model_paths, usage_path=usage_path)
         ml_prob = pd.Series(np.asarray(ml_cls, dtype=np.float32), index=df.index)
 

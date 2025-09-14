@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
-import time
 
 import pandas as pd
 import requests
@@ -11,7 +10,7 @@ from pydantic import BaseModel
 from requests.adapters import HTTPAdapter, Retry
 
 
-class OnChainConfig(BaseModel):
+class OnChainConfig(BaseModel):  # type: ignore[misc]
     use_mempool: bool = True
     use_exchange_flows: bool = True
     use_usdt_events: bool = True
@@ -34,11 +33,11 @@ def _get_with_retry(
     sess: requests.Session,
     url: str,
     *,
-    params: dict | None = None,
+    params: dict[str, str] | None = None,
     timeout: int = 10,
     retries: int = 5,
     backoff: float = 1.0,
-):
+) -> requests.Response:
     delay = backoff
     for attempt in range(retries):
         try:
@@ -63,6 +62,8 @@ def _cache_path(prefix: str, start: datetime | None = None, end: datetime | None
 
 
 def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
+    """Fetch 5-minute mempool statistics for the given interval."""
+
     start = pd.to_datetime(start, utc=True)
     end = pd.to_datetime(end, utc=True)
     cache_file = _cache_path("mempool5m", start, end)
@@ -108,6 +109,8 @@ def load_exchange_flows_1h(
     path: str | None = None,
     glassnode_api_key: str | None = None,
 ) -> pd.DataFrame:
+    """Load hourly exchange flow data from CSV or Glassnode API."""
+
     cache_file = _cache_path(f"exchange_flows_{source}")
     if cache_file.exists():
         return pd.read_parquet(cache_file)
@@ -124,12 +127,8 @@ def load_exchange_flows_1h(
         sess = _session()
         base = "https://api.glassnode.com/v1/metrics/exchanges"
         params = {"a": "BTC", "i": "1h", "api_key": key}
-        inflow = _get_with_retry(
-            sess, f"{base}/inflow_sum", params=params, timeout=10
-        )
-        outflow = _get_with_retry(
-            sess, f"{base}/outflow_sum", params=params, timeout=10
-        )
+        inflow = _get_with_retry(sess, f"{base}/inflow_sum", params=params, timeout=10)
+        outflow = _get_with_retry(sess, f"{base}/outflow_sum", params=params, timeout=10)
         df_in = pd.DataFrame(inflow.json())
         df_out = pd.DataFrame(outflow.json())
         df = pd.merge(df_in, df_out, on="t", how="outer", suffixes=("_in", "_out"))
@@ -147,6 +146,8 @@ def load_exchange_flows_1h(
 
 
 def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None) -> pd.DataFrame:
+    """Fetch Whale Alert USDT transfer events within the given interval."""
+
     start = pd.to_datetime(start, utc=True)
     end = pd.to_datetime(end, utc=True)
     cache_file = _cache_path("usdt_events", start, end)
@@ -193,4 +194,3 @@ __all__ = [
     "load_exchange_flows_1h",
     "fetch_usdt_events",
 ]
-

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
-import re
 
 # Lehký FE laděný pro 2h BTCUSDT. Bez těžkých závislostí, vše float32.
 
@@ -10,7 +11,19 @@ H = 24  # 120min horizon in 5m candles
 
 
 def create_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Přidej technické, order-flow a časové rysy. Vše jako float32."""
+    """Add technical and time-series features to ``df``.
+
+    Parameters
+    ----------
+    df:
+        Input data frame containing OHLCV and optional ``onch_`` columns.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Data frame with additional float32 features.
+    """
+
     df = df.copy(deep=False)
 
     # --- základní numerika ---------------------------------------------------
@@ -22,9 +35,7 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     onch_cols = [c for c in df.columns if c.startswith("onch_")]
     if onch_cols:
         hour = pd.to_datetime(df["timestamp"]).dt.floor("H")
-        df[onch_cols] = (
-            df[onch_cols].groupby(hour).ffill().astype(np.float32)
-        )
+        df[onch_cols] = df[onch_cols].groupby(hour).ffill().astype(np.float32)
 
     # --- order-flow & volume --------------------------------------------------
     vol = df["volume"].replace(0.0, np.nan)
@@ -340,7 +351,7 @@ def assign_feature_groups(columns: list[str]) -> dict[str, str]:
 
 
 # -- Targets -----------------------------------------------------------------
-from .targets import make_targets as _make_targets
+from .targets import make_targets as _make_targets  # noqa: E402
 
 
 def make_targets(df: pd.DataFrame, horizon: int = 120) -> pd.DataFrame:
@@ -352,4 +363,3 @@ def make_targets(df: pd.DataFrame, horizon: int = 120) -> pd.DataFrame:
     """
 
     return _make_targets(df, horizons_min=[horizon])
-
