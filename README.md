@@ -73,6 +73,17 @@ python db/btc_import.py
 
 This creates the `db/data/crypto_data.sqlite` file with price data.
 
+### 4. Optional on-chain data
+
+On-chain metrics can be merged from public APIs:
+
+* [mempool.space](https://mempool.space/api/) – mempool stats (no key required)
+* [Glassnode](https://glassnode.com/) – exchange flows (API key optional)
+* [Whale Alert](https://developer.whale-alert.io/) – large transfers/mints (API key optional)
+
+Store the resulting metrics alongside price data in the SQLite `prices` table
+with column names prefixed by `onch_`.
+
 ### 4. Run analysis and prediction
 
 ```bash
@@ -80,6 +91,25 @@ python main.py
 ```
 
 By default, this trains a RandomForest model and outputs the latest signals.
+
+### 5. Run the training pipeline
+
+Example commands for 120‑minute horizon:
+
+```bash
+# Classification
+python main.py --task clf --horizon 120 --split_params '{"test_size":0.2}' --out_dir outputs --use_onchain
+
+# Regression
+python main.py --task reg --horizon 120 --split_params '{"test_size":0.2}' --out_dir outputs --use_onchain
+```
+
+The pipeline writes metrics and predictions to CSV files and a simple PNG plot
+into the chosen `outputs/` directory.  Run configuration is logged as
+`outputs/run_config.json`.
+
+> **Note:** When adding on-chain signals, resample them to the candle interval
+> (5 min) before merging to prevent look‑ahead leakage.
 
 ---
 
