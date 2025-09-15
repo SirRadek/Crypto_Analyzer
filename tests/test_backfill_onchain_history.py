@@ -45,11 +45,13 @@ def test_backfill_onchain_history(tmp_path, monkeypatch):
     end = "2021-01-01 00:12"
     idx = pd.date_range("2021-01-01 00:00", periods=3, freq="5min", tz="UTC")
     fee, bc, diff = _make_df(idx)
+    hash_df = pd.DataFrame({"onch_hashrate_ehs": [10.0, 11.0, 12.0]}, index=idx)
     bc = bc.iloc[0:0]
 
     monkeypatch.setattr(mod, "fetch_hoenicke_fees", lambda s, e, sess: fee)
     monkeypatch.setattr(mod, "fetch_blockchain_mempool", lambda s, e, sess: bc)
     monkeypatch.setattr(mod, "fetch_mining_difficulty", lambda s, e, sess: diff)
+    monkeypatch.setattr(mod, "fetch_hashrate", lambda s, e, sess: hash_df)
     monkeypatch.setattr(
         mod,
         "fetch_current_snapshot",
