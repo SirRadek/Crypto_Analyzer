@@ -9,6 +9,23 @@ import pandas as pd
 
 H = 24  # 120min horizon in 5m candles
 
+ONCHAIN_FEATURES = [
+    "onch_fee_fast_satvb",
+    "onch_fee_30m_satvb",
+    "onch_fee_60m_satvb",
+    "onch_fee_min_satvb",
+    "onch_mempool_count",
+    "onch_mempool_vsize_vB",
+    "onch_mempool_total_fee_sat",
+    "onch_fee_wavg_satvb",
+    "onch_fee_p50_satvb",
+    "onch_fee_p90_satvb",
+    "onch_diff_progress_pct",
+    "onch_diff_change_pct",
+    "onch_blocks_remaining",
+    "onch_retarget_ts",
+]
+
 
 def create_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add technical and time-series features to ``df``.
@@ -25,6 +42,9 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     """
 
     df = df.copy(deep=False)
+    for col in ONCHAIN_FEATURES:
+        if col not in df.columns:
+            df[col] = np.float32(0.0)
 
     # --- základní numerika ---------------------------------------------------
     # nech timestamp beze změny, ostatní numerické sloupce konvertuj na float32
@@ -257,7 +277,8 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
         ],
         errors="ignore",
     )
-    if feature_only.isna().any().any():
+    onch_cols = [c for c in feature_only.columns if c.startswith("onch_")]
+    if feature_only.drop(columns=onch_cols, errors="ignore").isna().any().any():
         raise ValueError("NaN values present after feature engineering")
     obj_cols = feature_only.select_dtypes(include="object").columns
     if len(obj_cols) > 0:
@@ -295,7 +316,7 @@ FEATURE_COLUMNS: list[str] = [
     "wall_bid_size_rel",
     "wall_ask_dist_bps",
     "wall_ask_size_rel",
-]
+] + ONCHAIN_FEATURES
 
 
 # Feature groups for Group-SHAP -------------------------------------------------
