@@ -34,6 +34,14 @@ def test_future_extreme_targets_once():
         "delta_low_lin_120m",
         "delta_high_log_120m",
         "delta_high_lin_120m",
+        "delta_low_log_60m",
+        "delta_low_lin_60m",
+        "delta_high_log_60m",
+        "delta_high_lin_60m",
+        "delta_low_log_240m",
+        "delta_low_lin_240m",
+        "delta_high_log_240m",
+        "delta_high_lin_240m",
     ]
     for c in cols:
         assert out[c].dtype == np.float32

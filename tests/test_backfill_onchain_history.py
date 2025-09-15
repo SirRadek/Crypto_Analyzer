@@ -31,10 +31,9 @@ def _make_df(idx: pd.DatetimeIndex) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     )
     diff = pd.DataFrame(
         {
-            "onch_diff_progress_pct": [0.1, 0.2, 0.3],
+            "onch_difficulty": [1.0, 2.0, 3.0],
+            "onch_height": [100, 101, 102],
             "onch_diff_change_pct": [1.0, 1.0, 1.0],
-            "onch_blocks_remaining": [100, 99, 98],
-            "onch_retarget_ts": [1609459200000, 1609462500000, 1609465800000],
         },
         index=idx,
     )

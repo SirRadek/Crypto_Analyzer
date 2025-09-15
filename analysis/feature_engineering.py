@@ -20,10 +20,9 @@ ONCHAIN_FEATURES = [
     "onch_fee_wavg_satvb",
     "onch_fee_p50_satvb",
     "onch_fee_p90_satvb",
-    "onch_diff_progress_pct",
+    "onch_difficulty",
+    "onch_height",
     "onch_diff_change_pct",
-    "onch_blocks_remaining",
-    "onch_retarget_ts",
 ]
 
 
@@ -78,6 +77,42 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     ret1 = np.log(df["close"] / df["close"].shift(1)).astype(np.float32)
     df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
     df["ret12"] = ret1.rolling(12).sum().astype(np.float32)
+
+    # --- begin minimal anti-fragmentation patch ---
+    new = {}
+
+    cols = [
+        "close","open","high","low",
+        "volume","quote_asset_volume",
+        "taker_buy_base","taker_buy_quote","number_of_trades",
+    ]
+
+    for col in cols:
+        if col not in df.columns:
+            continue
+        s = df[col].astype(np.float32)
+        new[f"d_{col}"] = s.diff()
+        mu = s.rolling(288, min_periods=144).mean()
+        sd = s.rolling(288, min_periods=144).std()
+        new[f"z_{col}"] = (s - mu) / sd
+
+    # horizonové delty najednou
+    for H, tag in [(24, "120m"), (12, "60m"), (48, "240m")]:
+        fut_low   = df["low"].shift(-H)
+        fut_high  = df["high"].shift(-H)
+        fut_close = df["close"].shift(-H)
+        new[f"delta_low_log_{tag}"]  = np.log(fut_low  / df["close"])
+        new[f"delta_low_lin_{tag}"]  = (fut_low  - df["close"])
+        new[f"delta_high_log_{tag}"] = np.log(fut_high / df["close"])
+        new[f"delta_high_lin_{tag}"] = (fut_high - df["close"])
+        if tag == "120m":
+            new["delta_log_120m"] = np.log(fut_close / df["close"])
+            new["delta_lin_120m"] = (fut_close - df["close"])
+
+    add = pd.DataFrame(new, index=df.index).astype(np.float32)
+    df = pd.concat([df, add], axis=1, copy=False)
+    df = df.copy()  # defragmentace bloků
+    # --- end patch ---
 
     # --- volatilita -----------------------------------------------------------
     df["rv_5m"] = ret1.rolling(1).std().astype(np.float32)
@@ -230,37 +265,6 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- NaN handling před cíli ----------------------------------------------
     df = df.fillna(0.0)
 
-    # --- budoucí extrémy ------------------------------------------------------
-    fut_low = df["low"].shift(-H + 1).rolling(H).min().astype(np.float32)
-    fut_high = df["high"].shift(-H + 1).rolling(H).max().astype(np.float32)
-    df["delta_low_log_120m"] = np.log(fut_low / df["close"]).astype(np.float32)
-    df["delta_low_lin_120m"] = (fut_low - df["close"]).astype(np.float32)
-    df["delta_high_log_120m"] = np.log(fut_high / df["close"]).astype(np.float32)
-    df["delta_high_lin_120m"] = (fut_high - df["close"]).astype(np.float32)
-    for col in [
-        "delta_low_log_120m",
-        "delta_low_lin_120m",
-        "delta_high_log_120m",
-        "delta_high_lin_120m",
-    ]:
-        if list(df.columns).count(col) != 1:
-            raise ValueError(f"Duplicate column produced: {col}")
-        if df[col].dtype != np.float32:
-            raise TypeError(f"{col} must be float32")
-        if df[col].isna().all():
-            raise ValueError(f"All values NaN in {col}")
-
-    # --- cíle (60/120/240 min) -----------------------------------------------
-    horizon = H  # 120 min při 5m svících
-    df["delta_log_120m"] = np.log(df["close"].shift(-horizon) / df["close"]).astype(np.float32)
-    df["delta_lin_120m"] = (df["close"].shift(-horizon) - df["close"]).astype(np.float32)
-
-    df["delta_log_60m"] = np.log(df["close"].shift(-12) / df["close"]).astype(np.float32)
-    df["delta_lin_60m"] = (df["close"].shift(-12) - df["close"]).astype(np.float32)
-
-    df["delta_log_240m"] = np.log(df["close"].shift(-48) / df["close"]).astype(np.float32)
-    df["delta_lin_240m"] = (df["close"].shift(-48) - df["close"]).astype(np.float32)
-
     # --- validace typů --------------------------------------------------------
     feature_only = df.drop(
         columns=[
@@ -274,6 +278,14 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
             "delta_lin_60m",
             "delta_log_240m",
             "delta_lin_240m",
+            "delta_low_log_60m",
+            "delta_low_lin_60m",
+            "delta_high_log_60m",
+            "delta_high_lin_60m",
+            "delta_low_log_240m",
+            "delta_low_lin_240m",
+            "delta_high_log_240m",
+            "delta_high_lin_240m",
         ],
         errors="ignore",
     )

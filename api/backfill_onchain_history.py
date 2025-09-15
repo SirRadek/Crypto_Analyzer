@@ -3,6 +3,7 @@ import sqlite3
 import time
 from typing import Iterable, Iterator, Tuple
 
+import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -18,10 +19,9 @@ COLUMNS = [
     "onch_fee_wavg_satvb",
     "onch_fee_p50_satvb",
     "onch_fee_p90_satvb",
-    "onch_diff_progress_pct",
+    "onch_difficulty",
+    "onch_height",
     "onch_diff_change_pct",
-    "onch_blocks_remaining",
-    "onch_retarget_ts",
 ]
 
 USER_AGENT = "CryptoAnalyzer/1.0"
@@ -166,63 +166,37 @@ def fetch_blockchain_mempool(
     return pd.DataFrame.from_records(records).set_index("ts")
 
 
-def fetch_mining_difficulty(
-    start: pd.Timestamp, end: pd.Timestamp, session: requests.Session
-) -> pd.DataFrame:
-    """Fetch historical difficulty adjustment data from mempool.space."""
+def fetch_mining_difficulty(start: pd.Timestamp, end: pd.Timestamp, session) -> pd.DataFrame:
+    """
+    Čte /api/v1/mining/difficulty-adjustments/all.
+    Odpověď je list-of-lists: [timestamp_sec, height, difficulty, difficultyChange_ratio].
+    Vrací DataFrame s UTC indexem 'timestamp' a sloupci on-chain metrik.
+    """
 
-    url = "https://mempool.space/api/v1/mining/difficulty-adjustments/1y"
-    data = _get_json(session, url, timeout=30)
-
-    records: list[dict] = []
-    items: Iterable = []
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        # Some versions wrap the array in a "data" field
-        items = data.get("data", [])
-
-    for item in items:
-        if isinstance(item, dict):
-            ts = pd.to_datetime(item.get("time"), unit="s", utc=True)
-            progress = item.get("progressPercent")
-            change = item.get("difficultyChange")
-            remaining = item.get("remainingBlocks")
-            retarget = item.get("estimatedRetargetDate")
-        elif isinstance(item, (list, tuple)) and len(item) >= 4:
-            ts = pd.to_datetime(item[0], unit="s", utc=True)
-            height = item[1]
-            adjustment = item[3]
-            # Derive progress/remaining from height
-            if height is not None:
-                epoch_block = height % 2016
-                progress = epoch_block / 2016 * 100
-                remaining = 2016 - epoch_block
-            else:
-                progress = remaining = None
-            change = (adjustment - 1) * 100 if adjustment is not None else None
-            # Rough estimate for next retarget assuming 10 min blocks
-            retarget = None
-            if ts is not pd.NaT and remaining is not None:
-                retarget = int((ts + pd.Timedelta(seconds=remaining * 600)).timestamp() * 1000)
-        else:
-            continue
-
+    url = "https://mempool.space/api/v1/mining/difficulty-adjustments/all"
+    r = session.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()  # list[list]
+    rows = []
+    for item in data:
+        # item = [ts_sec, height, difficulty, change_ratio]
+        ts = pd.to_datetime(item[0], unit="s", utc=True)
         if ts < start or ts > end:
             continue
-
-        records.append(
+        height = int(item[1])
+        difficulty = float(item[2])
+        change_ratio = float(item[3]) if len(item) > 3 else np.nan
+        change_pct = (change_ratio - 1.0) * 100.0 if np.isfinite(change_ratio) else np.nan
+        rows.append(
             {
-                "ts": ts,
-                "onch_diff_progress_pct": progress,
-                "onch_diff_change_pct": change,
-                "onch_blocks_remaining": remaining,
-                "onch_retarget_ts": retarget,
+                "timestamp": ts,
+                "onch_difficulty": difficulty,
+                "onch_height": height,
+                "onch_diff_change_pct": change_pct,
             }
         )
-    if not records:
-        return pd.DataFrame()
-    return pd.DataFrame.from_records(records).set_index("ts")
+    df = pd.DataFrame(rows).set_index("timestamp").sort_index()
+    return df
 
 
 def fetch_current_snapshot(ts: pd.Timestamp, session: requests.Session) -> pd.DataFrame:
@@ -310,10 +284,9 @@ def backfill_onchain_history(start: str, end: str, db_path: str) -> None:
                 onch_fee_wavg_satvb REAL,
                 onch_fee_p50_satvb REAL,
                 onch_fee_p90_satvb REAL,
-                onch_diff_progress_pct REAL,
-                onch_diff_change_pct REAL,
-                onch_blocks_remaining REAL,
-                onch_retarget_ts INTEGER
+                onch_difficulty REAL,
+                onch_height REAL,
+                onch_diff_change_pct REAL
             )
             """
         )
@@ -329,6 +302,8 @@ def backfill_onchain_history(start: str, end: str, db_path: str) -> None:
                 f"INSERT OR REPLACE INTO onchain_5m ({','.join(cols)}) VALUES ({placeholders})",
                 rows[i : i + 1000],
             )
+        inserted = len(rows)
+        print(f"inserted {inserted} rows into onchain_5m", flush=True)
         conn.commit()
 
 
