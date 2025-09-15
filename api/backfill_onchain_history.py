@@ -174,18 +174,50 @@ def fetch_mining_difficulty(
     url = "https://mempool.space/api/v1/mining/difficulty-adjustments/1y"
     data = _get_json(session, url, timeout=30)
 
-    records = []
-    for item in data:
-        ts = pd.to_datetime(item.get("time"), unit="s", utc=True)
+    records: list[dict] = []
+    items: Iterable = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        # Some versions wrap the array in a "data" field
+        items = data.get("data", [])
+
+    for item in items:
+        if isinstance(item, dict):
+            ts = pd.to_datetime(item.get("time"), unit="s", utc=True)
+            progress = item.get("progressPercent")
+            change = item.get("difficultyChange")
+            remaining = item.get("remainingBlocks")
+            retarget = item.get("estimatedRetargetDate")
+        elif isinstance(item, (list, tuple)) and len(item) >= 4:
+            ts = pd.to_datetime(item[0], unit="s", utc=True)
+            height = item[1]
+            adjustment = item[3]
+            # Derive progress/remaining from height
+            if height is not None:
+                epoch_block = height % 2016
+                progress = epoch_block / 2016 * 100
+                remaining = 2016 - epoch_block
+            else:
+                progress = remaining = None
+            change = (adjustment - 1) * 100 if adjustment is not None else None
+            # Rough estimate for next retarget assuming 10 min blocks
+            retarget = None
+            if ts is not pd.NaT and remaining is not None:
+                retarget = int((ts + pd.Timedelta(seconds=remaining * 600)).timestamp() * 1000)
+        else:
+            continue
+
         if ts < start or ts > end:
             continue
+
         records.append(
             {
                 "ts": ts,
-                "onch_diff_progress_pct": item.get("progressPercent"),
-                "onch_diff_change_pct": item.get("difficultyChange"),
-                "onch_blocks_remaining": item.get("remainingBlocks"),
-                "onch_retarget_ts": item.get("estimatedRetargetDate"),
+                "onch_diff_progress_pct": progress,
+                "onch_diff_change_pct": change,
+                "onch_blocks_remaining": remaining,
+                "onch_retarget_ts": retarget,
             }
         )
     if not records:
