@@ -78,6 +78,23 @@ def match_model_features(
       - cast to float32 by default
     """
     expected = _expected_feature_names(model)
+
+    # XGBoost and some scikit-learn models can occasionally report the same
+    # feature name multiple times (e.g. when trained on a DataFrame with
+    # duplicate columns).  When pandas is later indexed with such duplicated
+    # labels, ``df["col"]`` returns a DataFrame instead of a Series which in
+    # turn breaks libraries expecting a 1-D array (like ``xgboost``'s
+    # ``inplace_predict``).  De-duplicate while preserving order so each
+    # feature appears only once.
+    if len(expected) != len(set(expected)):
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for c in expected:
+            if c not in seen:
+                seen.add(c)
+                deduped.append(c)
+        expected = deduped
+
     X = df.copy()
 
     # add missing
