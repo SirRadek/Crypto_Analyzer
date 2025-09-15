@@ -86,6 +86,21 @@ On-chain metrics can be merged from public APIs:
 Store the resulting metrics alongside price data in the SQLite `prices` table
 with column names prefixed by `onch_`.
 
+### On-chain backfill + live logging
+
+Historical mempool and difficulty data can be imported into a dedicated table
+and continuously updated:
+
+```bash
+python api/backfill_onchain_history.py --start 2020-07-22 --end 2020-07-23 --db db/data/crypto_data.sqlite
+python -m api.mempool_ws_logger --db db/data/crypto_data.sqlite
+```
+
+The backfill aligns snapshots to a 5‑minute UTC grid and uses Jochen Hoenicke
+and Blockchain.com datasets as the mempool.space REST API does not expose
+historical mempool snapshots. The WebSocket logger keeps the table current and
+is intended to be scheduled via `cron`.
+
 ### 4. Run analysis and prediction
 
 ```bash

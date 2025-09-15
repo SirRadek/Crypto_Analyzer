@@ -13,7 +13,6 @@ from analysis.compare_predictions import backfill_actuals_and_errors
 from analysis.feature_engineering import FEATURE_COLUMNS, assign_feature_groups, create_features
 from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
-from deleting_SQL import delete_old_records
 from ml.model_utils import match_model_features
 from ml.train import load_model, train_model
 from ml.xgb_price import clip_inside, to_price
@@ -158,15 +157,22 @@ def run_pipeline(
 
     df = get_price_data(SYMBOL, db_path=DB_PATH)
     if use_onchain:
-        from api.onchain import fetch_mempool_5m
+        import sqlite3
 
         start = pd.to_datetime(df["timestamp"].min(), utc=True)
         end = pd.to_datetime(df["timestamp"].max(), utc=True)
         try:
-            onch = fetch_mempool_5m(start, end)
-            onch.index = onch.index.tz_localize(None)
+            conn = sqlite3.connect(DB_PATH)
+            onch = pd.read_sql_query(
+                "SELECT * FROM onchain_5m WHERE ts_utc BETWEEN ? AND ?",
+                conn,
+                params=(int(start.timestamp()), int(end.timestamp())),
+                index_col="ts_utc",
+            )
+            conn.close()
+            onch.index = pd.to_datetime(onch.index, unit="s", utc=True)
             df = df.merge(onch, left_on="timestamp", right_index=True, how="left")
-        except Exception as exc:  # pragma: no cover - network errors
+        except Exception as exc:  # pragma: no cover - IO errors
             logger.warning("mempool fetch failed: %s", exc)
     df = create_features(df)
     if not use_onchain:
@@ -408,7 +414,6 @@ def main(train: bool = True) -> None:
     step(4, 8, "Backfill predictions & train/load models")
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
-    last_ts = full_df["timestamp"].max()
 
     cls_paths, cls_indices = list_model_paths("ml/meta_model_cls.joblib", CLS_MODEL_COUNT)
     reg_paths, reg_indices = list_model_paths("ml/meta_model_reg.joblib", REG_MODEL_COUNT)
@@ -515,6 +520,7 @@ def main(train: bool = True) -> None:
 
     p("Waiting 20 minutes before next run…")
     time.sleep(20 * 60)
+
 
 if __name__ == "__main__":
     import argparse
