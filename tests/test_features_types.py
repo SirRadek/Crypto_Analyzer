@@ -29,5 +29,6 @@ def test_features_types():
     )
     feat_df = create_features(df)
     X = feat_df[FEATURE_COLUMNS]
+    assert feat_df.columns.is_unique
     assert X.dtypes.eq("float32").all()
     assert not X.isna().any().any()
