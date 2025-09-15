@@ -22,9 +22,55 @@ COLUMNS = [
     "onch_difficulty",
     "onch_height",
     "onch_diff_change_pct",
+    "onch_hashrate_ehs",
+    "onch_nowcast",
 ]
 
 USER_AGENT = "CryptoAnalyzer/1.0"
+
+# Fee bucket upper bounds used by Blockchain.com fee histogram.
+# The list is truncated to the number of buckets returned by the API.
+BC_FEE_BUCKETS = [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    12,
+    14,
+    16,
+    18,
+    20,
+    25,
+    30,
+    40,
+    50,
+    60,
+    70,
+    80,
+    90,
+    100,
+    120,
+    140,
+    160,
+    180,
+    200,
+    250,
+    300,
+    350,
+    400,
+    500,
+    600,
+    700,
+    800,
+    900,
+    1000,
+]
 
 
 def _session() -> requests.Session:
@@ -122,14 +168,12 @@ def fetch_hoenicke_fees(
         wavg = _weighted_avg(hist)
         p50 = _percentile(hist, 0.5)
         p90 = _percentile(hist, 0.9)
-        vsize = sum(v for _, v in hist)
         records.append(
             {
                 "ts": ts,
                 "onch_fee_wavg_satvb": wavg,
                 "onch_fee_p50_satvb": p50,
                 "onch_fee_p90_satvb": p90,
-                "onch_mempool_vsize_vB": vsize,
             }
         )
     if not records:
@@ -140,29 +184,60 @@ def fetch_hoenicke_fees(
 def fetch_blockchain_mempool(
     start: pd.Timestamp, end: pd.Timestamp, session: requests.Session
 ) -> pd.DataFrame:
-    """Fetch mempool statistics from the Blockchain.com Charts API."""
+    """Fetch mempool size and fee histogram from Blockchain.com.
 
-    url = "https://api.blockchain.info/charts/mempool-size"
+    The API exposes two charts:
+    ``mempool-size`` (total virtual bytes) and ``fee-buckets`` (histogram of
+    mempool bytes per feerate bucket).  We combine both to derive weighted
+    average feerate and percentiles, using the histogram as a fallback when
+    Jochen Hoenicke's dataset is unavailable.
+    """
+
+    size_url = "https://api.blockchain.info/charts/mempool-size"
     params = {
         "format": "json",
         "start": int(start.timestamp()),
         "end": int(end.timestamp()),
     }
-    data = _get_json(session, url, params=params, timeout=30).get("values", [])
+    size_data = _get_json(session, size_url, params=params, timeout=30).get("values", [])
+    size_map = {pd.to_datetime(item["x"], unit="s", utc=True): item["y"] for item in size_data}
 
-    # Blockchain.com does not expose count/fees directly; we map size to
-    # ``onch_mempool_vsize_vB`` for validation.  Additional fields can be
-    # joined from other sources if available.
-    records = [
-        {
-            "ts": pd.to_datetime(item["x"], unit="s", utc=True),
-            "onch_mempool_vsize_vB": item["y"],
+    bucket_url = "https://api.blockchain.info/charts/fee-buckets"
+    bucket_data = _get_json(session, bucket_url, params=params, timeout=30).get("values", [])
+
+    records: list[dict] = []
+    for item in bucket_data:
+        ts = pd.to_datetime(item["x"], unit="s", utc=True)
+        if ts < start or ts > end:
+            continue
+        sizes = item.get("y") or []
+        if not isinstance(sizes, list):
+            continue
+        levels = BC_FEE_BUCKETS[: len(sizes)]
+        hist = list(zip(levels, sizes[: len(levels)]))
+        wavg = _weighted_avg(hist)
+        p50 = _percentile(hist, 0.5)
+        p90 = _percentile(hist, 0.9)
+        record = {
+            "ts": ts,
+            "onch_fee_wavg_satvb": wavg,
+            "onch_fee_p50_satvb": p50,
+            "onch_fee_p90_satvb": p90,
+            "onch_mempool_vsize_vB": size_map.get(ts, sum(sizes)),
         }
-        for item in data
-        if start <= pd.to_datetime(item["x"], unit="s", utc=True) <= end
-    ]
+        records.append(record)
     if not records:
-        return pd.DataFrame()
+        # fall back to mempool size only
+        return pd.DataFrame(
+            [
+                {
+                    "ts": pd.to_datetime(ts, utc=True),
+                    "onch_mempool_vsize_vB": v,
+                }
+                for ts, v in size_map.items()
+                if start <= ts <= end
+            ]
+        ).set_index("ts")
     return pd.DataFrame.from_records(records).set_index("ts")
 
 
@@ -199,6 +274,25 @@ def fetch_mining_difficulty(start: pd.Timestamp, end: pd.Timestamp, session) -> 
     return df
 
 
+def fetch_hashrate(start: pd.Timestamp, end: pd.Timestamp, session) -> pd.DataFrame:
+    """Fetch historical hashrate from mempool.space."""
+
+    url = "https://mempool.space/api/v1/mining/hashrate/all"
+    r = session.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()  # list[list]
+    rows = []
+    for item in data:
+        # item = [ts_sec, hashrate_ehs]
+        ts = pd.to_datetime(item[0], unit="s", utc=True)
+        if ts < start or ts > end:
+            continue
+        hashrate = float(item[1])
+        rows.append({"timestamp": ts, "onch_hashrate_ehs": hashrate})
+    df = pd.DataFrame(rows).set_index("timestamp").sort_index()
+    return df
+
+
 def fetch_current_snapshot(ts: pd.Timestamp, session: requests.Session) -> pd.DataFrame:
     """Fetch current mempool snapshot for nowcasting missing data."""
 
@@ -215,6 +309,7 @@ def fetch_current_snapshot(ts: pd.Timestamp, session: requests.Session) -> pd.Da
         "onch_mempool_count": mempool.get("count"),
         "onch_mempool_vsize_vB": mempool.get("vsize"),
         "onch_mempool_total_fee_sat": mempool.get("total_fee"),
+        "onch_nowcast": 1,
     }
     if hist:
         record["onch_fee_wavg_satvb"] = _weighted_avg(hist)
@@ -247,19 +342,26 @@ def backfill_onchain_history(start: str, end: str, db_path: str) -> None:
     fee_parts = []
     bc_parts = []
     diff_parts = []
+    hash_parts = []
     for s, e in _date_chunks(start_ts, end_ts):
         fee_parts.append(fetch_hoenicke_fees(s, e, session))
         bc_parts.append(fetch_blockchain_mempool(s, e, session))
         diff_parts.append(fetch_mining_difficulty(s, e, session))
+        hash_parts.append(fetch_hashrate(s, e, session))
     fee_df = _reindex_5m(pd.concat(fee_parts) if fee_parts else pd.DataFrame(), idx)
     bc_df = _reindex_5m(pd.concat(bc_parts) if bc_parts else pd.DataFrame(), idx)
     diff_df = _reindex_5m(pd.concat(diff_parts) if diff_parts else pd.DataFrame(), idx)
-    df = base.join([fee_df, bc_df, diff_df])
+    hash_df = _reindex_5m(pd.concat(hash_parts) if hash_parts else pd.DataFrame(), idx)
+    df = base.join([fee_df, diff_df, hash_df])
+    if not bc_df.empty:
+        df = df.combine_first(bc_df)
 
     # Fill last point with current snapshot if empty
     if df.iloc[-1].isna().all():
         snap = _reindex_5m(fetch_current_snapshot(idx[-1], session), idx)
         df.update(snap)
+
+    df["onch_nowcast"] = df["onch_nowcast"].fillna(0)
 
     if not df.index.is_monotonic_increasing:
         raise ValueError("non-monotonic index")
@@ -286,7 +388,9 @@ def backfill_onchain_history(start: str, end: str, db_path: str) -> None:
                 onch_fee_p90_satvb REAL,
                 onch_difficulty REAL,
                 onch_height REAL,
-                onch_diff_change_pct REAL
+                onch_diff_change_pct REAL,
+                onch_hashrate_ehs REAL,
+                onch_nowcast INTEGER
             )
             """
         )
