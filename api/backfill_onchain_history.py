@@ -279,27 +279,115 @@ def fetch_mining_difficulty(start: pd.Timestamp, end: pd.Timestamp, session) -> 
     return df
 
 
+def _normalize_hashrate_payload(payload) -> list[tuple[object, object]]:
+    """Extract ``(timestamp, value)`` pairs from heterogeneous payloads."""
+
+    def _as_pair(item) -> tuple[object, object] | None:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            return item[0], item[1]
+        if isinstance(item, dict):
+            ts_val = None
+            for key in ("timestamp", "time", "ts", "t", "x"):
+                if key in item:
+                    ts_val = item[key]
+                    break
+            val = None
+            for key in ("hashrate", "value", "v", "avgHashrate", "y"):
+                if key in item:
+                    val = item[key]
+                    break
+            if ts_val is not None and val is not None:
+                return ts_val, val
+        return None
+
+    pairs: list[tuple[object, object]] = []
+    if isinstance(payload, list):
+        for entry in payload:
+            pair = _as_pair(entry)
+            if pair is not None:
+                pairs.append(pair)
+        if pairs:
+            return pairs
+        for entry in payload:
+            nested = _normalize_hashrate_payload(entry)
+            if nested:
+                return nested
+        return []
+
+    if isinstance(payload, dict):
+        simple_pairs: list[tuple[object, object]] = []
+        simple = True
+        for key, value in payload.items():
+            if isinstance(value, (dict, list, tuple)):
+                simple = False
+                break
+        if simple and payload:
+            for key, value in payload.items():
+                simple_pairs.append((key, value))
+            return simple_pairs
+
+        for key in ("hashrate", "data", "values", "result", "series"):
+            if key in payload:
+                nested = _normalize_hashrate_payload(payload[key])
+                if nested:
+                    return nested
+        for value in payload.values():
+            nested = _normalize_hashrate_payload(value)
+            if nested:
+                return nested
+    return []
+
+
+def _parse_hashrate_timestamp(value) -> pd.Timestamp | None:
+    if isinstance(value, (np.integer, int, np.floating, float)):
+        if not np.isfinite(value):
+            return None
+        # choose unit based on magnitude; mempool returns seconds resolution
+        if abs(value) >= 1e12:
+            ts = pd.to_datetime(value, unit="ms", utc=True, errors="coerce")
+            if ts is not pd.NaT:
+                return ts
+        return pd.to_datetime(value, unit="s", utc=True, errors="coerce")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            numeric = float(value)
+        except ValueError:
+            ts = pd.to_datetime(value, utc=True, errors="coerce")
+            return None if ts is pd.NaT else ts
+        return _parse_hashrate_timestamp(numeric)
+    ts = pd.to_datetime(value, utc=True, errors="coerce")
+    return None if ts is pd.NaT else ts
+
+
 def fetch_hashrate(start: pd.Timestamp, end: pd.Timestamp, session) -> pd.DataFrame:
     """Fetch historical hashrate from mempool.space."""
 
     url = "https://mempool.space/api/v1/mining/hashrate/all"
     r = session.get(url, timeout=15)
     r.raise_for_status()
-    data = r.json()  # list[list]
+    data = r.json()
+    pairs = _normalize_hashrate_payload(data)
     rows = []
-    for item in data:
-        # item = [ts_sec, hashrate_ehs]
-        ts = pd.to_datetime(item[0], unit="s", utc=True)
-        if ts < start or ts > end:
+    for raw_ts, raw_hashrate in pairs:
+        ts = _parse_hashrate_timestamp(raw_ts)
+        if ts is None or ts < start or ts > end:
             continue
-        hashrate = float(item[1])
+        try:
+            hashrate = float(raw_hashrate)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(hashrate):
+            continue
         rows.append({"timestamp": ts, "onch_hashrate_ehs": hashrate})
     if not rows:
         return pd.DataFrame(
             columns=["onch_hashrate_ehs"],
             index=pd.DatetimeIndex([], name="timestamp"),
         )
-    df = pd.DataFrame(rows).set_index("timestamp").sort_index()
+    df = pd.DataFrame(rows).drop_duplicates("timestamp").set_index("timestamp").sort_index()
     return df
 
 
@@ -371,7 +459,10 @@ def backfill_onchain_history(start: str, end: str, db_path: str) -> None:
         snap = _reindex_5m(fetch_current_snapshot(idx[-1], session), idx)
         df.update(snap)
 
-    df["onch_nowcast"] = df["onch_nowcast"].fillna(0)
+    if "onch_nowcast" in df.columns:
+        df["onch_nowcast"] = df["onch_nowcast"].fillna(0)
+    else:
+        df["onch_nowcast"] = 0
 
     if not df.index.is_monotonic_increasing:
         raise ValueError("non-monotonic index")
