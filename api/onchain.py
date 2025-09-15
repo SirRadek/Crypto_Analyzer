@@ -74,13 +74,13 @@ def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
     params = {"start": int(start.timestamp()), "end": int(end.timestamp())}
     tx = _get_with_retry(
         sess,
-        "https://mempool.space/api/v1/statistics/transactions",
+        "https://mempool.space/api/tx/15e10745f15593a899cef391191bdd3d7c12412cc4696b7bcb669d0feadc8521/raw",
         params=params,
         timeout=10,
     )
     fee = _get_with_retry(
         sess,
-        "https://mempool.space/api/v1/statistics/fees/median",
+        "https://mempool.space/api/v1/fees/mempool-blocks",
         params=params,
         timeout=10,
     )

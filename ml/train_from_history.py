@@ -30,7 +30,7 @@ def train_from_history(
     *,
     step_minutes: int = 120,
     horizon_steps: int = 24,
-    use_gpu: bool = False,
+    use_gpu: bool = True,
 ) -> None:
     """Retrain the regressor in a loop over historical data.
 

@@ -31,7 +31,7 @@ def delete_old_records(db_path: str = CONFIG.db_path) -> tuple[int, int]:
         prices_deleted = cur.rowcount if cur.rowcount is not None else 0
 
         cur.execute(
-            f"DELETE FROM {CONFIG.table_pred} WHERE target_time_ms <= ? AND y_true_hat IS NOT NULL",
+            f"DELETE FROM {CONFIG.table_pred} WHERE y_true_hat IS NULL",
             (preds_before,),
         )
         preds_deleted = cur.rowcount if cur.rowcount is not None else 0

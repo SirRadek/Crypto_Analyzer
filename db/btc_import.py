@@ -12,7 +12,7 @@ SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 
 # Kolik dní zpět stáhnout (≈ půl roku)
-LOOKBACK_DAYS = 188
+LOOKBACK_DAYS = 1880
 
 def get_klines(symbol, interval, start_ts, end_ts, limit=1000):
     url = "https://api.binance.com/api/v3/klines"

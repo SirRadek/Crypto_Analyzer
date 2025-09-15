@@ -58,38 +58,35 @@ def _created_at_iso() -> str:
 
 
 def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_name: str) -> int:
-    """Remove predictions at or after ``from_ms``.
+    """Smaž predikce s NULL y_true_hat od času >= from_ms (včetně) pro daný symbol."""
+    import sqlite3
 
-    Parameters
-    ----------
-    db_path:
-        Path to SQLite database.
-    symbol:
-        Trading symbol.
-    from_ms:
-        Earliest timestamp (ms) to delete.
-    table_name:
-        Target table name.
-
-    Returns
-    -------
-    int
-        Number of deleted rows.
-    """
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""DELETE FROM {table_name}
+                WHERE symbol = ?
+                  AND y_true_hat IS NULL""",
+            (symbol, int(from_ms)),
+        )
+        deleted = cur.rowcount if cur.rowcount not in (None, -1) else 0
+        conn.commit()
+        cur.execute("PRAGMA optimize;")
+        conn.commit()
+    return int(deleted)
 
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
         cur.execute(
-            f"DELETE FROM {table_name} WHERE symbol = ? AND target_time_ms >= ?",
-            (symbol, int(from_ms)),
+            f"DELETE FROM {table_name} WHERE symbol = ? AND y_true IS NULL",
+            (symbol,),
         )
-        deleted = cur.rowcount if cur.rowcount is not None else 0
-        conn.commit()
+        deleted = cur.rowcount or 0
         cur.execute("PRAGMA optimize;")
         conn.commit()
-    return deleted
+    return int(deleted)
 
 
 def list_model_paths(pattern: str, count: int) -> tuple[list[str], list[int]]:
@@ -412,7 +409,6 @@ def main(train: bool = True) -> None:
     create_predictions_table(DB_PATH, TABLE_PRED)
     backfill_actuals_and_errors(db_path=DB_PATH, table_pred=TABLE_PRED, symbol=SYMBOL)
     last_ts = full_df["timestamp"].max()
-    _delete_future_predictions(DB_PATH, SYMBOL, int(last_ts.value // 1_000_000), TABLE_PRED)
 
     cls_paths, cls_indices = list_model_paths("ml/meta_model_cls.joblib", CLS_MODEL_COUNT)
     reg_paths, reg_indices = list_model_paths("ml/meta_model_reg.joblib", REG_MODEL_COUNT)
@@ -514,13 +510,11 @@ def main(train: bool = True) -> None:
     save_predictions(rows_to_save, DB_PATH, TABLE_PRED)
     p(f"Saved {len(rows_to_save)} predictions to DB.")
 
-    step(7, 8, "Cleanup old records")
-    prices_del, preds_del = delete_old_records(DB_PATH)
-    p(f"  -> deleted {prices_del} prices rows and {preds_del} prediction rows")
-
     total = time.perf_counter() - start
     p(f"Done in {total:.2f}s")
 
+    p("Waiting 20 minutes before next run…")
+    time.sleep(20 * 60)
 
 if __name__ == "__main__":
     import argparse
