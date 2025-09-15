@@ -53,7 +53,7 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     # forward-fill on-chain metrics only within the same hour to avoid leakage
     onch_cols = [c for c in df.columns if c.startswith("onch_")]
     if onch_cols:
-        hour = pd.to_datetime(df["timestamp"]).dt.floor("H")
+        hour = pd.to_datetime(df["timestamp"]).dt.floor("h")
         df[onch_cols] = df[onch_cols].groupby(hour).ffill().astype(np.float32)
 
     # --- order-flow & volume --------------------------------------------------
@@ -79,7 +79,14 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     df["ret12"] = ret1.rolling(12).sum().astype(np.float32)
 
     # --- begin minimal anti-fragmentation patch ---
-    new = {}
+    new: dict[str, pd.Series] = {}
+
+    def _maybe_add(name: str, values: pd.Series) -> None:
+        """Register *values* under *name* unless it already exists."""
+
+        if name in df.columns or name in new:
+            return
+        new[name] = values
 
     cols = [
         "close","open","high","low",
@@ -91,10 +98,10 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             continue
         s = df[col].astype(np.float32)
-        new[f"d_{col}"] = s.diff()
+        _maybe_add(f"d_{col}", s.diff())
         mu = s.rolling(288, min_periods=144).mean()
         sd = s.rolling(288, min_periods=144).std()
-        new[f"z_{col}"] = (s - mu) / sd
+        _maybe_add(f"z_{col}", (s - mu) / sd)
 
     # horizonové delty najednou
     for H, tag in [(24, "120m"), (12, "60m"), (48, "240m")]:
