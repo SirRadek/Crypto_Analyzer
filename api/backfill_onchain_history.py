@@ -270,6 +270,11 @@ def fetch_mining_difficulty(start: pd.Timestamp, end: pd.Timestamp, session) -> 
                 "onch_diff_change_pct": change_pct,
             }
         )
+    if not rows:
+        return pd.DataFrame(
+            columns=["onch_difficulty", "onch_height", "onch_diff_change_pct"],
+            index=pd.DatetimeIndex([], name="timestamp"),
+        )
     df = pd.DataFrame(rows).set_index("timestamp").sort_index()
     return df
 
@@ -289,6 +294,11 @@ def fetch_hashrate(start: pd.Timestamp, end: pd.Timestamp, session) -> pd.DataFr
             continue
         hashrate = float(item[1])
         rows.append({"timestamp": ts, "onch_hashrate_ehs": hashrate})
+    if not rows:
+        return pd.DataFrame(
+            columns=["onch_hashrate_ehs"],
+            index=pd.DatetimeIndex([], name="timestamp"),
+        )
     df = pd.DataFrame(rows).set_index("timestamp").sort_index()
     return df
 
