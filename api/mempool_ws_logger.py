@@ -24,23 +24,22 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS onchain_5m (
-            ts_utc INTEGER PRIMARY KEY,
-            onch_fee_fast_satvb REAL,
-            onch_fee_30m_satvb REAL,
-            onch_fee_60m_satvb REAL,
-            onch_fee_min_satvb REAL,
-            onch_mempool_count REAL,
-            onch_mempool_vsize_vB REAL,
-            onch_mempool_total_fee_sat REAL,
-            onch_fee_wavg_satvb REAL,
-            onch_fee_p50_satvb REAL,
-            onch_fee_p90_satvb REAL,
-            onch_diff_progress_pct REAL,
-            onch_diff_change_pct REAL,
-            onch_blocks_remaining REAL,
-            onch_retarget_ts INTEGER
-        )
+            CREATE TABLE IF NOT EXISTS onchain_5m (
+                ts_utc INTEGER PRIMARY KEY,
+                onch_fee_fast_satvb REAL,
+                onch_fee_30m_satvb REAL,
+                onch_fee_60m_satvb REAL,
+                onch_fee_min_satvb REAL,
+                onch_mempool_count REAL,
+                onch_mempool_vsize_vB REAL,
+                onch_mempool_total_fee_sat REAL,
+                onch_fee_wavg_satvb REAL,
+                onch_fee_p50_satvb REAL,
+                onch_fee_p90_satvb REAL,
+                onch_difficulty REAL,
+                onch_height REAL,
+                onch_diff_change_pct REAL
+            )
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_onchain_ts ON onchain_5m(ts_utc)")
