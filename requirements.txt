@@ -1,3 +1,4 @@
+structlog
 python-dotenv
 numpy
 pandas

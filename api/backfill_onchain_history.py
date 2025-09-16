@@ -1,529 +1,328 @@
-import argparse
+#!/usr/bin/env python3
+"""
+backfill_onchain_history.py — BTC network aggregates (Esplora)
+
+Co dělá:
+- Žádné adresy. Sběr síťových agregátů pro Bitcoin: počet transakcí, celkové poplatky, objem převodů.
+- Zdroj: Esplora‑kompatibilní REST (mempool.space / blockstream.info). Bez API klíčů.
+- Ukládá do jedné SQLite tabulky (per‑blok) + volitelně denní agregace a JSONL.
+
+Metodika:
+- Pro zadaný rozsah bloků stáhne každý blok a stránkovaně všechny transakce v bloku
+  (endpoint `/api/block/:hash/txs[/:start_index]`, stránkování po 25 tx).
+  Součty:
+    • `tx_count` = počet tx v bloku
+    • `fees_sat` = suma `tx.fee` přes všechny ne‑coinbase tx
+    • `volume_sat` = suma hodnot všech výstupů ne‑coinbase tx (approx. „on‑chain volume“, zahrnuje change)
+- Volitelně uloží snapshot mempoolu (`/api/mempool`): `count`, `vsize`, `total_fee`.
+
+Poznámky:
+- Agregace podle času lze udělat přes `--daily`, což po naplnění tabulky `btc_blocks` vytvoří/aktualizuje tabulku `btc_daily` (GROUP BY den UTC).
+- Pro robustnost: retry s exponenciálním backoffem, paralelní zpracování bloků, integrita přes UPSERT.
+
+Odkazy na API (kompatibilní s Esplora):
+- `/api/blocks/tip/height`, `/api/block-height/:height`, `/api/block/:hash`, `/api/block/:hash/txs[/:start_index]`.
+- `/api/mempool` (mempool statistiky).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
 import sqlite3
-import time
-from typing import Iterable, Iterator, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-import pandas as pd
-import requests
-from requests.adapters import HTTPAdapter, Retry
+try:
+    import httpx  # type: ignore
+except Exception:  # pragma: no cover
+    print("Tento skript vyžaduje balíček 'httpx'. Nainstalujte jej: pip install httpx", file=sys.stderr)
+    raise
 
-COLUMNS = [
-    "onch_fee_fast_satvb",
-    "onch_fee_30m_satvb",
-    "onch_fee_60m_satvb",
-    "onch_fee_min_satvb",
-    "onch_mempool_count",
-    "onch_mempool_vsize_vB",
-    "onch_mempool_total_fee_sat",
-    "onch_fee_wavg_satvb",
-    "onch_fee_p50_satvb",
-    "onch_fee_p90_satvb",
-    "onch_difficulty",
-    "onch_height",
-    "onch_diff_change_pct",
-    "onch_hashrate_ehs",
-    "onch_nowcast",
+# -----------------------------
+# Konfigurace
+# -----------------------------
+
+DEFAULT_TIMEOUT = 30.0
+MAX_RETRIES = 5
+INITIAL_BACKOFF = 0.5
+MAX_CONCURRENCY = 4
+
+ESPLORA_BASES_DEFAULT = [
+    os.getenv("BTC_ESPLORA_BASE", "").rstrip("/") or "https://mempool.space/api",
+    "https://blockstream.info/api",
 ]
 
-USER_AGENT = "CryptoAnalyzer/1.0"
+# -----------------------------
+# Retry helper
+# -----------------------------
 
-# Fee bucket upper bounds used by Blockchain.com fee histogram.
-# The list is truncated to the number of buckets returned by the API.
-BC_FEE_BUCKETS = [
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    12,
-    14,
-    16,
-    18,
-    20,
-    25,
-    30,
-    40,
-    50,
-    60,
-    70,
-    80,
-    90,
-    100,
-    120,
-    140,
-    160,
-    180,
-    200,
-    250,
-    300,
-    350,
-    400,
-    500,
-    600,
-    700,
-    800,
-    900,
-    1000,
-]
-
-
-def _session() -> requests.Session:
-    s = requests.Session()
-    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.headers.update({"User-Agent": USER_AGENT})
-    return s
-
-
-def _get_json(
-    session: requests.Session, url: str, *, params: dict | None = None, timeout: int = 30
-) -> dict:
-    delay = 1.0
-    for attempt in range(5):
+async def _with_retries(coro_fn, *, retries=MAX_RETRIES, initial_backoff=INITIAL_BACKOFF, retry_exceptions=(httpx.ReadTimeout, httpx.ConnectError, httpx.HTTPError)):
+    attempt = 0
+    delay = initial_backoff
+    while True:
         try:
-            resp = session.get(url, params=params, timeout=timeout)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            if attempt == 4:
-                return {}
-            time.sleep(delay)
-            delay *= 2
+            return await coro_fn()
+        except retry_exceptions:
+            attempt += 1
+            if attempt > retries:
+                raise
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 8.0)
 
+# -----------------------------
+# Esplora klient
+# -----------------------------
 
-def _weighted_avg(histogram: Iterable[Iterable[float]]) -> float | None:
-    """Compute weighted average feerate from a histogram.
+class Esplora:
+    def __init__(self, base_url: str, client: httpx.AsyncClient):
+        self.base = base_url.rstrip("/")
+        self.client = client
 
-    The histogram is expected to be an iterable of ``(fee, vsize)`` pairs.
-    Returns ``None`` when no weights are present.
-    """
+    async def tip_height(self) -> int:
+        async def call():
+            r = await self.client.get(f"{self.base}/blocks/tip/height", timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status(); return int(r.text)
+        return int(await _with_retries(call))
 
-    total = 0.0
-    weighted = 0.0
-    for fee, vsize in histogram:
-        total += vsize
-        weighted += fee * vsize
-    if total == 0:
-        return None
-    return weighted / total
+    async def block_hash(self, height: int) -> str:
+        async def call():
+            r = await self.client.get(f"{self.base}/block-height/{height}", timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status(); return r.text.strip()
+        return await _with_retries(call)
 
+    async def block_header(self, block_hash: str) -> Dict[str, Any]:
+        async def call():
+            r = await self.client.get(f"{self.base}/block/{block_hash}", timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status(); return r.json()
+        return await _with_retries(call)
 
-def _percentile(histogram: Iterable[Iterable[float]], pct: float) -> float | None:
-    """Compute the percentile of a fee histogram.
+    async def block_txs_page(self, block_hash: str, start_index: int = 0) -> List[Dict[str, Any]]:
+        suffix = f"/txs/{start_index}" if start_index else "/txs"
+        async def call():
+            r = await self.client.get(f"{self.base}/block/{block_hash}{suffix}", timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status(); return r.json()
+        return await _with_retries(call)
 
-    Parameters
-    ----------
-    histogram:
-        Iterable of ``(fee, vsize)`` pairs sorted by ``fee``.
-    pct:
-        Desired percentile in the range ``0``--``1``.
-    """
+    async def mempool_stats(self) -> Dict[str, Any]:
+        async def call():
+            r = await self.client.get(f"{self.base}/mempool", timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status(); return r.json()
+        return await _with_retries(call)
 
-    hist = list(histogram)
-    if not hist:
-        return None
-    total = sum(v for _, v in hist)
-    if total == 0:
-        return None
-    cutoff = total * pct
-    acc = 0.0
-    for fee, vsize in hist:
-        acc += vsize
-        if acc >= cutoff:
-            return fee
-    return hist[-1][0]
+# -----------------------------
+# DB schéma
+# -----------------------------
 
+DDL = """
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS btc_blocks (
+  height INTEGER PRIMARY KEY,
+  timestamp_utc TEXT NOT NULL,
+  date_utc TEXT NOT NULL,
+  tx_count INTEGER NOT NULL,
+  fees_sat INTEGER NOT NULL,
+  volume_sat INTEGER NOT NULL,
+  base_url TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_btc_blocks_date ON btc_blocks(date_utc);
 
-def _reindex_5m(df: pd.DataFrame, idx: pd.DatetimeIndex) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(index=idx)
-    return df.sort_index().reindex(idx, method="nearest", tolerance=pd.Timedelta("5min"))
+CREATE TABLE IF NOT EXISTS btc_daily (
+  date_utc TEXT PRIMARY KEY,
+  blocks INTEGER NOT NULL,
+  txs INTEGER NOT NULL,
+  fees_sat INTEGER NOT NULL,
+  volume_sat INTEGER NOT NULL
+);
 
+CREATE TABLE IF NOT EXISTS btc_mempool_snapshots (
+  ts_utc TEXT PRIMARY KEY,
+  count INTEGER,
+  vsize INTEGER,
+  total_fee_sat INTEGER,
+  base_url TEXT NOT NULL
+);
+"""
 
-def fetch_hoenicke_fees(
-    start: pd.Timestamp, end: pd.Timestamp, session: requests.Session
-) -> pd.DataFrame:
-    """Fetch historical fee histogram data from Jochen Hoenicke's dataset.
+UPSERT_BLOCK = """
+INSERT INTO btc_blocks(height, timestamp_utc, date_utc, tx_count, fees_sat, volume_sat, base_url)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(height) DO UPDATE SET
+  timestamp_utc=excluded.timestamp_utc,
+  date_utc=excluded.date_utc,
+  tx_count=excluded.tx_count,
+  fees_sat=excluded.fees_sat,
+  volume_sat=excluded.volume_sat,
+  base_url=excluded.base_url
+"""
 
-    The dataset contains snapshots of the mempool fee histogram.  From this we
-    derive weighted average fee and percentiles.  The function gracefully
-    handles network failures by returning an empty DataFrame.
-    """
+"""
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(height) DO UPDATE SET
+    timestamp_utc=excluded.timestamp_utc, date_utc=excluded.date_utc,
+    tx_count=excluded.tx_count, fees_sat=excluded.fees_sat, volume_sat=excluded.volume_sat,
+    base_url=excluded.base_url"
+)"""
 
-    url = "https://mempool.jhoenicke.de/api/v1/fees/mempool.json"
-    raw = _get_json(session, url, timeout=30).get("data", [])
+UPSERT_DAILY = """
+INSERT INTO btc_daily(date_utc, blocks, txs, fees_sat, volume_sat)
+SELECT date_utc, COUNT(*), SUM(tx_count), SUM(fees_sat), SUM(volume_sat)
+FROM btc_blocks
+WHERE date_utc BETWEEN ? AND ?
+GROUP BY date_utc
+ON CONFLICT(date_utc) DO UPDATE SET
+  blocks=excluded.blocks,
+  txs=excluded.txs,
+  fees_sat=excluded.fees_sat,
+  volume_sat=excluded.volume_sat
+"""
 
-    records = []
-    for entry in raw:
-        ts, hist = entry[0], entry[1]
-        ts = pd.to_datetime(ts, unit="s", utc=True)
-        if ts < start or ts > end:
-            continue
-        wavg = _weighted_avg(hist)
-        p50 = _percentile(hist, 0.5)
-        p90 = _percentile(hist, 0.9)
-        records.append(
-            {
-                "ts": ts,
-                "onch_fee_wavg_satvb": wavg,
-                "onch_fee_p50_satvb": p50,
-                "onch_fee_p90_satvb": p90,
-            }
-        )
-    if not records:
-        return pd.DataFrame()
-    return pd.DataFrame.from_records(records).set_index("ts")
+"""
+    SELECT date_utc, COUNT(*), SUM(tx_count), SUM(fees_sat), SUM(volume_sat) FROM btc_blocks
+    WHERE date_utc BETWEEN ? AND ? GROUP BY date_utc
+    ON CONFLICT(date_utc) DO UPDATE SET
+    blocks=excluded.blocks, txs=excluded.txs, fees_sat=excluded.fees_sat, volume_sat=excluded.volume_sat"
+)
+"""
+INSERT_MEMPOOL = (
+    "INSERT OR REPLACE INTO btc_mempool_snapshots(ts_utc, count, vsize, total_fee_sat, base_url) VALUES (?, ?, ?, ?, ?)"
+)
 
+# -----------------------------
+# Výpočty
+# -----------------------------
 
-def fetch_blockchain_mempool(
-    start: pd.Timestamp, end: pd.Timestamp, session: requests.Session
-) -> pd.DataFrame:
-    """Fetch mempool size and fee histogram from Blockchain.com.
+def _is_coinbase_tx(tx: Dict[str, Any]) -> bool:
+    vins = tx.get("vin") or []
+    if not vins:
+        return False
+    v0 = vins[0] or {}
+    return bool(v0.get("is_coinbase")) or (v0.get("txid") == "0" * 64)
 
-    The API exposes two charts:
-    ``mempool-size`` (total virtual bytes) and ``fee-buckets`` (histogram of
-    mempool bytes per feerate bucket).  We combine both to derive weighted
-    average feerate and percentiles, using the histogram as a fallback when
-    Jochen Hoenicke's dataset is unavailable.
-    """
+async def _sum_block(esplora: Esplora, height: int) -> Tuple[int, str, str, int, int, int]:
+    """Vrátí tuple: (height, ts_iso, date_iso, tx_count, fees_sat, volume_sat)"""
+    h = height
+    bh = await esplora.block_hash(h)
+    header = await esplora.block_header(bh)
+    ts = int(header.get("timestamp") or 0)
+    ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    date_iso = ts_iso[:10]
+    tx_count = int(header.get("tx_count") or 0)
 
-    size_url = "https://api.blockchain.info/charts/mempool-size"
-    params = {
-        "format": "json",
-        "start": int(start.timestamp()),
-        "end": int(end.timestamp()),
-    }
-    size_data = _get_json(session, size_url, params=params, timeout=30).get("values", [])
-    size_map = {pd.to_datetime(item["x"], unit="s", utc=True): item["y"] for item in size_data}
+    fees = 0
+    volume = 0
+    fetched = 0
+    start = 0
+    while True:
+        page = await esplora.block_txs_page(bh, start)
+        if not page:
+            break
+        for tx in page:
+            if _is_coinbase_tx(tx):
+                continue
+            fees += int(tx.get("fee") or 0)
+            # suma všech výstupů tx
+            for v in tx.get("vout") or []:
+                volume += int(v.get("value") or 0)
+            fetched += 1
+        start += len(page)
+        if len(page) < 25:  # poslední stránka
+            break
+    # fallback: pokud se tx nepodařilo stáhnout všechno, stále uložíme hlavičku
+    return h, ts_iso, date_iso, tx_count, fees, volume
 
-    bucket_url = "https://api.blockchain.info/charts/fee-buckets"
-    bucket_data = _get_json(session, bucket_url, params=params, timeout=30).get("values", [])
+# -----------------------------
+# Orchestrace
+# -----------------------------
 
-    records: list[dict] = []
-    for item in bucket_data:
-        ts = pd.to_datetime(item["x"], unit="s", utc=True)
-        if ts < start or ts > end:
-            continue
-        sizes = item.get("y") or []
-        if not isinstance(sizes, list):
-            continue
-        levels = BC_FEE_BUCKETS[: len(sizes)]
-        hist = list(zip(levels, sizes[: len(levels)]))
-        wavg = _weighted_avg(hist)
-        p50 = _percentile(hist, 0.5)
-        p90 = _percentile(hist, 0.9)
-        record = {
-            "ts": ts,
-            "onch_fee_wavg_satvb": wavg,
-            "onch_fee_p50_satvb": p50,
-            "onch_fee_p90_satvb": p90,
-            "onch_mempool_vsize_vB": size_map.get(ts, sum(sizes)),
-        }
-        records.append(record)
-    if not records:
-        # fall back to mempool size only
-        return pd.DataFrame(
-            [
-                {
-                    "ts": pd.to_datetime(ts, utc=True),
-                    "onch_mempool_vsize_vB": v,
-                }
-                for ts, v in size_map.items()
-                if start <= ts <= end
-            ]
-        ).set_index("ts")
-    return pd.DataFrame.from_records(records).set_index("ts")
+async def run_aggregates(bases: List[str], *, from_height: Optional[int], to_height: Optional[int], last_blocks: Optional[int], db_path: Path, daily: bool, take_mempool: bool, concurrency: int) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.executescript(DDL)
+    conn.commit()
 
+    async with httpx.AsyncClient(headers={"User-Agent": "btc-aggregates/1.0"}) as client:
+        esplora = Esplora(bases[0], client)  # primární zdroj
+        # Rozsah bloků
+        if last_blocks and not (from_height or to_height):
+            tip = await esplora.tip_height()
+            from_h = max(0, tip - last_blocks + 1)
+            to_h = tip
+        else:
+            # doplň z tip height, pokud chybí jedna hrana
+            tip = await esplora.tip_height()
+            from_h = from_height if from_height is not None else max(0, (to_height or tip) - 2015)
+            to_h = to_height if to_height is not None else tip
+        if from_h > to_h:
+            from_h, to_h = to_h, from_h
 
-def fetch_mining_difficulty(start: pd.Timestamp, end: pd.Timestamp, session) -> pd.DataFrame:
-    """
-    Čte /api/v1/mining/difficulty-adjustments/all.
-    Odpověď je list-of-lists: [timestamp_sec, height, difficulty, difficultyChange_ratio].
-    Vrací DataFrame s UTC indexem 'timestamp' a sloupci on-chain metrik.
-    """
+        sem = asyncio.Semaphore(concurrency)
+        lock = asyncio.Lock()
 
-    url = "https://mempool.space/api/v1/mining/difficulty-adjustments/all"
-    r = session.get(url, timeout=15)
-    r.raise_for_status()
-    data = r.json()  # list[list]
-    rows = []
-    for item in data:
-        # item = [ts_sec, height, difficulty, change_ratio]
-        ts = pd.to_datetime(item[0], unit="s", utc=True)
-        if ts < start or ts > end:
-            continue
-        height = int(item[1])
-        difficulty = float(item[2])
-        change_ratio = float(item[3]) if len(item) > 3 else np.nan
-        change_pct = (change_ratio - 1.0) * 100.0 if np.isfinite(change_ratio) else np.nan
-        rows.append(
-            {
-                "timestamp": ts,
-                "onch_difficulty": difficulty,
-                "onch_height": height,
-                "onch_diff_change_pct": change_pct,
-            }
-        )
-    if not rows:
-        return pd.DataFrame(
-            columns=["onch_difficulty", "onch_height", "onch_diff_change_pct"],
-            index=pd.DatetimeIndex([], name="timestamp"),
-        )
-    df = pd.DataFrame(rows).set_index("timestamp").sort_index()
-    return df
+        async def process(h: int):
+            async with sem:
+                try:
+                    height, ts_iso, date_iso, txc, fees, vol = await _sum_block(esplora, h)
+                except Exception as e:
+                    # selhalo — uložíme jen hlavičku (bez fees/volume)
+                    bh = await esplora.block_hash(h)
+                    header = await esplora.block_header(bh)
+                    ts = int(header.get("timestamp") or 0)
+                    ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                    date_iso = ts_iso[:10]
+                    txc = int(header.get("tx_count") or 0)
+                    fees = 0
+                    vol = 0
+                async with lock:
+                    conn.execute(UPSERT_BLOCK, (height, ts_iso, date_iso, txc, fees, vol, bases[0]))
 
+        await asyncio.gather(*(process(h) for h in range(from_h, to_h + 1)))
 
-def _normalize_hashrate_payload(payload) -> list[tuple[object, object]]:
-    """Extract ``(timestamp, value)`` pairs from heterogeneous payloads."""
+        if daily:
+            d0 = datetime.fromtimestamp(0, tz=timezone.utc).date().isoformat()
+            d1 = datetime.now(tz=timezone.utc).date().isoformat()
+            conn.execute(UPSERT_DAILY, (d0, d1))
 
-    def _as_pair(item) -> tuple[object, object] | None:
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            return item[0], item[1]
-        if isinstance(item, dict):
-            ts_val = None
-            for key in ("timestamp", "time", "ts", "t", "x"):
-                if key in item:
-                    ts_val = item[key]
-                    break
-            val = None
-            for key in ("hashrate", "value", "v", "avgHashrate", "y"):
-                if key in item:
-                    val = item[key]
-                    break
-            if ts_val is not None and val is not None:
-                return ts_val, val
-        return None
+        if take_mempool:
+            try:
+                m = await esplora.mempool_stats()
+                ts_iso = datetime.now(tz=timezone.utc).isoformat()
+                conn.execute(INSERT_MEMPOOL, (ts_iso, int(m.get("count") or 0), int(m.get("vsize") or 0), int(m.get("total_fee") or 0), bases[0]))
+            except Exception:
+                pass
 
-    pairs: list[tuple[object, object]] = []
-    if isinstance(payload, list):
-        for entry in payload:
-            pair = _as_pair(entry)
-            if pair is not None:
-                pairs.append(pair)
-        if pairs:
-            return pairs
-        for entry in payload:
-            nested = _normalize_hashrate_payload(entry)
-            if nested:
-                return nested
-        return []
+    conn.commit(); conn.close()
 
-    if isinstance(payload, dict):
-        simple_pairs: list[tuple[object, object]] = []
-        simple = True
-        for key, value in payload.items():
-            if isinstance(value, (dict, list, tuple)):
-                simple = False
-                break
-        if simple and payload:
-            for key, value in payload.items():
-                simple_pairs.append((key, value))
-            return simple_pairs
+# -----------------------------
+# CLI
+# -----------------------------
 
-        for key in ("hashrate", "data", "values", "result", "series"):
-            if key in payload:
-                nested = _normalize_hashrate_payload(payload[key])
-                if nested:
-                    return nested
-        for value in payload.values():
-            nested = _normalize_hashrate_payload(value)
-            if nested:
-                return nested
-    return []
+def cli(argv: List[str]) -> int:
+    import argparse
+    p = argparse.ArgumentParser(description="BTC síťové agregáty z Esplora (mempool.space / blockstream.info)")
+    p.add_argument("--db", required=True, help="Cesta k SQLite DB")
+    p.add_argument("--from-height", type=int)
+    p.add_argument("--to-height", type=int)
+    p.add_argument("--last-blocks", type=int, help="Alternativa: posledních N bloků")
+    p.add_argument("--daily", action="store_true", help="Vypočti/aktualizuj denní agregace")
+    p.add_argument("--mempool", action="store_true", help="Ulož aktuální snapshot mempoolu")
+    p.add_argument("--esplora-base", help="Preferované base URL, jinak mempool.space a blockstream.info")
+    p.add_argument("--concurrency", type=int, default=MAX_CONCURRENCY)
 
+    a = p.parse_args(argv)
 
-def _parse_hashrate_timestamp(value) -> pd.Timestamp | None:
-    if isinstance(value, (np.integer, int, np.floating, float)):
-        if not np.isfinite(value):
-            return None
-        # choose unit based on magnitude; mempool returns seconds resolution
-        if abs(value) >= 1e12:
-            ts = pd.to_datetime(value, unit="ms", utc=True, errors="coerce")
-            if ts is not pd.NaT:
-                return ts
-        return pd.to_datetime(value, unit="s", utc=True, errors="coerce")
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-        try:
-            numeric = float(value)
-        except ValueError:
-            ts = pd.to_datetime(value, utc=True, errors="coerce")
-            return None if ts is pd.NaT else ts
-        return _parse_hashrate_timestamp(numeric)
-    ts = pd.to_datetime(value, utc=True, errors="coerce")
-    return None if ts is pd.NaT else ts
+    bases = [b.strip().rstrip("/") for b in (a.esplora_base.split(",") if a.esplora_base else ESPLORA_BASES_DEFAULT) if b.strip()]
 
+    asyncio.run(run_aggregates(bases, from_height=a.from_height, to_height=a.to_height, last_blocks=a.last_blocks, db_path=Path(a.db), daily=a.daily, take_mempool=a.mempool, concurrency=a.concurrency))
+    return 0
 
-def fetch_hashrate(start: pd.Timestamp, end: pd.Timestamp, session) -> pd.DataFrame:
-    """Fetch historical hashrate from mempool.space."""
-
-    url = "https://mempool.space/api/v1/mining/hashrate/all"
-    r = session.get(url, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    pairs = _normalize_hashrate_payload(data)
-    rows = []
-    for raw_ts, raw_hashrate in pairs:
-        ts = _parse_hashrate_timestamp(raw_ts)
-        if ts is None or ts < start or ts > end:
-            continue
-        try:
-            hashrate = float(raw_hashrate)
-        except (TypeError, ValueError):
-            continue
-        if not np.isfinite(hashrate):
-            continue
-        rows.append({"timestamp": ts, "onch_hashrate_ehs": hashrate})
-    if not rows:
-        return pd.DataFrame(
-            columns=["onch_hashrate_ehs"],
-            index=pd.DatetimeIndex([], name="timestamp"),
-        )
-    df = pd.DataFrame(rows).drop_duplicates("timestamp").set_index("timestamp").sort_index()
-    return df
-
-
-def fetch_current_snapshot(ts: pd.Timestamp, session: requests.Session) -> pd.DataFrame:
-    """Fetch current mempool snapshot for nowcasting missing data."""
-
-    fees = _get_json(session, "https://mempool.space/api/v1/fees/recommended", timeout=30)
-    mempool = _get_json(session, "https://mempool.space/api/mempool", timeout=30)
-    hist = mempool.get("fee_histogram", []) if isinstance(mempool, dict) else []
-
-    record = {
-        "ts": ts,
-        "onch_fee_fast_satvb": fees.get("fastestFee"),
-        "onch_fee_30m_satvb": fees.get("halfHourFee"),
-        "onch_fee_60m_satvb": fees.get("hourFee"),
-        "onch_fee_min_satvb": fees.get("minimumFee"),
-        "onch_mempool_count": mempool.get("count"),
-        "onch_mempool_vsize_vB": mempool.get("vsize"),
-        "onch_mempool_total_fee_sat": mempool.get("total_fee"),
-        "onch_nowcast": 1,
-    }
-    if hist:
-        record["onch_fee_wavg_satvb"] = _weighted_avg(hist)
-        record["onch_fee_p50_satvb"] = _percentile(hist, 0.5)
-        record["onch_fee_p90_satvb"] = _percentile(hist, 0.9)
-    df = pd.DataFrame([record]).set_index("ts")
-    return df
-
-
-def _date_chunks(
-    start: pd.Timestamp, end: pd.Timestamp
-) -> Iterator[Tuple[pd.Timestamp, pd.Timestamp]]:
-    cur = start
-    step = pd.Timedelta(days=1)
-    while cur <= end:
-        nxt = min(cur + step - pd.Timedelta(minutes=5), end)
-        yield cur, nxt
-        cur = nxt + pd.Timedelta(minutes=5)
-
-
-def backfill_onchain_history(start: str, end: str, db_path: str) -> None:
-    """Backfill on-chain history into a SQLite database."""
-
-    start_ts = pd.to_datetime(start, utc=True).floor("5min")
-    end_ts = pd.to_datetime(end, utc=True).ceil("5min")
-    idx = pd.date_range(start_ts, end_ts, freq="5min")
-    base = pd.DataFrame(index=idx)
-
-    session = _session()
-    fee_parts = []
-    bc_parts = []
-    diff_parts = []
-    hash_parts = []
-    for s, e in _date_chunks(start_ts, end_ts):
-        fee_parts.append(fetch_hoenicke_fees(s, e, session))
-        bc_parts.append(fetch_blockchain_mempool(s, e, session))
-        diff_parts.append(fetch_mining_difficulty(s, e, session))
-        hash_parts.append(fetch_hashrate(s, e, session))
-    fee_df = _reindex_5m(pd.concat(fee_parts) if fee_parts else pd.DataFrame(), idx)
-    bc_df = _reindex_5m(pd.concat(bc_parts) if bc_parts else pd.DataFrame(), idx)
-    diff_df = _reindex_5m(pd.concat(diff_parts) if diff_parts else pd.DataFrame(), idx)
-    hash_df = _reindex_5m(pd.concat(hash_parts) if hash_parts else pd.DataFrame(), idx)
-    df = base.join([fee_df, diff_df, hash_df])
-    if not bc_df.empty:
-        df = df.combine_first(bc_df)
-
-    # Fill last point with current snapshot if empty
-    if df.iloc[-1].isna().all():
-        snap = _reindex_5m(fetch_current_snapshot(idx[-1], session), idx)
-        df.update(snap)
-
-    if "onch_nowcast" in df.columns:
-        df["onch_nowcast"] = df["onch_nowcast"].fillna(0)
-    else:
-        df["onch_nowcast"] = 0
-
-    if not df.index.is_monotonic_increasing:
-        raise ValueError("non-monotonic index")
-    if len(df) != len(idx):
-        raise ValueError("unexpected number of rows")
-
-    df.index = df.index.view("int64") // 10**9
-    df.index.name = "ts_utc"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS onchain_5m (
-                ts_utc INTEGER PRIMARY KEY,
-                onch_fee_fast_satvb REAL,
-                onch_fee_30m_satvb REAL,
-                onch_fee_60m_satvb REAL,
-                onch_fee_min_satvb REAL,
-                onch_mempool_count REAL,
-                onch_mempool_vsize_vB REAL,
-                onch_mempool_total_fee_sat REAL,
-                onch_fee_wavg_satvb REAL,
-                onch_fee_p50_satvb REAL,
-                onch_fee_p90_satvb REAL,
-                onch_difficulty REAL,
-                onch_height REAL,
-                onch_diff_change_pct REAL,
-                onch_hashrate_ehs REAL,
-                onch_nowcast INTEGER
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_onchain_ts ON onchain_5m(ts_utc)")
-        cols = ["ts_utc"] + COLUMNS
-        placeholders = ",".join(["?"] * len(cols))
-        rows = []
-        for ts, row in df.iterrows():
-            values = [ts] + [row.get(c) if pd.notna(row.get(c)) else None for c in COLUMNS]
-            rows.append(values)
-        for i in range(0, len(rows), 1000):
-            conn.executemany(
-                f"INSERT OR REPLACE INTO onchain_5m ({','.join(cols)}) VALUES ({placeholders})",
-                rows[i : i + 1000],
-            )
-        inserted = len(rows)
-        print(f"inserted {inserted} rows into onchain_5m", flush=True)
-        conn.commit()
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Backfill on-chain history")
-    parser.add_argument("--start", default="2020-07-22", help="start date (UTC)")
-    parser.add_argument("--end", required=True, help="end date (UTC)")
-    parser.add_argument("--db", required=True, help="SQLite database path")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    backfill_onchain_history(args.start, args.end, args.db)
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()
+if __name__ == "__main__":
+    try:
+        sys.exit(cli(sys.argv[1:]))
+    except KeyboardInterrupt:
+        print("Přerušeno uživatelem.", file=sys.stderr); sys.exit(130)
+    except Exception as e:
+        print(f"Chyba: {e}", file=sys.stderr); sys.exit(1)
