@@ -659,23 +659,40 @@ def fetch_current_snapshot(
 # Backfill orchestrator
 # ---------------------------------------------------------------------------
 
-def _combine_frames(frames: list[pd.DataFrame], index: pd.DatetimeIndex) -> pd.DataFrame:
-    if not frames:
-        df = pd.DataFrame(index=index, columns=COLUMNS)
-        return df
-    df = pd.concat(frames, axis=1, join="outer") if frames else pd.DataFrame(index=index)
-    df = df.sort_index()
+def _normalise_frame(frame: pd.DataFrame, index: pd.DatetimeIndex) -> pd.DataFrame:
+    """Return *frame* aligned to ``index`` with a clean column set."""
+
+    df = frame.copy()
     if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, utc=True)
+        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
     else:
         if df.index.tz is None:
             df.index = df.index.tz_localize(UTC)
         else:
             df.index = df.index.tz_convert(UTC)
-    df = df[~df.index.duplicated(keep="last")]
-    df = df.reindex(index)
+    if df.index.hasnans:
+        df = df[~df.index.isna()]
+    df = df.sort_index()
+    if df.index.has_duplicates:
+        df = df[~df.index.duplicated(keep="last")]
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep="last")]
     df = df.reindex(columns=COLUMNS)
+    df = df.reindex(index)
     return df
+
+
+def _combine_frames(frames: list[pd.DataFrame], index: pd.DatetimeIndex) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame(index=index, columns=COLUMNS, dtype="float64")
+
+    combined = pd.DataFrame(index=index, columns=COLUMNS, dtype="float64")
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        normalised = _normalise_frame(frame, index)
+        combined.update(normalised)
+    return combined
 
 
 def _write_dataframe(db_path: Path, df: pd.DataFrame) -> None:
