@@ -1,328 +1,763 @@
 #!/usr/bin/env python3
+"""Backfill five-minute Bitcoin on-chain aggregates.
+
+The script collects public on-chain metrics from a couple of unauthenticated
+APIs and stores them in the ``onchain_5m`` SQLite table.  The upstream
+providers are not perfectly consistent in their payloads, therefore most helper
+functions focus on validating inputs, coercing numbers and normalising
+timestamps.  Whenever a response cannot be parsed the offending rows are simply
+skipped – data issues should never crash the backfill.
 """
-backfill_onchain_history.py — BTC network aggregates (Esplora)
 
-Co dělá:
-- Žádné adresy. Sběr síťových agregátů pro Bitcoin: počet transakcí, celkové poplatky, objem převodů.
-- Zdroj: Esplora‑kompatibilní REST (mempool.space / blockstream.info). Bez API klíčů.
-- Ukládá do jedné SQLite tabulky (per‑blok) + volitelně denní agregace a JSONL.
-
-Metodika:
-- Pro zadaný rozsah bloků stáhne každý blok a stránkovaně všechny transakce v bloku
-  (endpoint `/api/block/:hash/txs[/:start_index]`, stránkování po 25 tx).
-  Součty:
-    • `tx_count` = počet tx v bloku
-    • `fees_sat` = suma `tx.fee` přes všechny ne‑coinbase tx
-    • `volume_sat` = suma hodnot všech výstupů ne‑coinbase tx (approx. „on‑chain volume“, zahrnuje change)
-- Volitelně uloží snapshot mempoolu (`/api/mempool`): `count`, `vsize`, `total_fee`.
-
-Poznámky:
-- Agregace podle času lze udělat přes `--daily`, což po naplnění tabulky `btc_blocks` vytvoří/aktualizuje tabulku `btc_daily` (GROUP BY den UTC).
-- Pro robustnost: retry s exponenciálním backoffem, paralelní zpracování bloků, integrita přes UPSERT.
-
-Odkazy na API (kompatibilní s Esplora):
-- `/api/blocks/tip/height`, `/api/block-height/:height`, `/api/block/:hash`, `/api/block/:hash/txs[/:start_index]`.
-- `/api/mempool` (mempool statistiky).
-"""
 from __future__ import annotations
 
-import asyncio
-import json
-import os
-import sys
+import contextlib
+import logging
+import math
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Iterable, Mapping, Sequence
 
-try:
-    import httpx  # type: ignore
-except Exception:  # pragma: no cover
-    print("Tento skript vyžaduje balíček 'httpx'. Nainstalujte jej: pip install httpx", file=sys.stderr)
-    raise
+import pandas as pd
+import requests
 
-# -----------------------------
-# Konfigurace
-# -----------------------------
+logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 30.0
-MAX_RETRIES = 5
-INITIAL_BACKOFF = 0.5
-MAX_CONCURRENCY = 4
 
-ESPLORA_BASES_DEFAULT = [
-    os.getenv("BTC_ESPLORA_BASE", "").rstrip("/") or "https://mempool.space/api",
-    "https://blockstream.info/api",
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+DEFAULT_TIMEOUT = 15.0
+FIVE_MINUTES = "5min"
+
+HOENICKE_BASE_URL = "https://mempool.jhoenicke.de/api/v1/fees"
+MEMPOOL_SUMMARY_URL = "https://mempool.space/api/mempool"
+MEMPOOL_RECOMMENDED_URL = "https://mempool.space/api/v1/fees/recommended"
+MEMPOOL_HISTOGRAM_URL = "https://mempool.space/api/v1/fees/histogram"
+BLOCKCHAIN_MEMPOOL_COUNT_URL = "https://api.blockchain.info/charts/mempool-count"
+BLOCKCHAIN_MEMPOOL_TOTAL_FEE_URL = "https://api.blockchain.info/charts/mempool-total-fee"
+HASHRATE_URL = "https://api.blockchain.info/charts/hash-rate"
+MINING_DIFFICULTY_URL = "https://api.blockchain.info/charts/difficulty"
+
+COLUMNS = [
+    "onch_fee_fast_satvb",
+    "onch_fee_30m_satvb",
+    "onch_fee_60m_satvb",
+    "onch_fee_min_satvb",
+    "onch_mempool_count",
+    "onch_mempool_vsize_vB",
+    "onch_mempool_total_fee_sat",
+    "onch_fee_wavg_satvb",
+    "onch_fee_p50_satvb",
+    "onch_fee_p90_satvb",
+    "onch_difficulty",
+    "onch_height",
+    "onch_diff_change_pct",
+    "onch_hashrate_ehs",
 ]
 
-# -----------------------------
-# Retry helper
-# -----------------------------
+_INT_COLUMNS = {"onch_height", "onch_mempool_count", "onch_mempool_total_fee_sat"}
 
-async def _with_retries(coro_fn, *, retries=MAX_RETRIES, initial_backoff=INITIAL_BACKOFF, retry_exceptions=(httpx.ReadTimeout, httpx.ConnectError, httpx.HTTPError)):
-    attempt = 0
-    delay = initial_backoff
-    while True:
-        try:
-            return await coro_fn()
-        except retry_exceptions:
-            attempt += 1
-            if attempt > retries:
-                raise
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 8.0)
+__all__ = [
+    "COLUMNS",
+    "fetch_hoenicke_fees",
+    "fetch_blockchain_mempool",
+    "fetch_mining_difficulty",
+    "fetch_hashrate",
+    "fetch_current_snapshot",
+    "backfill_onchain_history",
+]
 
-# -----------------------------
-# Esplora klient
-# -----------------------------
 
-class Esplora:
-    def __init__(self, base_url: str, client: httpx.AsyncClient):
-        self.base = base_url.rstrip("/")
-        self.client = client
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
 
-    async def tip_height(self) -> int:
-        async def call():
-            r = await self.client.get(f"{self.base}/blocks/tip/height", timeout=DEFAULT_TIMEOUT)
-            r.raise_for_status(); return int(r.text)
-        return int(await _with_retries(call))
+def _ensure_timestamp(value: Any) -> pd.Timestamp:
+    """Convert *value* to a timezone-aware UTC timestamp."""
 
-    async def block_hash(self, height: int) -> str:
-        async def call():
-            r = await self.client.get(f"{self.base}/block-height/{height}", timeout=DEFAULT_TIMEOUT)
-            r.raise_for_status(); return r.text.strip()
-        return await _with_retries(call)
+    if isinstance(value, pd.Timestamp):
+        ts = value
+    elif isinstance(value, datetime):
+        ts = pd.Timestamp(value)
+    else:
+        ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(UTC)
+    else:
+        ts = ts.tz_convert(UTC)
+    return ts
 
-    async def block_header(self, block_hash: str) -> Dict[str, Any]:
-        async def call():
-            r = await self.client.get(f"{self.base}/block/{block_hash}", timeout=DEFAULT_TIMEOUT)
-            r.raise_for_status(); return r.json()
-        return await _with_retries(call)
 
-    async def block_txs_page(self, block_hash: str, start_index: int = 0) -> List[Dict[str, Any]]:
-        suffix = f"/txs/{start_index}" if start_index else "/txs"
-        async def call():
-            r = await self.client.get(f"{self.base}/block/{block_hash}{suffix}", timeout=DEFAULT_TIMEOUT)
-            r.raise_for_status(); return r.json()
-        return await _with_retries(call)
+def _parse_timestamp(value: Any) -> pd.Timestamp | None:
+    """Best-effort conversion helper used when parsing API payloads."""
 
-    async def mempool_stats(self) -> Dict[str, Any]:
-        async def call():
-            r = await self.client.get(f"{self.base}/mempool", timeout=DEFAULT_TIMEOUT)
-            r.raise_for_status(); return r.json()
-        return await _with_retries(call)
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return _ensure_timestamp(value)
+    if isinstance(value, datetime):
+        return _ensure_timestamp(pd.Timestamp(value))
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return pd.Timestamp(float(value), unit="s", tz=UTC)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        with contextlib.suppress(ValueError):
+            return pd.Timestamp(text, tz=UTC)
+        with contextlib.suppress(ValueError, TypeError):
+            return pd.Timestamp(float(text), unit="s", tz=UTC)
+    return None
 
-# -----------------------------
-# DB schéma
-# -----------------------------
 
-DDL = """
-PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS btc_blocks (
-  height INTEGER PRIMARY KEY,
-  timestamp_utc TEXT NOT NULL,
-  date_utc TEXT NOT NULL,
-  tx_count INTEGER NOT NULL,
-  fees_sat INTEGER NOT NULL,
-  volume_sat INTEGER NOT NULL,
-  base_url TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_btc_blocks_date ON btc_blocks(date_utc);
+def _maybe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        with contextlib.suppress(ValueError):
+            return float(text)
+    return None
 
-CREATE TABLE IF NOT EXISTS btc_daily (
-  date_utc TEXT PRIMARY KEY,
-  blocks INTEGER NOT NULL,
-  txs INTEGER NOT NULL,
-  fees_sat INTEGER NOT NULL,
-  volume_sat INTEGER NOT NULL
-);
 
-CREATE TABLE IF NOT EXISTS btc_mempool_snapshots (
-  ts_utc TEXT PRIMARY KEY,
-  count INTEGER,
-  vsize INTEGER,
-  total_fee_sat INTEGER,
-  base_url TEXT NOT NULL
-);
-"""
+def _empty_frame(columns: Iterable[str]) -> pd.DataFrame:
+    return pd.DataFrame(columns=list(columns), index=pd.DatetimeIndex([], tz=UTC))
 
-UPSERT_BLOCK = """
-INSERT INTO btc_blocks(height, timestamp_utc, date_utc, tx_count, fees_sat, volume_sat, base_url)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(height) DO UPDATE SET
-  timestamp_utc=excluded.timestamp_utc,
-  date_utc=excluded.date_utc,
-  tx_count=excluded.tx_count,
-  fees_sat=excluded.fees_sat,
-  volume_sat=excluded.volume_sat,
-  base_url=excluded.base_url
-"""
 
-"""
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(height) DO UPDATE SET
-    timestamp_utc=excluded.timestamp_utc, date_utc=excluded.date_utc,
-    tx_count=excluded.tx_count, fees_sat=excluded.fees_sat, volume_sat=excluded.volume_sat,
-    base_url=excluded.base_url"
-)"""
+def _hoenicke_span(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    """Return a timespan token understood by the Hoenicke API."""
 
-UPSERT_DAILY = """
-INSERT INTO btc_daily(date_utc, blocks, txs, fees_sat, volume_sat)
-SELECT date_utc, COUNT(*), SUM(tx_count), SUM(fees_sat), SUM(volume_sat)
-FROM btc_blocks
-WHERE date_utc BETWEEN ? AND ?
-GROUP BY date_utc
-ON CONFLICT(date_utc) DO UPDATE SET
-  blocks=excluded.blocks,
-  txs=excluded.txs,
-  fees_sat=excluded.fees_sat,
-  volume_sat=excluded.volume_sat
-"""
+    duration = end - start
+    spans: list[tuple[str, timedelta]] = [
+        ("3h", timedelta(hours=3)),
+        ("6h", timedelta(hours=6)),
+        ("12h", timedelta(hours=12)),
+        ("24h", timedelta(days=1)),
+        ("3d", timedelta(days=3)),
+        ("1w", timedelta(days=7)),
+        ("1m", timedelta(days=30)),
+        ("3m", timedelta(days=90)),
+        ("1y", timedelta(days=365)),
+    ]
+    for token, delta in spans:
+        if duration <= delta:
+            return token
+    return spans[-1][0]
 
-"""
-    SELECT date_utc, COUNT(*), SUM(tx_count), SUM(fees_sat), SUM(volume_sat) FROM btc_blocks
-    WHERE date_utc BETWEEN ? AND ? GROUP BY date_utc
-    ON CONFLICT(date_utc) DO UPDATE SET
-    blocks=excluded.blocks, txs=excluded.txs, fees_sat=excluded.fees_sat, volume_sat=excluded.volume_sat"
-)
-"""
-INSERT_MEMPOOL = (
-    "INSERT OR REPLACE INTO btc_mempool_snapshots(ts_utc, count, vsize, total_fee_sat, base_url) VALUES (?, ?, ?, ?, ?)"
-)
 
-# -----------------------------
-# Výpočty
-# -----------------------------
+def _call_json(
+    session: Any,
+    url: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Any:
+    try:
+        response = session.get(url, params=params, timeout=timeout)
+    except TypeError:
+        # Some very small mock objects used in tests do not accept ``params``.
+        if params is not None:
+            response = session.get(url, timeout=timeout)
+        else:  # pragma: no cover - defensive fallback
+            raise
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError as exc:  # pragma: no cover - defensive guard
+        raise ValueError(f"Invalid JSON payload from {url}") from exc
 
-def _is_coinbase_tx(tx: Dict[str, Any]) -> bool:
-    vins = tx.get("vin") or []
-    if not vins:
-        return False
-    v0 = vins[0] or {}
-    return bool(v0.get("is_coinbase")) or (v0.get("txid") == "0" * 64)
 
-async def _sum_block(esplora: Esplora, height: int) -> Tuple[int, str, str, int, int, int]:
-    """Vrátí tuple: (height, ts_iso, date_iso, tx_count, fees_sat, volume_sat)"""
-    h = height
-    bh = await esplora.block_hash(h)
-    header = await esplora.block_header(bh)
-    ts = int(header.get("timestamp") or 0)
-    ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-    date_iso = ts_iso[:10]
-    tx_count = int(header.get("tx_count") or 0)
+def _iterate_series(payload: Any) -> Iterable[Any]:
+    if payload is None:
+        return []
+    if isinstance(payload, Mapping):
+        for key in ("data", "values", "series", "entries", "points"):
+            inner = payload.get(key)
+            if isinstance(inner, Sequence):
+                return inner
+            if isinstance(inner, Mapping):
+                for sub_key in ("data", "values", "series"):
+                    nested = inner.get(sub_key)
+                    if isinstance(nested, Sequence):
+                        return nested
+    if isinstance(payload, Sequence) and not isinstance(payload, (bytes, str)):
+        return payload
+    return []
 
-    fees = 0
-    volume = 0
-    fetched = 0
-    start = 0
-    while True:
-        page = await esplora.block_txs_page(bh, start)
-        if not page:
-            break
-        for tx in page:
-            if _is_coinbase_tx(tx):
-                continue
-            fees += int(tx.get("fee") or 0)
-            # suma všech výstupů tx
-            for v in tx.get("vout") or []:
-                volume += int(v.get("value") or 0)
-            fetched += 1
-        start += len(page)
-        if len(page) < 25:  # poslední stránka
-            break
-    # fallback: pokud se tx nepodařilo stáhnout všechno, stále uložíme hlavičku
-    return h, ts_iso, date_iso, tx_count, fees, volume
 
-# -----------------------------
-# Orchestrace
-# -----------------------------
+def _extract_point(item: Any) -> tuple[pd.Timestamp | None, float | None]:
+    if isinstance(item, Mapping):
+        ts_raw = (
+            item.get("time")
+            or item.get("timestamp")
+            or item.get("ts")
+            or item.get("x")
+            or item.get("t")
+        )
+        value_raw = (
+            item.get("value")
+            or item.get("y")
+            or item.get("hashrate")
+            or item.get("difficulty")
+            or item.get("count")
+            or item.get("total_fee")
+            or item.get("vsize")
+        )
+    elif isinstance(item, Sequence) and not isinstance(item, (bytes, str)):
+        ts_raw = item[0] if len(item) > 0 else None
+        value_raw = item[1] if len(item) > 1 else None
+    else:
+        return None, None
+    ts = _parse_timestamp(ts_raw)
+    value = _maybe_float(value_raw)
+    return ts, value
 
-async def run_aggregates(bases: List[str], *, from_height: Optional[int], to_height: Optional[int], last_blocks: Optional[int], db_path: Path, daily: bool, take_mempool: bool, concurrency: int) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.executescript(DDL)
-    conn.commit()
 
-    async with httpx.AsyncClient(headers={"User-Agent": "btc-aggregates/1.0"}) as client:
-        esplora = Esplora(bases[0], client)  # primární zdroj
-        # Rozsah bloků
-        if last_blocks and not (from_height or to_height):
-            tip = await esplora.tip_height()
-            from_h = max(0, tip - last_blocks + 1)
-            to_h = tip
+def _normalise_histogram(hist: Any) -> list[tuple[float, float]]:
+    if hist is None:
+        return []
+    items: Iterable[Any]
+    if isinstance(hist, Mapping):
+        bins = hist.get("bins")
+        counts = hist.get("counts")
+        if isinstance(bins, Sequence) and isinstance(counts, Sequence):
+            return [
+                (float(b), float(c))
+                for b, c in zip(bins, counts, strict=False)
+                if _maybe_float(b) is not None and _maybe_float(c) is not None
+            ]
+        items = hist.values()
+    else:
+        items = hist
+    result: list[tuple[float, float]] = []
+    for item in items:
+        if isinstance(item, Mapping):
+            rate = _maybe_float(
+                item.get("fee")
+                or item.get("fee_rate")
+                or item.get("feerate")
+                or item.get("avgFeeRate")
+                or item.get("sat_per_vb")
+                or item.get("sat/vB")
+            )
+            size = _maybe_float(
+                item.get("vsize") or item.get("size") or item.get("count") or item.get("weight")
+            )
+        elif isinstance(item, Sequence) and not isinstance(item, (bytes, str)):
+            rate = _maybe_float(item[0] if len(item) > 0 else None)
+            size = _maybe_float(item[1] if len(item) > 1 else None)
         else:
-            # doplň z tip height, pokud chybí jedna hrana
-            tip = await esplora.tip_height()
-            from_h = from_height if from_height is not None else max(0, (to_height or tip) - 2015)
-            to_h = to_height if to_height is not None else tip
-        if from_h > to_h:
-            from_h, to_h = to_h, from_h
+            continue
+        if rate is None or size is None or size <= 0:
+            continue
+        result.append((rate, size))
+    return result
 
-        sem = asyncio.Semaphore(concurrency)
-        lock = asyncio.Lock()
 
-        async def process(h: int):
-            async with sem:
-                try:
-                    height, ts_iso, date_iso, txc, fees, vol = await _sum_block(esplora, h)
-                except Exception as e:
-                    # selhalo — uložíme jen hlavičku (bez fees/volume)
-                    bh = await esplora.block_hash(h)
-                    header = await esplora.block_header(bh)
-                    ts = int(header.get("timestamp") or 0)
-                    ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-                    date_iso = ts_iso[:10]
-                    txc = int(header.get("tx_count") or 0)
-                    fees = 0
-                    vol = 0
-                async with lock:
-                    conn.execute(UPSERT_BLOCK, (height, ts_iso, date_iso, txc, fees, vol, bases[0]))
+def _weighted_avg(hist: Any) -> float | None:
+    pairs = _normalise_histogram(hist)
+    if not pairs:
+        return None
+    total = sum(weight for _, weight in pairs)
+    if total <= 0:
+        return None
+    return sum(rate * weight for rate, weight in pairs) / total
 
-        await asyncio.gather(*(process(h) for h in range(from_h, to_h + 1)))
 
-        if daily:
-            d0 = datetime.fromtimestamp(0, tz=timezone.utc).date().isoformat()
-            d1 = datetime.now(tz=timezone.utc).date().isoformat()
-            conn.execute(UPSERT_DAILY, (d0, d1))
+def _percentile(hist: Any, q: float) -> float | None:
+    if not 0 <= q <= 1:
+        raise ValueError("quantile must be within [0, 1]")
+    pairs = sorted(_normalise_histogram(hist), key=lambda item: item[0])
+    if not pairs:
+        return None
+    total = sum(weight for _, weight in pairs)
+    if total <= 0:
+        return None
+    cutoff = total * q
+    cumulative = 0.0
+    for rate, weight in pairs:
+        cumulative += weight
+        if cumulative >= cutoff:
+            return rate
+    return pairs[-1][0]
 
-        if take_mempool:
-            try:
-                m = await esplora.mempool_stats()
-                ts_iso = datetime.now(tz=timezone.utc).isoformat()
-                conn.execute(INSERT_MEMPOOL, (ts_iso, int(m.get("count") or 0), int(m.get("vsize") or 0), int(m.get("total_fee") or 0), bases[0]))
-            except Exception:
-                pass
 
-    conn.commit(); conn.close()
+def _build_index(start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeIndex:
+    floor = start.floor(FIVE_MINUTES)
+    ceil = end.ceil(FIVE_MINUTES)
+    if ceil < floor:
+        ceil = floor
+    return pd.date_range(floor, ceil, freq=FIVE_MINUTES, tz=UTC)
 
-# -----------------------------
-# CLI
-# -----------------------------
 
-def cli(argv: List[str]) -> int:
+def _chart_params(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, Any]:
+    duration = max(1, int((end - start).total_seconds()))
+    days = max(1, math.ceil(duration / 86_400))
+    return {
+        "start": int(start.timestamp()),
+        "timespan": f"{days}days",
+        "sampled": "false",
+        "format": "json",
+    }
+
+
+def _rows_from_dataframe(df: pd.DataFrame) -> Iterable[list[Any]]:
+    for ts, row in df.iterrows():
+        timestamp = int(ts.timestamp())
+        values: list[Any] = [timestamp]
+        for column in COLUMNS:
+            value = row.get(column)
+            if pd.isna(value):
+                values.append(None)
+                continue
+            if column in _INT_COLUMNS:
+                with contextlib.suppress(TypeError, ValueError):
+                    values.append(int(round(float(value))))
+                    continue
+            values.append(float(value))
+        yield values
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS onchain_5m (
+            ts_utc INTEGER PRIMARY KEY,
+            onch_fee_fast_satvb REAL,
+            onch_fee_30m_satvb REAL,
+            onch_fee_60m_satvb REAL,
+            onch_fee_min_satvb REAL,
+            onch_mempool_count REAL,
+            onch_mempool_vsize_vB REAL,
+            onch_mempool_total_fee_sat REAL,
+            onch_fee_wavg_satvb REAL,
+            onch_fee_p50_satvb REAL,
+            onch_fee_p90_satvb REAL,
+            onch_difficulty REAL,
+            onch_height REAL,
+            onch_diff_change_pct REAL,
+            onch_hashrate_ehs REAL
+        )
+        """
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fetch helpers
+# ---------------------------------------------------------------------------
+
+def fetch_hoenicke_fees(
+    start: pd.Timestamp | str | datetime,
+    end: pd.Timestamp | str | datetime,
+    session: Any,
+) -> pd.DataFrame:
+    """Fetch fee histogram aggregates from Jochen Hoenicke's API."""
+
+    start_ts = _ensure_timestamp(start)
+    end_ts = _ensure_timestamp(end)
+    params = {"from": int(start_ts.timestamp()), "to": int(end_ts.timestamp())}
+    span = _hoenicke_span(start_ts, end_ts)
+    columns = [
+        "onch_fee_wavg_satvb",
+        "onch_fee_p50_satvb",
+        "onch_fee_p90_satvb",
+        "onch_mempool_vsize_vB",
+    ]
+    try:
+        payload = _call_json(session, f"{HOENICKE_BASE_URL}/{span}", params=params)
+    except Exception:  # pragma: no cover - network issues are expected sometimes
+        logger.debug("Hoenicke request failed", exc_info=True)
+        return _empty_frame(columns)
+
+    records: list[tuple[pd.Timestamp, dict[str, float | None]]] = []
+    for item in _iterate_series(payload):
+        hist: Any | None = None
+        if isinstance(item, Mapping):
+            ts = item.get("time") or item.get("timestamp") or item.get("ts")
+            wavg = item.get("weighted_fee") or item.get("avg") or item.get("mean") or item.get("wavg")
+            p50 = item.get("median") or item.get("p50")
+            p90 = item.get("p90") or item.get("percentile90") or item.get("p95")
+            vsize = item.get("vsize") or item.get("size") or item.get("total_vsize")
+            hist = item.get("histogram") or item.get("fee_histogram") or item.get("buckets")
+        elif isinstance(item, Sequence) and not isinstance(item, (bytes, str)):
+            ts = item[0] if len(item) > 0 else None
+            wavg = item[1] if len(item) > 1 else None
+            p50 = item[2] if len(item) > 2 else None
+            p90 = item[3] if len(item) > 3 else None
+            vsize = item[4] if len(item) > 4 else None
+        else:
+            continue
+        ts_parsed = _parse_timestamp(ts)
+        if ts_parsed is None or ts_parsed < start_ts or ts_parsed > end_ts:
+            continue
+        record = {
+            "onch_fee_wavg_satvb": _maybe_float(wavg),
+            "onch_fee_p50_satvb": _maybe_float(p50),
+            "onch_fee_p90_satvb": _maybe_float(p90),
+            "onch_mempool_vsize_vB": _maybe_float(vsize),
+        }
+        if hist:
+            record["onch_fee_wavg_satvb"] = record["onch_fee_wavg_satvb"] or _weighted_avg(hist)
+            record["onch_fee_p50_satvb"] = record["onch_fee_p50_satvb"] or _percentile(hist, 0.5)
+            record["onch_fee_p90_satvb"] = record["onch_fee_p90_satvb"] or _percentile(hist, 0.9)
+        records.append((ts_parsed, record))
+
+    if not records:
+        return _empty_frame(columns)
+
+    idx = pd.DatetimeIndex([ts for ts, _ in records], tz=UTC)
+    df = pd.DataFrame([rec for _, rec in records], index=idx)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df
+
+
+def _fetch_blockchain_chart(
+    session: Any,
+    url: str,
+    column: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> dict[pd.Timestamp, dict[str, float]]:
+    try:
+        payload = _call_json(session, url, params=_chart_params(start, end))
+    except Exception:  # pragma: no cover - network
+        logger.debug("Blockchain chart request failed", exc_info=True)
+        return {}
+
+    rows: dict[pd.Timestamp, dict[str, float]] = {}
+    for item in _iterate_series(payload):
+        ts, value = _extract_point(item)
+        if ts is None or value is None:
+            continue
+        if ts < start or ts > end:
+            continue
+        rows.setdefault(ts, {})[column] = value
+    return rows
+
+
+def _fetch_recommended_fees(session: Any) -> dict[str, float | None]:
+    try:
+        payload = _call_json(session, MEMPOOL_RECOMMENDED_URL)
+    except Exception:  # pragma: no cover - network
+        logger.debug("Recommended fee request failed", exc_info=True)
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    return {
+        "onch_fee_fast_satvb": _maybe_float(payload.get("fastestFee")),
+        "onch_fee_30m_satvb": _maybe_float(payload.get("halfHourFee")),
+        "onch_fee_60m_satvb": _maybe_float(payload.get("hourFee")),
+        "onch_fee_min_satvb": _maybe_float(payload.get("minimumFee") or payload.get("economyFee")),
+    }
+
+
+def _fetch_mempool_snapshot(session: Any) -> dict[str, float | None]:
+    data: dict[str, float | None] = {}
+    try:
+        summary = _call_json(session, MEMPOOL_SUMMARY_URL)
+        if isinstance(summary, Mapping):
+            data["onch_mempool_count"] = _maybe_float(summary.get("count"))
+            data["onch_mempool_vsize_vB"] = _maybe_float(summary.get("vsize"))
+            data["onch_mempool_total_fee_sat"] = _maybe_float(summary.get("total_fee"))
+    except Exception:  # pragma: no cover - network
+        logger.debug("Mempool summary request failed", exc_info=True)
+
+    try:
+        hist_payload = _call_json(session, MEMPOOL_HISTOGRAM_URL)
+        if hist_payload:
+            data.setdefault("onch_fee_wavg_satvb", _weighted_avg(hist_payload))
+            data.setdefault("onch_fee_p50_satvb", _percentile(hist_payload, 0.5))
+            data.setdefault("onch_fee_p90_satvb", _percentile(hist_payload, 0.9))
+    except Exception:  # pragma: no cover - network
+        logger.debug("Histogram request failed", exc_info=True)
+
+    data.update({k: v for k, v in _fetch_recommended_fees(session).items() if v is not None})
+    return data
+
+
+def fetch_blockchain_mempool(
+    start: pd.Timestamp | str | datetime,
+    end: pd.Timestamp | str | datetime,
+    session: Any,
+) -> pd.DataFrame:
+    """Fetch mempool statistics from blockchain.info and mempool.space."""
+
+    start_ts = _ensure_timestamp(start)
+    end_ts = _ensure_timestamp(end)
+    combined: defaultdict[pd.Timestamp, dict[str, float | None]] = defaultdict(dict)
+
+    for ts, row in _fetch_blockchain_chart(
+        session, BLOCKCHAIN_MEMPOOL_COUNT_URL, "onch_mempool_count", start_ts, end_ts
+    ).items():
+        combined[ts].update(row)
+
+    for ts, row in _fetch_blockchain_chart(
+        session, BLOCKCHAIN_MEMPOOL_TOTAL_FEE_URL, "onch_mempool_total_fee_sat", start_ts, end_ts
+    ).items():
+        combined[ts].update(row)
+
+    if not combined:
+        return _empty_frame(
+            [
+                "onch_fee_fast_satvb",
+                "onch_fee_30m_satvb",
+                "onch_fee_60m_satvb",
+                "onch_fee_min_satvb",
+                "onch_mempool_count",
+                "onch_mempool_vsize_vB",
+                "onch_mempool_total_fee_sat",
+            ]
+        )
+
+    snapshot = _fetch_mempool_snapshot(session)
+    if snapshot:
+        combined[end_ts.floor(FIVE_MINUTES)].update(snapshot)
+
+    idx = pd.DatetimeIndex(sorted(combined), tz=UTC)
+    df = pd.DataFrame([combined[ts] for ts in idx], index=idx)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df
+
+
+def fetch_mining_difficulty(
+    start: pd.Timestamp | str | datetime,
+    end: pd.Timestamp | str | datetime,
+    session: Any,
+) -> pd.DataFrame:
+    """Fetch mining difficulty and estimated next adjustment."""
+
+    start_ts = _ensure_timestamp(start)
+    end_ts = _ensure_timestamp(end)
+    try:
+        payload = _call_json(session, MINING_DIFFICULTY_URL, params=_chart_params(start_ts, end_ts))
+    except Exception:  # pragma: no cover - network
+        logger.debug("Difficulty request failed", exc_info=True)
+        return _empty_frame(["onch_difficulty", "onch_height", "onch_diff_change_pct"])
+
+    records: list[tuple[pd.Timestamp, dict[str, float | None]]] = []
+    for item in _iterate_series(payload):
+        if isinstance(item, Mapping):
+            ts = item.get("time") or item.get("timestamp") or item.get("x")
+            height = item.get("height")
+            diff = item.get("difficulty") or item.get("y") or item.get("value")
+            next_diff = item.get("next_difficulty") or item.get("nextDiff") or item.get("estimated_next")
+            change_pct = item.get("change") or item.get("diff_change_pct")
+        elif isinstance(item, Sequence) and not isinstance(item, (bytes, str)):
+            ts = item[0] if len(item) > 0 else None
+            height = item[1] if len(item) > 1 else None
+            diff = item[2] if len(item) > 2 else None
+            next_diff = item[3] if len(item) > 3 else None
+            change_pct = item[4] if len(item) > 4 else None
+        else:
+            continue
+        ts_parsed = _parse_timestamp(ts)
+        if ts_parsed is None or ts_parsed < start_ts or ts_parsed > end_ts:
+            continue
+        diff_val = _maybe_float(diff)
+        change_val = _maybe_float(change_pct)
+        next_val = _maybe_float(next_diff)
+        if change_val is None and diff_val is not None and next_val is not None:
+            change_val = (next_val - diff_val) * 100.0
+        record = {
+            "onch_difficulty": diff_val,
+            "onch_height": _maybe_float(height),
+            "onch_diff_change_pct": change_val,
+        }
+        records.append((ts_parsed, record))
+
+    if not records:
+        return _empty_frame(["onch_difficulty", "onch_height", "onch_diff_change_pct"])
+
+    idx = pd.DatetimeIndex([ts for ts, _ in records], tz=UTC)
+    df = pd.DataFrame([rec for _, rec in records], index=idx)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+
+    if "onch_diff_change_pct" in df.columns:
+        values = df["onch_diff_change_pct"].to_numpy(copy=True)
+        for i in range(1, len(values)):
+            if pd.isna(values[i]) and not pd.isna(values[i - 1]) and not pd.isna(df.iloc[i]["onch_difficulty"]):
+                prev = df.iloc[i - 1]["onch_difficulty"]
+                curr = df.iloc[i]["onch_difficulty"]
+                if prev not in (None, 0):
+                    values[i] = (curr - prev) / prev * 100.0
+        df["onch_diff_change_pct"] = values
+
+    return df
+
+
+def fetch_hashrate(
+    start: pd.Timestamp | str | datetime,
+    end: pd.Timestamp | str | datetime,
+    session: Any,
+) -> pd.DataFrame:
+    """Fetch hashrate (EH/s) time series."""
+
+    start_ts = _ensure_timestamp(start)
+    end_ts = _ensure_timestamp(end)
+    try:
+        payload = _call_json(session, HASHRATE_URL, params=_chart_params(start_ts, end_ts))
+    except Exception:  # pragma: no cover - network
+        logger.debug("Hashrate request failed", exc_info=True)
+        payload = None
+
+    source: Any = payload
+    if isinstance(source, Mapping):
+        source = source.get("hashrate") or source.get("data") or source
+
+    rows: list[tuple[pd.Timestamp, float]] = []
+    for item in _iterate_series(source):
+        ts, value = _extract_point(item)
+        if ts is None or value is None:
+            continue
+        if ts < start_ts or ts > end_ts:
+            continue
+        rows.append((ts, value))
+
+    if not rows:
+        return _empty_frame(["onch_hashrate_ehs"])
+
+    idx = pd.DatetimeIndex([ts for ts, _ in rows], tz=UTC)
+    df = pd.DataFrame({"onch_hashrate_ehs": [val for _, val in rows]}, index=idx)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df
+
+
+def fetch_current_snapshot(
+    timestamp: pd.Timestamp | str | datetime,
+    session: Any,
+) -> pd.DataFrame:
+    """Return the latest mempool snapshot aligned to the five-minute grid."""
+
+    ts = _ensure_timestamp(timestamp).floor(FIVE_MINUTES)
+    data = _fetch_mempool_snapshot(session)
+    if not data:
+        return _empty_frame(COLUMNS)
+    idx = pd.DatetimeIndex([ts], tz=UTC)
+    df = pd.DataFrame([data], index=idx)
+    df = df.reindex(columns=COLUMNS)
+    return df.dropna(how="all", axis=1)
+
+
+# ---------------------------------------------------------------------------
+# Backfill orchestrator
+# ---------------------------------------------------------------------------
+
+def _combine_frames(frames: list[pd.DataFrame], index: pd.DatetimeIndex) -> pd.DataFrame:
+    if not frames:
+        df = pd.DataFrame(index=index, columns=COLUMNS)
+        return df
+    df = pd.concat(frames, axis=1, join="outer") if frames else pd.DataFrame(index=index)
+    df = df.sort_index()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, utc=True)
+    else:
+        if df.index.tz is None:
+            df.index = df.index.tz_localize(UTC)
+        else:
+            df.index = df.index.tz_convert(UTC)
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.reindex(index)
+    df = df.reindex(columns=COLUMNS)
+    return df
+
+
+def _write_dataframe(db_path: Path, df: pd.DataFrame) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        _ensure_schema(conn)
+        rows = list(_rows_from_dataframe(df))
+        if not rows:
+            return
+        placeholders = ",".join(["?"] * (1 + len(COLUMNS)))
+        conn.executemany(
+            f"INSERT OR REPLACE INTO onchain_5m (ts_utc,{','.join(COLUMNS)}) VALUES ({placeholders})",
+            rows,
+        )
+        conn.commit()
+
+
+def backfill_onchain_history(
+    start: pd.Timestamp | str | datetime,
+    end: pd.Timestamp | str | datetime,
+    db_path: str | Path,
+    *,
+    session: requests.Session | None = None,
+) -> None:
+    """Backfill the ``onchain_5m`` table for the requested time range."""
+
+    start_ts = _ensure_timestamp(start)
+    end_ts = _ensure_timestamp(end)
+    if start_ts > end_ts:
+        raise ValueError("start must be before end")
+
+    index = _build_index(start_ts, end_ts)
+    own_session = False
+    if session is None:
+        session = requests.Session()
+        own_session = True
+
+    frames: list[pd.DataFrame] = []
+    try:
+        for fetcher in (
+            fetch_hoenicke_fees,
+            fetch_blockchain_mempool,
+            fetch_mining_difficulty,
+            fetch_hashrate,
+        ):
+            df = fetcher(start_ts, end_ts, session)
+            if df is not None and not df.empty:
+                frames.append(df)
+
+        snapshot = fetch_current_snapshot(end_ts, session)
+        if snapshot is not None and not snapshot.empty:
+            frames.append(snapshot)
+
+        combined = _combine_frames(frames, index)
+        combined.index.name = "ts"
+        _write_dataframe(Path(db_path), combined)
+    finally:
+        if own_session:
+            session.close()
+
+
+# ---------------------------------------------------------------------------
+# Command line interface
+# ---------------------------------------------------------------------------
+
+def cli(argv: Sequence[str] | None = None) -> int:
     import argparse
-    p = argparse.ArgumentParser(description="BTC síťové agregáty z Esplora (mempool.space / blockstream.info)")
-    p.add_argument("--db", required=True, help="Cesta k SQLite DB")
-    p.add_argument("--from-height", type=int)
-    p.add_argument("--to-height", type=int)
-    p.add_argument("--last-blocks", type=int, help="Alternativa: posledních N bloků")
-    p.add_argument("--daily", action="store_true", help="Vypočti/aktualizuj denní agregace")
-    p.add_argument("--mempool", action="store_true", help="Ulož aktuální snapshot mempoolu")
-    p.add_argument("--esplora-base", help="Preferované base URL, jinak mempool.space a blockstream.info")
-    p.add_argument("--concurrency", type=int, default=MAX_CONCURRENCY)
 
-    a = p.parse_args(argv)
+    parser = argparse.ArgumentParser(description="Backfill five-minute on-chain metrics")
+    parser.add_argument("--start", required=True, help="Start timestamp (UTC)")
+    parser.add_argument("--end", required=True, help="End timestamp (UTC)")
+    parser.add_argument("--db", required=True, help="Path to SQLite database")
+    args = parser.parse_args(argv)
 
-    bases = [b.strip().rstrip("/") for b in (a.esplora_base.split(",") if a.esplora_base else ESPLORA_BASES_DEFAULT) if b.strip()]
-
-    asyncio.run(run_aggregates(bases, from_height=a.from_height, to_height=a.to_height, last_blocks=a.last_blocks, db_path=Path(a.db), daily=a.daily, take_mempool=a.mempool, concurrency=a.concurrency))
+    backfill_onchain_history(args.start, args.end, Path(args.db))
     return 0
 
-if __name__ == "__main__":
+
+if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        sys.exit(cli(sys.argv[1:]))
+        raise SystemExit(cli())
     except KeyboardInterrupt:
-        print("Přerušeno uživatelem.", file=sys.stderr); sys.exit(130)
-    except Exception as e:
-        print(f"Chyba: {e}", file=sys.stderr); sys.exit(1)
+        raise SystemExit(130)
+
