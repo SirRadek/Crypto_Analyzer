@@ -42,27 +42,30 @@ BLOCKCHAIN_MEMPOOL_TOTAL_FEE_URL = "https://api.blockchain.info/charts/mempool-t
 HASHRATE_URL = "https://api.blockchain.info/charts/hash-rate"
 MINING_DIFFICULTY_URL = "https://api.blockchain.info/charts/difficulty"
 
-COLUMNS = [
-    "onch_fee_fast_satvb",
-    "onch_fee_30m_satvb",
-    "onch_fee_60m_satvb",
-    "onch_fee_min_satvb",
-    "onch_mempool_count",
-    "onch_mempool_vsize_vB",
-    "onch_mempool_total_fee_sat",
-    "onch_fee_wavg_satvb",
-    "onch_fee_p50_satvb",
-    "onch_fee_p90_satvb",
-    "onch_difficulty",
-    "onch_height",
-    "onch_diff_change_pct",
-    "onch_hashrate_ehs",
+COLUMN_DEFINITIONS: list[tuple[str, str]] = [
+    ("onch_fee_fast_satvb", "REAL"),
+    ("onch_fee_30m_satvb", "REAL"),
+    ("onch_fee_60m_satvb", "REAL"),
+    ("onch_fee_min_satvb", "REAL"),
+    ("onch_mempool_count", "REAL"),
+    ("onch_mempool_vsize_vB", "REAL"),
+    ("onch_mempool_total_fee_sat", "REAL"),
+    ("onch_fee_wavg_satvb", "REAL"),
+    ("onch_fee_p50_satvb", "REAL"),
+    ("onch_fee_p90_satvb", "REAL"),
+    ("onch_difficulty", "REAL"),
+    ("onch_height", "REAL"),
+    ("onch_diff_change_pct", "REAL"),
+    ("onch_hashrate_ehs", "REAL"),
 ]
+
+COLUMNS = [name for name, _ in COLUMN_DEFINITIONS]
 
 _INT_COLUMNS = {"onch_height", "onch_mempool_count", "onch_mempool_total_fee_sat"}
 
 __all__ = [
     "COLUMNS",
+    "ensure_onchain_schema",
     "fetch_hoenicke_fees",
     "fetch_blockchain_mempool",
     "fetch_mining_difficulty",
@@ -330,29 +333,26 @@ def _rows_from_dataframe(df: pd.DataFrame) -> Iterable[list[Any]]:
         yield values
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
+def ensure_onchain_schema(conn: sqlite3.Connection) -> None:
+    """Ensure the SQLite schema for ``onchain_5m`` is up to date."""
+
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS onchain_5m (
-            ts_utc INTEGER PRIMARY KEY,
-            onch_fee_fast_satvb REAL,
-            onch_fee_30m_satvb REAL,
-            onch_fee_60m_satvb REAL,
-            onch_fee_min_satvb REAL,
-            onch_mempool_count REAL,
-            onch_mempool_vsize_vB REAL,
-            onch_mempool_total_fee_sat REAL,
-            onch_fee_wavg_satvb REAL,
-            onch_fee_p50_satvb REAL,
-            onch_fee_p90_satvb REAL,
-            onch_difficulty REAL,
-            onch_height REAL,
-            onch_diff_change_pct REAL,
-            onch_hashrate_ehs REAL
-        )
-        """
-    )
+    conn.execute("CREATE TABLE IF NOT EXISTS onchain_5m (ts_utc INTEGER PRIMARY KEY)")
+
+    existing_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(onchain_5m)")
+    }
+    for column, column_type in COLUMN_DEFINITIONS:
+        if column not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE onchain_5m ADD COLUMN {column} {column_type}"
+            )
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_onchain_ts ON onchain_5m(ts_utc)")
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    ensure_onchain_schema(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -698,7 +698,7 @@ def _combine_frames(frames: list[pd.DataFrame], index: pd.DatetimeIndex) -> pd.D
 def _write_dataframe(db_path: Path, df: pd.DataFrame) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
-        _ensure_schema(conn)
+        ensure_onchain_schema(conn)
         rows = list(_rows_from_dataframe(df))
         if not rows:
             return

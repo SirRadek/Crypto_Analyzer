@@ -68,3 +68,26 @@ def test_backfill_onchain_history(tmp_path, monkeypatch):
     assert list(df["ts_utc"]) == [1609459200, 1609459500, 1609459800, 1609460100]
     assert df["onch_fee_fast_satvb"].isna().iloc[:2].all()
     assert df.loc[0, "onch_fee_wavg_satvb"] == 1.0
+
+
+def test_ensure_schema_adds_missing_columns(tmp_path):
+    db_path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE onchain_5m (
+            ts_utc INTEGER PRIMARY KEY,
+            onch_fee_fast_satvb REAL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with sqlite3.connect(db_path) as conn2:
+        mod.ensure_onchain_schema(conn2)
+        columns = {row[1] for row in conn2.execute("PRAGMA table_info(onchain_5m)")}
+        indexes = {row[1] for row in conn2.execute("PRAGMA index_list(onchain_5m)")}
+
+    assert set(mod.COLUMNS).issubset(columns)
+    assert "ix_onchain_ts" in indexes
