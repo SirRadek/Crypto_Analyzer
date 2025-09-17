@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from contextlib import suppress
 import logging
-import os
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,10 +15,16 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(name if name else __name__)
 
 
-def ensure_dir_exists(path: str | os.PathLike[str]) -> None:
-    """Create directory *path* if it does not exist."""
-    if not os.path.exists(path):
-        os.makedirs(path)
+def ensure_dir_exists(path: str | Path) -> Path:
+    """Create *path* (and parents) when it is missing.
+
+    Returning the :class:`pathlib.Path` instance makes it easy to reuse the
+    resolved path by callers without converting it repeatedly.
+    """
+
+    resolved = Path(path)
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def set_cpu_limit(cores: int) -> None:
@@ -33,11 +40,9 @@ def set_cpu_limit(cores: int) -> None:
     Falls back silently if ``psutil`` or CPU affinity is unavailable.
     """
 
-    try:
+    with suppress(Exception):
         import psutil
 
         cores = max(1, int(cores))
         proc = psutil.Process()
         proc.cpu_affinity(list(range(cores)))
-    except Exception:
-        pass
