@@ -45,24 +45,8 @@ def test_xgb_train_smoke(monkeypatch, tmp_path):
         }
         return params, 5
 
-    def small_bound():
-        params = {
-            "max_depth": 2,
-            "eta": 0.1,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "tree_method": "hist",
-            "objective": "reg:squarederror",
-            "eval_metric": "rmse",
-            "nthread": 1,
-            "seed": 42,
-        }
-        return params, 5
-
     monkeypatch.setattr(xgb_price, "build_reg", small_reg)
-    monkeypatch.setattr(xgb_price, "build_bound", small_bound)
     monkeypatch.setattr(tp, "build_reg", small_reg)
-    monkeypatch.setattr(tp, "build_bound", small_bound)
 
     config = TrainConfig(
         horizon_min=120,
@@ -76,5 +60,5 @@ def test_xgb_train_smoke(monkeypatch, tmp_path):
     )
 
     metrics, preds = tp.train_price(df, config, outdir=tmp_path)
-    assert ((preds["p_hat"] >= preds["p_low"]) & (preds["p_hat"] <= preds["p_high"])).all()
+    assert preds["p_hat"].notna().all()
     assert "rmse" in metrics

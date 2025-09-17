@@ -1,10 +1,9 @@
 import sqlite3
 import time
 from collections import deque
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from glob import glob
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -46,7 +45,6 @@ FORWARD_STEPS = 1
 PREDICT_HOURS = 2
 # Features available when rolling forward without full re-computation
 FEATURE_COLS = ["return_1d", "sma_7", "sma_14", "ema_7", "ema_14", "rsi_14"]
-PRAGUE_TZ = ZoneInfo("Europe/Prague")
 INTERVAL_TO_MIN = {
     "1m": 1,
     "3m": 3,
@@ -58,14 +56,7 @@ INTERVAL_TO_MIN = {
     "4h": 240,
     "1d": 1440,
 }
-FEATURES_VERSION_FWD = "wf5yD1_future"
 REPEAT_COUNT = CONFIG.repeat_count
-
-
-def _created_at_iso():
-    return datetime.now(UTC).isoformat()
-
-
 def _ensure_indexes(table_name: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -248,23 +239,12 @@ def _predict_forward_steps(model_paths, state, steps, usage_path="ml/model_usage
         new_close = float(
             predict_weighted_prices(feats_df, FEATURE_COLS, model_paths, usage_path=usage_path)[0]
         )
-        pred_local = pd.Timestamp(pred_time, tz="UTC").tz_convert(PRAGUE_TZ)
-        target_local = pd.Timestamp(target_time, tz="UTC").tz_convert(PRAGUE_TZ)
         rows.append(
             (
                 SYMBOL,
                 INTERVAL,
-                FORWARD_STEPS,
-                int(pd.Timestamp(pred_time).value // 1_000_000),
                 int(pd.Timestamp(target_time).value // 1_000_000),
-                pred_local.strftime("%Y-%m-%d %H:%M:%S"),
-                target_local.strftime("%Y-%m-%d %H:%M:%S"),
                 new_close,
-                None,
-                None,
-                "RandomForestRegressor",
-                FEATURES_VERSION_FWD,
-                _created_at_iso(),
             )
         )
         _update_state_with_pred(state, new_close)

@@ -17,8 +17,7 @@ def run_backtest(df: pd.DataFrame, fee: float = 0.0004) -> BacktestResult:
     Parameters
     ----------
     df : DataFrame
-        Must contain columns ``timestamp``, ``p_hat``, ``p_low``, ``p_high``,
-        ``target`` and ``last_price``.
+        Must contain columns ``timestamp``, ``p_hat``, ``target`` and ``last_price``.
     fee : float, optional
         Proportional transaction cost per trade.
     """

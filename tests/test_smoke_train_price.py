@@ -44,24 +44,8 @@ def test_smoke_train_price(monkeypatch, tmp_path):
         }
         return params, 10
 
-    def small_bound():
-        params = {
-            "max_depth": 3,
-            "eta": 0.1,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "tree_method": "hist",
-            "objective": "reg:squarederror",
-            "eval_metric": "rmse",
-            "nthread": 1,
-            "seed": 42,
-        }
-        return params, 10
-
     monkeypatch.setattr(xgb_price, "build_reg", small_reg)
-    monkeypatch.setattr(xgb_price, "build_bound", small_bound)
     monkeypatch.setattr(tp, "build_reg", small_reg)
-    monkeypatch.setattr(tp, "build_bound", small_bound)
 
     def small_folds(n_samples, embargo=24):
         return time_cv.time_folds(n_samples, n_splits=2, embargo=embargo)
@@ -69,4 +53,5 @@ def test_smoke_train_price(monkeypatch, tmp_path):
     monkeypatch.setattr(tp, "time_folds", small_folds)
 
     _, preds = tp.train_price(df, FEATURE_COLUMNS, outdir=tmp_path)
-    assert ((preds["p_hat"] >= preds["p_low"]) & (preds["p_hat"] <= preds["p_high"])).all()
+    assert {"timestamp", "p_hat", "target", "last_price"} <= set(preds.columns)
+    assert preds["p_hat"].notna().all()
