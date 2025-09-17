@@ -15,7 +15,7 @@ from db.db_connector import get_price_data
 from db.predictions_store import create_predictions_table, save_predictions
 from ml.model_utils import match_model_features
 from ml.train import load_model, train_model
-from ml.xgb_price import clip_inside, to_price
+from ml.xgb_price import to_price
 from utils.config import CONFIG
 from utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
 from utils.progress import p, step, timed
@@ -346,8 +346,8 @@ def run_pipeline(
 
 def predict_price(
     model_dir: str = "models/xgb_price", target_kind: str = "log"
-) -> tuple[pd.Timestamp, float, float, float]:
-    """Predict next price interval using pre-trained models."""
+) -> tuple[pd.Timestamp, float]:
+    """Predict the next price using a pre-trained model."""
 
     df = get_price_data(SYMBOL, db_path=DB_PATH)
     df = create_features(df)
@@ -355,18 +355,10 @@ def predict_price(
     last_close = float(last_row["close"].iloc[0])
     X_last = last_row[FEATURE_COLS].astype("float32")
     reg = joblib.load(Path(model_dir) / "reg.joblib", mmap_mode="r")
-    lowm = joblib.load(Path(model_dir) / "low.joblib", mmap_mode="r")
-    highm = joblib.load(Path(model_dir) / "high.joblib", mmap_mode="r")
     delta = reg.predict(X_last)[0]
-    low = lowm.predict(X_last)[0]
-    high = highm.predict(X_last)[0]
     p_hat = to_price(last_close, delta, kind=target_kind)
-    p_low = to_price(last_close, low, kind=target_kind)
-    p_high = to_price(last_close, high, kind=target_kind)
-    p_low, p_high = np.minimum(p_low, p_high), np.maximum(p_low, p_high)
-    p_hat = clip_inside(p_hat, p_low, p_high)
     ts = last_row["timestamp"].iloc[0]
-    return ts, float(p_low), float(p_hat), float(p_high)
+    return ts, float(p_hat)
 
 
 def main(train: bool = True) -> None:
@@ -491,8 +483,6 @@ def main(train: bool = True) -> None:
             INTERVAL,
             int(target_time.value // 1_000_000),
             float(combined_price),
-            float(combined_price),
-            float(combined_price),
         )
         rows_to_save.append(row)
 
@@ -533,8 +523,8 @@ if __name__ == "__main__":
             out_dir=args.out_dir,
         )
     elif args.predict:
-        ts, p_low, p_hat, p_high = predict_price()
-        logger.info("%s,%.2f,%.2f,%.2f", ts, p_low, p_hat, p_high)
+        ts, p_hat = predict_price()
+        logger.info("%s,%.2f", ts, p_hat)
     else:
         for _ in range(REPEAT_COUNT):
             main()
