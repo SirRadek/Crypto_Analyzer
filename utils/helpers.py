@@ -2,10 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
-from typing import Any
-
-import yaml
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,32 +18,6 @@ def ensure_dir_exists(path: str | os.PathLike[str]) -> None:
     """Create directory *path* if it does not exist."""
     if not os.path.exists(path):
         os.makedirs(path)
-
-
-def load_yaml_config(config_path: str) -> dict[str, Any]:
-    """Load configuration from a YAML file.
-
-    Parameters
-    ----------
-    config_path:
-        Path to YAML file.
-
-    Returns
-    -------
-    dict[str, Any]
-        Parsed configuration.
-    """
-
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"Config file not found: {config_path}") from exc
-
-
-def timestamp_to_datetime(ts: int) -> datetime:
-    """Convert UNIX timestamp (ms) to :class:`datetime.datetime`."""
-    return datetime.fromtimestamp(ts / 1000.0)
 
 
 def set_cpu_limit(cores: int) -> None:

@@ -1,8 +1,6 @@
 import time
 from contextlib import contextmanager
 
-from tqdm import tqdm
-
 from .helpers import get_logger
 
 logger = get_logger(__name__)
@@ -29,8 +27,3 @@ def timed(label: str):
     finally:
         dt = time.perf_counter() - t0
         p(f"{label} done in {dt:.2f}s")
-
-
-def bar(iterable, desc: str, unit: str = "it"):
-    """Wrapper around ``tqdm`` for a progress bar."""
-    return tqdm(iterable, desc=desc, unit=unit)

@@ -36,19 +36,16 @@ def _fit_no_es(clf: xgb.XGBClassifier, X_train, y_train, X_val, y_val) -> None:
 def train_model(
     X,
     y,
+    *,
     model_path: str = MODEL_PATH,
-    tune: bool = False,  # zachováno kvůli rozhraní, netuníme zde
     test_size: float = 0.2,
     random_state: int = 42,
-    use_gpu: bool = True,  # defaultně zapínáme GPU, fallback níž
-    oob_tol: float | None = None,  # zachováno kvůli kompatibilitě s voláním
-    oob_step: int = 50,  # nevyužito u XGBoost, ponecháno pro signaturu
-    max_estimators: int = 400,  # nevyužito u XGBoost, ponecháno pro signaturu
+    use_gpu: bool = True,
     log_path: str = "ml/oob_cls.json",
     split: str = "holdout",
     wfs_params: dict[str, int] | None = None,
 ):
-    """Train meta-classifier using XGBoost.
+    """Train the meta-classifier using deterministic XGBoost defaults.
 
     Parameters
     ----------
@@ -57,9 +54,8 @@ def train_model(
         :class:`numpy.ndarray`.
     model_path:
         Path where the trained model will be stored.
-    tune, test_size, random_state, use_gpu, oob_tol, oob_step,
-    max_estimators, log_path, split, wfs_params:
-        Additional parameters retained for backwards compatibility.
+    test_size, random_state, use_gpu, log_path, split, wfs_params:
+        Optional knobs controlling the evaluation split and logging.
 
     Returns
     -------

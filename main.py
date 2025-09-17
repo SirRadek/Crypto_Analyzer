@@ -43,8 +43,6 @@ INTERVAL_TO_MIN = {
     "1d": 1440,
 }
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
-FEATURES_VERSION = "ext_v1"
-
 CLS_MODEL_COUNT = 1
 REG_MODEL_COUNT = 1
 CLS_ACC_PATH = Path("ml/backtest_acc_cls.json")
@@ -70,19 +68,6 @@ def _delete_future_predictions(db_path: str, symbol: str, from_ms: int, table_na
         )
         deleted = cur.rowcount if cur.rowcount not in (None, -1) else 0
         conn.commit()
-        cur.execute("PRAGMA optimize;")
-        conn.commit()
-    return int(deleted)
-
-    import sqlite3
-
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            f"DELETE FROM {table_name} WHERE symbol = ? AND y_true IS NULL",
-            (symbol,),
-        )
-        deleted = cur.rowcount or 0
         cur.execute("PRAGMA optimize;")
         conn.commit()
     return int(deleted)
