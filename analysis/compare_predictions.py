@@ -1,55 +1,75 @@
+from __future__ import annotations
+
+from pathlib import Path
 import sqlite3
+from typing import Iterable
 
 import pandas as pd
 
 
+def _build_prices_query(symbol: str, target_times: Iterable[int]) -> tuple[str, list[int]]:
+    """Return SQL query and parameters for the prices lookup."""
+
+    unique_times = sorted({int(ts) for ts in target_times})
+    if not unique_times:
+        return "SELECT NULL AS ts_ms, NULL AS close WHERE 0", []
+
+    placeholders = ",".join("?" for _ in unique_times)
+    query = (
+        "SELECT open_time AS ts_ms, close FROM prices "
+        f"WHERE symbol = ? AND open_time IN ({placeholders})"
+    )
+    params = [symbol, *unique_times]
+    return query, params
+
+
 def backfill_actuals_and_errors(
-    db_path: str = "db/data/crypto_data.sqlite",
+    db_path: str | Path = "db/data/crypto_data.sqlite",
     table_pred: str = "predictions",
     symbol: str = "BTCUSDT",
 ) -> None:
-    conn = sqlite3.connect(db_path)
+    """Fill in ``y_true_hat`` and ``abs_error`` for pending predictions.
 
-    preds = pd.read_sql(
-        f"SELECT id, target_time_ms FROM {table_pred} WHERE y_true_hat IS NULL AND symbol = ?",
-        conn,
-        params=(symbol,),
-    )
-    if preds.empty:
-        conn.close()
-        print("No predictions to backfill.")
-        return
+    Only price rows matching the outstanding predictions are read which keeps
+    memory usage small even for large tables.
+    """
 
-    # Fetch only the rows from ``prices`` that correspond to the prediction
-    # timestamps instead of loading the entire table into memory.  This keeps
-    # the peak RAM usage small when the prices table grows large.
-    pred_times = preds["target_time_ms"].tolist()
-    placeholder = ",".join(["?"] * len(pred_times))
-    query = (
-        "SELECT open_time AS ts_ms, close FROM prices "
-        f"WHERE symbol = ? AND open_time IN ({placeholder})"
-    )
-    actuals = pd.read_sql(query, conn, params=[symbol, *pred_times])
+    with sqlite3.connect(str(db_path)) as conn:
+        preds = pd.read_sql(
+            f"""
+            SELECT id, target_time_ms, p_hat
+            FROM {table_pred}
+            WHERE y_true_hat IS NULL AND symbol = ?
+            """,
+            conn,
+            params=(symbol,),
+        ).dropna(subset=["target_time_ms"])
+        if preds.empty:
+            print("No predictions to backfill.")
+            return
 
-    merged = preds.merge(actuals, left_on="target_time_ms", right_on="ts_ms", how="left")
-    merged.rename(columns={"close": "y_true_hat"}, inplace=True)
+        query, params = _build_prices_query(symbol, preds["target_time_ms"].to_list())
+        actuals = pd.read_sql(query, conn, params=params)
 
-    cur = conn.cursor()
-    for _, r in merged.iterrows():
-        if pd.notna(r.get("y_true_hat")):
-            row = cur.execute(
-                f"SELECT p_hat FROM {table_pred} WHERE id = ?", (int(r["id"]),)
-            ).fetchone()
-            if row is None:
-                continue
-            p_hat = float(row[0])
-            y_true = float(r["y_true_hat"])
-            abs_err = abs(p_hat - y_true)
-            cur.execute(
-                f"UPDATE {table_pred} SET y_true_hat = ?, abs_error = ? WHERE id = ?",
-                (y_true, abs_err, int(r["id"])),
-            )
+        merged = preds.merge(
+            actuals,
+            left_on="target_time_ms",
+            right_on="ts_ms",
+            how="left",
+        ).rename(columns={"close": "y_true_hat"})
 
-    conn.commit()
-    conn.close()
-    print("Backfill complete.")
+        updates = [
+            (float(row.y_true_hat), float(abs(row.p_hat - row.y_true_hat)), int(row.id))
+            for row in merged.itertuples(index=False)
+            if pd.notna(row.y_true_hat)
+        ]
+        if not updates:
+            print("No matching price data found for pending predictions.")
+            return
+
+        conn.executemany(
+            f"UPDATE {table_pred} SET y_true_hat = ?, abs_error = ? WHERE id = ?",
+            updates,
+        )
+        conn.commit()
+        print("Backfill complete.")
