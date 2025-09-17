@@ -25,10 +25,16 @@ def create_predictions_table(
     with sqlite3.connect(str(db_path)) as conn:
         cursor = conn.cursor()
         cols = _table_columns(cursor, table_name)
-        if {"p_hat", "p_low", "p_high"} <= cols:
-            if "abs_error" not in cols:
-                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN abs_error REAL")
-
+        current = {
+            "symbol",
+            "interval",
+            "target_time_ms",
+            "p_hat",
+            "y_true_hat",
+            "abs_error",
+        }
+        has_legacy_bounds = {"p_low", "p_high", "y_true_low", "y_true_high"} & cols
+        if current <= cols and not has_legacy_bounds:
             cursor.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} "
                 f"ON {table_name}(symbol, interval, target_time_ms)"
@@ -44,27 +50,35 @@ CREATE TABLE IF NOT EXISTS {table_name}_new (
   interval TEXT NOT NULL,
   target_time_ms INTEGER NOT NULL,
   p_hat REAL,
-  p_low REAL,
-  p_high REAL,
   y_true_hat REAL,
-  y_true_low REAL,
-  y_true_high REAL,
   abs_error REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} ON {table_name}_new(symbol, interval, target_time_ms);
 """
         )
         if cols:
-            if {"y_pred", "y_pred_low", "y_pred_high"} <= cols:
-                src_extra = ", abs_error" if "abs_error" in cols else ""
-                dst_extra = ", abs_error" if "abs_error" in cols else ""
-                cursor.execute(
-                    f"INSERT OR IGNORE INTO {table_name}_new("
-                    "symbol, interval, target_time_ms, p_hat, p_low, p_high" + dst_extra + ") "
-                    "SELECT symbol, interval, target_time_ms, y_pred, y_pred_low, y_pred_high"
-                    + src_extra
-                    + f" FROM {table_name}"
-                )
+            select_cols = ["symbol", "interval", "target_time_ms"]
+            if "p_hat" in cols:
+                select_cols.append("p_hat")
+            elif "y_pred" in cols:
+                select_cols.append("y_pred AS p_hat")
+            else:
+                select_cols.append("NULL AS p_hat")
+            if "y_true_hat" in cols:
+                select_cols.append("y_true_hat")
+            else:
+                select_cols.append("NULL AS y_true_hat")
+            if "abs_error" in cols:
+                select_cols.append("abs_error")
+            else:
+                select_cols.append("NULL AS abs_error")
+            cursor.execute(
+                f"INSERT OR IGNORE INTO {table_name}_new("
+                "symbol, interval, target_time_ms, p_hat, y_true_hat, abs_error"
+                ") SELECT "
+                + ", ".join(select_cols)
+                + f" FROM {table_name}"
+            )
             cursor.execute(f"ALTER TABLE {table_name} RENAME TO {table_name}_backup")
         cursor.execute(f"ALTER TABLE {table_name}_new RENAME TO {table_name}")
         conn.commit()
@@ -83,13 +97,11 @@ def save_predictions(
         cursor = conn.cursor()
         cursor.executemany(
             f"""
-            INSERT INTO {table_name} (symbol, interval, target_time_ms, p_hat, p_low, p_high)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO {table_name} (symbol, interval, target_time_ms, p_hat)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(symbol, interval, target_time_ms)
             DO UPDATE SET
-              p_hat=excluded.p_hat,
-              p_low=excluded.p_low,
-              p_high=excluded.p_high
+              p_hat=excluded.p_hat
             """,
             values,
         )

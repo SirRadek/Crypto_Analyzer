@@ -46,24 +46,8 @@ def test_model_meta(tmp_path, monkeypatch):
         }
         return params, 10
 
-    def small_bound():
-        params = {
-            "max_depth": 3,
-            "eta": 0.1,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "tree_method": "hist",
-            "objective": "reg:squarederror",
-            "eval_metric": "rmse",
-            "nthread": 1,
-            "seed": 42,
-        }
-        return params, 10
-
     monkeypatch.setattr(xgb_price, "build_reg", small_reg)
-    monkeypatch.setattr(xgb_price, "build_bound", small_bound)
     monkeypatch.setattr(tp, "build_reg", small_reg)
-    monkeypatch.setattr(tp, "build_bound", small_bound)
     config = TrainConfig(
         horizon_min=120,
         embargo=24,
