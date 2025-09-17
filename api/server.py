@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -13,12 +14,27 @@ from ml.xgb_price import clip_inside, to_price
 
 MODEL_DIR = Path(os.getenv("MODEL_DIR", "models/xgb_price"))
 DATA_PATH = os.getenv("DATA_PATH", "data/latest.parquet")
+FEATURE_LIST_PATH = Path(os.getenv("FEATURE_LIST_PATH", "analysis/feature_list.json"))
 
 app = FastAPI()
 
 reg = joblib.load(MODEL_DIR / "reg.joblib", mmap_mode="r")
 lowm = joblib.load(MODEL_DIR / "low.joblib", mmap_mode="r")
 highm = joblib.load(MODEL_DIR / "high.joblib", mmap_mode="r")
+
+
+def _feature_names() -> list[str]:
+    """Return the feature order used during model training."""
+
+    if FEATURE_LIST_PATH.exists():
+        try:
+            with open(FEATURE_LIST_PATH, encoding="utf-8") as f:
+                names = json.load(f)
+            if isinstance(names, list):
+                return [str(n) for n in names]
+        except (OSError, json.JSONDecodeError):
+            pass
+    return FEATURE_COLUMNS
 
 
 def _load_last_row() -> tuple[pd.Timestamp, float, pd.DataFrame]:
@@ -30,7 +46,8 @@ def _load_last_row() -> tuple[pd.Timestamp, float, pd.DataFrame]:
     df = create_features(df)
     row = df.iloc[[-1]]
     last_price = float(row["close"].iloc[0])
-    X_last = row[FEATURE_COLUMNS].astype("float32")
+    feature_cols = _feature_names()
+    X_last = row[feature_cols].astype("float32")
     ts = row["timestamp"].iloc[0]
     return ts, last_price, X_last
 
