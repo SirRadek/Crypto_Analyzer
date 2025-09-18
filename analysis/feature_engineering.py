@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
+
+from utils.config import CONFIG, FeatureSettings
 
 # Lehký FE laděný pro 2h BTCUSDT. Bez těžkých závislostí, vše float32.
 
 H = 24  # 120min horizon in 5m candles
 
-ONCHAIN_FEATURES = [
+ONCHAIN_FEATURES = (
     "onch_fee_fast_satvb",
     "onch_fee_30m_satvb",
     "onch_fee_60m_satvb",
@@ -23,16 +28,164 @@ ONCHAIN_FEATURES = [
     "onch_difficulty",
     "onch_height",
     "onch_diff_change_pct",
-]
+)
 
 
-def create_features(df: pd.DataFrame) -> pd.DataFrame:
+@dataclass(frozen=True)
+class FeatureColumnRegistry:
+    """Immutable catalogue of engineered feature column names."""
+
+    base: tuple[str, ...]
+    orderbook: tuple[str, ...]
+    derivatives: tuple[str, ...]
+    onchain: tuple[str, ...]
+
+    def active(self, settings: FeatureSettings) -> list[str]:
+        """Return feature names enabled under *settings*."""
+
+        columns: list[str] = list(self.base)
+        if settings.include_orderbook:
+            columns.extend(self.orderbook)
+        if settings.include_derivatives:
+            columns.extend(self.derivatives)
+        if settings.include_onchain:
+            columns.extend(self.onchain)
+        return columns
+
+
+REGISTRY = FeatureColumnRegistry(
+    base=(
+        "ofi_base",
+        "ofi_quote",
+        "tbr_base",
+        "d_tbr_base",
+        "ema12_tbr_base",
+        "taker_buy_sell_ratio",
+        "z_volume",
+        "rel_close_vwap",
+        "ret3",
+        "ret12",
+        "rv_5m",
+        "volatility_60m",
+        "parkinson12",
+        "atr14",
+        "tod_sin",
+        "tod_cos",
+        "is_day",
+        "is_night",
+        "is_weekend",
+        "is_weekday",
+    ),
+    orderbook=(
+        "lob_imbalance_L1",
+        "lob_imbalance_L2",
+        "wall_bid_dist_bps",
+        "wall_bid_size_rel",
+        "wall_ask_dist_bps",
+        "wall_ask_size_rel",
+    ),
+    derivatives=(
+        "oi_delta_15m",
+        "basis_annualized",
+    ),
+    onchain=ONCHAIN_FEATURES,
+)
+
+
+_REQUIRED_BASE_INPUTS: tuple[str, ...] = (
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_asset_volume",
+    "taker_buy_base",
+    "taker_buy_quote",
+)
+
+
+def _ensure_numeric(df: pd.DataFrame, columns: Iterable[str]) -> None:
+    """Validate that *columns* can be interpreted as numeric."""
+
+    bad: list[str] = []
+    for col in columns:
+        if col not in df.columns:
+            continue
+        if is_numeric_dtype(df[col]):
+            continue
+        try:
+            pd.to_numeric(df[col], errors="raise")
+        except (TypeError, ValueError):
+            bad.append(col)
+    if bad:
+        joined = ", ".join(bad)
+        raise TypeError(f"Non-numeric values detected in input columns: {joined}")
+
+
+def _normalize_timestamp(df: pd.DataFrame) -> None:
+    """Ensure the ``timestamp`` column is timezone-aware UTC."""
+
+    if "timestamp" not in df.columns:
+        raise KeyError("Input frame must contain a 'timestamp' column")
+
+    ts = df["timestamp"]
+    if not is_datetime64_any_dtype(ts):
+        try:
+            df["timestamp"] = pd.to_datetime(ts, utc=True, errors="raise")
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise TypeError("Timestamp column could not be parsed as datetime") from exc
+        ts = df["timestamp"]
+    if ts.dt.tz is None:
+        df["timestamp"] = ts.dt.tz_localize("UTC")
+
+
+def validate_feature_inputs(df: pd.DataFrame, settings: FeatureSettings) -> None:
+    """Validate the bare minimum structure required for feature engineering."""
+
+    missing = [col for col in _REQUIRED_BASE_INPUTS if col not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required input columns: {', '.join(sorted(missing))}")
+
+    _ensure_numeric(df, _REQUIRED_BASE_INPUTS[1:])
+    _normalize_timestamp(df)
+
+    if not settings.include_onchain:
+        return
+
+    prefixed = [col for col in df.columns if col.startswith("onch_")]
+    extras = sorted(set(prefixed) - set(ONCHAIN_FEATURES))
+    if extras:
+        raise ValueError(
+            "Unexpected on-chain columns present: " + ", ".join(extras)
+        )
+
+
+def _resolve_feature_settings(settings: FeatureSettings | None) -> FeatureSettings:
+    return CONFIG.features if settings is None else settings
+
+
+def _build_feature_columns(settings: FeatureSettings) -> list[str]:
+    return REGISTRY.active(settings)
+
+
+def get_feature_columns(settings: FeatureSettings | None = None) -> list[str]:
+    """Return feature column names honoring *settings* toggles."""
+
+    return _build_feature_columns(_resolve_feature_settings(settings))
+
+
+def create_features(
+    df: pd.DataFrame, settings: FeatureSettings | None = None
+) -> pd.DataFrame:
     """Add technical and time-series features to ``df``.
 
     Parameters
     ----------
     df:
         Input data frame containing OHLCV and optional ``onch_`` columns.
+    settings:
+        Optional feature settings overriding :data:`CONFIG.features`.
 
     Returns
     -------
@@ -40,21 +193,40 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
         Data frame with additional float32 features.
     """
 
-    df = df.copy(deep=False)
-    for col in ONCHAIN_FEATURES:
-        if col not in df.columns:
-            df[col] = np.float32(0.0)
+    settings = _resolve_feature_settings(settings)
+    df = df.copy()
+    validate_feature_inputs(df, settings)
+    fill_value = np.float32(settings.fillna_value)
+    ffill_limit = settings.forward_fill_limit
+    if ffill_limit < 0:
+        ffill_limit = None
+
+    if settings.include_onchain:
+        for col in ONCHAIN_FEATURES:
+            if col not in df.columns:
+                df[col] = fill_value
+    else:
+        drop_cols = [c for c in df.columns if c.startswith("onch_")]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
 
     # --- základní numerika ---------------------------------------------------
     # nech timestamp beze změny, ostatní numerické sloupce konvertuj na float32
     numeric = df.select_dtypes(include=["number"]).columns.drop(["timestamp"], errors="ignore")
-    df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce").astype(np.float32)
+    if len(numeric) > 0:
+        df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce").astype(np.float32)
 
     # forward-fill on-chain metrics only within the same hour to avoid leakage
-    onch_cols = [c for c in df.columns if c.startswith("onch_")]
-    if onch_cols:
-        hour = pd.to_datetime(df["timestamp"]).dt.floor("h")
-        df[onch_cols] = df[onch_cols].groupby(hour).ffill().astype(np.float32)
+    if settings.include_onchain:
+        onch_cols = [c for c in df.columns if c.startswith("onch_")]
+        if onch_cols:
+            hour = pd.to_datetime(df["timestamp"]).dt.floor("h")
+            grouped = df[onch_cols].groupby(hour)
+            if ffill_limit is None:
+                filled = grouped.ffill()
+            else:
+                filled = grouped.ffill(limit=ffill_limit)
+            df[onch_cols] = filled.fillna(fill_value).astype(np.float32)
 
     # --- order-flow & volume --------------------------------------------------
     vol = df["volume"].replace(0.0, np.nan)
@@ -143,80 +315,89 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     denom = (df["volume"] - df["taker_buy_base"]).replace(0.0, np.nan)
     df["taker_buy_sell_ratio"] = (df["taker_buy_base"] / denom).astype(np.float32)
 
-    if "basis_annualized" not in df.columns:
-        df["basis_annualized"] = np.float32(0.0)
-    else:
-        df["basis_annualized"] = df["basis_annualized"].astype(np.float32)
-
-    if "open_interest" in df.columns:
-        df["oi_delta_15m"] = df["open_interest"].diff(3).astype(np.float32)
-    else:
-        df["oi_delta_15m"] = np.float32(0.0)
-
-    for level in range(1, 3):
-        bid_col = f"lob_bid_L{level}"
-        ask_col = f"lob_ask_L{level}"
-        imb_col = f"lob_imbalance_L{level}"
-        if bid_col in df.columns and ask_col in df.columns:
-            num = (df[bid_col] - df[ask_col]).astype(np.float32)
-            den = (df[bid_col] + df[ask_col]).replace(0.0, np.nan).astype(np.float32)
-            df[imb_col] = (num / den).astype(np.float32)
+    if settings.include_derivatives:
+        if "basis_annualized" not in df.columns:
+            df["basis_annualized"] = fill_value
         else:
-            df[imb_col] = np.float32(0.0)
+            df["basis_annualized"] = df["basis_annualized"].astype(np.float32)
 
-    # --- LOB walls -----------------------------------------------------------
-    bid_px_cols = sorted([c for c in df.columns if c.startswith("lob_bid_price_")])
-    bid_sz_cols = sorted([c for c in df.columns if c.startswith("lob_bid_size_")])
-    ask_px_cols = sorted([c for c in df.columns if c.startswith("lob_ask_price_")])
-    ask_sz_cols = sorted([c for c in df.columns if c.startswith("lob_ask_size_")])
-
-    if bid_px_cols and bid_sz_cols:
-        bid_px = df[bid_px_cols].to_numpy(dtype=np.float32)
-        bid_sz = df[bid_sz_cols].to_numpy(dtype=np.float32)
-        mu = np.nanmean(bid_sz, axis=1, keepdims=True)
-        sig = np.nanstd(bid_sz, axis=1, keepdims=True)
-        mask = bid_sz > mu + 2 * sig
-        idx = np.argmax(np.where(mask, bid_sz, -np.inf), axis=1)
-        mid = df["close"].to_numpy(dtype=np.float32)
-        dist = np.where(
-            mask[np.arange(len(df)), idx],
-            ((mid - bid_px[np.arange(len(df)), idx]) / mid) * 1e4,
-            0.0,
-        )
-        rel = np.where(
-            mask[np.arange(len(df)), idx],
-            bid_sz[np.arange(len(df)), idx] / np.nansum(bid_sz, axis=1),
-            0.0,
-        )
-        df["wall_bid_dist_bps"] = dist.astype(np.float32)
-        df["wall_bid_size_rel"] = rel.astype(np.float32)
+        if "open_interest" in df.columns:
+            df["oi_delta_15m"] = df["open_interest"].diff(3).astype(np.float32)
+        elif "oi_delta_15m" not in df.columns:
+            df["oi_delta_15m"] = fill_value
     else:
-        df["wall_bid_dist_bps"] = np.float32(0.0)
-        df["wall_bid_size_rel"] = np.float32(0.0)
+        df = df.drop(columns=list(REGISTRY.derivatives), errors="ignore")
+        df = df.drop(columns=[c for c in df.columns if c.startswith("deriv_")], errors="ignore")
 
-    if ask_px_cols and ask_sz_cols:
-        ask_px = df[ask_px_cols].to_numpy(dtype=np.float32)
-        ask_sz = df[ask_sz_cols].to_numpy(dtype=np.float32)
-        mu = np.nanmean(ask_sz, axis=1, keepdims=True)
-        sig = np.nanstd(ask_sz, axis=1, keepdims=True)
-        mask = ask_sz > mu + 2 * sig
-        idx = np.argmax(np.where(mask, ask_sz, -np.inf), axis=1)
-        mid = df["close"].to_numpy(dtype=np.float32)
-        dist = np.where(
-            mask[np.arange(len(df)), idx],
-            ((ask_px[np.arange(len(df)), idx] - mid) / mid) * 1e4,
-            0.0,
-        )
-        rel = np.where(
-            mask[np.arange(len(df)), idx],
-            ask_sz[np.arange(len(df)), idx] / np.nansum(ask_sz, axis=1),
-            0.0,
-        )
-        df["wall_ask_dist_bps"] = dist.astype(np.float32)
-        df["wall_ask_size_rel"] = rel.astype(np.float32)
+    if settings.include_orderbook:
+        for level in range(1, 3):
+            bid_col = f"lob_bid_L{level}"
+            ask_col = f"lob_ask_L{level}"
+            imb_col = f"lob_imbalance_L{level}"
+            if bid_col in df.columns and ask_col in df.columns:
+                num = (df[bid_col] - df[ask_col]).astype(np.float32)
+                den = (df[bid_col] + df[ask_col]).replace(0.0, np.nan).astype(np.float32)
+                df[imb_col] = (num / den).astype(np.float32)
+            elif imb_col not in df.columns:
+                df[imb_col] = fill_value
+
+        # --- LOB walls -------------------------------------------------------
+        bid_px_cols = sorted([c for c in df.columns if c.startswith("lob_bid_price_")])
+        bid_sz_cols = sorted([c for c in df.columns if c.startswith("lob_bid_size_")])
+        ask_px_cols = sorted([c for c in df.columns if c.startswith("lob_ask_price_")])
+        ask_sz_cols = sorted([c for c in df.columns if c.startswith("lob_ask_size_")])
+
+        if bid_px_cols and bid_sz_cols:
+            bid_px = df[bid_px_cols].to_numpy(dtype=np.float32)
+            bid_sz = df[bid_sz_cols].to_numpy(dtype=np.float32)
+            mu = np.nanmean(bid_sz, axis=1, keepdims=True)
+            sig = np.nanstd(bid_sz, axis=1, keepdims=True)
+            mask = bid_sz > mu + 2 * sig
+            idx = np.argmax(np.where(mask, bid_sz, -np.inf), axis=1)
+            mid = df["close"].to_numpy(dtype=np.float32)
+            dist = np.where(
+                mask[np.arange(len(df)), idx],
+                ((mid - bid_px[np.arange(len(df)), idx]) / mid) * 1e4,
+                fill_value,
+            )
+            rel = np.where(
+                mask[np.arange(len(df)), idx],
+                bid_sz[np.arange(len(df)), idx] / np.nansum(bid_sz, axis=1),
+                fill_value,
+            )
+            df["wall_bid_dist_bps"] = dist.astype(np.float32)
+            df["wall_bid_size_rel"] = rel.astype(np.float32)
+        else:
+            df["wall_bid_dist_bps"] = fill_value
+            df["wall_bid_size_rel"] = fill_value
+
+        if ask_px_cols and ask_sz_cols:
+            ask_px = df[ask_px_cols].to_numpy(dtype=np.float32)
+            ask_sz = df[ask_sz_cols].to_numpy(dtype=np.float32)
+            mu = np.nanmean(ask_sz, axis=1, keepdims=True)
+            sig = np.nanstd(ask_sz, axis=1, keepdims=True)
+            mask = ask_sz > mu + 2 * sig
+            idx = np.argmax(np.where(mask, ask_sz, -np.inf), axis=1)
+            mid = df["close"].to_numpy(dtype=np.float32)
+            dist = np.where(
+                mask[np.arange(len(df)), idx],
+                ((ask_px[np.arange(len(df)), idx] - mid) / mid) * 1e4,
+                fill_value,
+            )
+            rel = np.where(
+                mask[np.arange(len(df)), idx],
+                ask_sz[np.arange(len(df)), idx] / np.nansum(ask_sz, axis=1),
+                fill_value,
+            )
+            df["wall_ask_dist_bps"] = dist.astype(np.float32)
+            df["wall_ask_size_rel"] = rel.astype(np.float32)
+        else:
+            df["wall_ask_dist_bps"] = fill_value
+            df["wall_ask_size_rel"] = fill_value
     else:
-        df["wall_ask_dist_bps"] = np.float32(0.0)
-        df["wall_ask_size_rel"] = np.float32(0.0)
+        drop_lob = [c for c in df.columns if c.startswith("lob_") or c.startswith("wall_")]
+        if drop_lob:
+            df = df.drop(columns=drop_lob, errors="ignore")
 
     # --- časové rysy ----------------------------------------------------------
     ts = df["timestamp"]
@@ -254,12 +435,24 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
         "is_weekend": "time_is_weekend",
         "is_weekday": "time_is_weekday",
     }
+    if not settings.include_derivatives:
+        copy_map.pop("basis_annualized", None)
+        copy_map.pop("oi_delta_15m", None)
+    if not settings.include_orderbook:
+        copy_map.pop("lob_imbalance_L1", None)
+        copy_map.pop("lob_imbalance_L2", None)
     for src, dst in copy_map.items():
         if src in df.columns and dst not in df.columns:
             df[dst] = df[src].astype(np.float32)
 
     # --- z-scores and deltas for prefixed features ---------------------------
-    prefixes = ("onch_", "deriv_", "lob_", "mom_", "vol_", "time_")
+    prefixes = ["mom_", "vol_", "time_"]
+    if settings.include_onchain:
+        prefixes.insert(0, "onch_")
+    if settings.include_derivatives:
+        prefixes.append("deriv_")
+    if settings.include_orderbook:
+        prefixes.append("lob_")
     for prefix in prefixes:
         cols = [c for c in df.columns if c.startswith(prefix)]
         for col in cols:
@@ -270,7 +463,10 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
                 df[f"d_{col}"] = df[col].diff().astype(np.float32)
 
     # --- NaN handling před cíli ----------------------------------------------
-    df = df.fillna(0.0)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) > 0:
+        df[numeric_cols] = df[numeric_cols].astype(np.float32)
+        df[numeric_cols] = df[numeric_cols].fillna(fill_value)
 
     # --- validace typů --------------------------------------------------------
     feature_only = df.drop(
@@ -306,36 +502,7 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-FEATURE_COLUMNS: list[str] = [
-    "ofi_base",
-    "ofi_quote",
-    "tbr_base",
-    "d_tbr_base",
-    "ema12_tbr_base",
-    "taker_buy_sell_ratio",
-    "z_volume",
-    "rel_close_vwap",
-    "ret3",
-    "ret12",
-    "rv_5m",
-    "volatility_60m",
-    "parkinson12",
-    "atr14",
-    "lob_imbalance_L1",
-    "lob_imbalance_L2",
-    "oi_delta_15m",
-    "basis_annualized",
-    "tod_sin",
-    "tod_cos",
-    "is_day",
-    "is_night",
-    "is_weekend",
-    "is_weekday",
-    "wall_bid_dist_bps",
-    "wall_bid_size_rel",
-    "wall_ask_dist_bps",
-    "wall_ask_size_rel",
-] + ONCHAIN_FEATURES
+FEATURE_COLUMNS: list[str] = get_feature_columns()
 
 
 # Feature groups for Group-SHAP -------------------------------------------------

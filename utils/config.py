@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -389,6 +389,34 @@ def _build_config() -> AppConfig:
 
 CONFIG = _build_config()
 
+ 
+def override_feature_settings(
+    settings: FeatureSettings,
+    *,
+    include_onchain: bool | None = None,
+    include_orderbook: bool | None = None,
+    include_derivatives: bool | None = None,
+    forward_fill_limit: int | None = None,
+    fillna_value: float | None = None,
+) -> FeatureSettings:
+    """Return updated feature settings with selected fields overridden."""
+
+    updates: dict[str, object] = {}
+    if include_onchain is not None:
+        updates["include_onchain"] = bool(include_onchain)
+    if include_orderbook is not None:
+        updates["include_orderbook"] = bool(include_orderbook)
+    if include_derivatives is not None:
+        updates["include_derivatives"] = bool(include_derivatives)
+    if forward_fill_limit is not None:
+        updates["forward_fill_limit"] = int(forward_fill_limit)
+    if fillna_value is not None:
+        updates["fillna_value"] = float(fillna_value)
+    if not updates:
+        return settings
+    return replace(settings, **updates)
+
+
 __all__ = [
     "AppConfig",
     "BacktestSettings",
@@ -399,4 +427,5 @@ __all__ = [
     "ModelSettings",
     "OnChainSettings",
     "RuntimeSettings",
+    "override_feature_settings",
 ]
