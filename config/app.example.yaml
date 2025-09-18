@@ -1,0 +1,95 @@
+# Crypto Analyzer configuration
+# Copy this file to `config/app.yaml` (or point APP_CONFIG_FILE to a custom path)
+# and adjust values to match your environment. All keys have sane defaults and
+# map directly to structured dataclasses in `utils.config`.
+
+core:
+  # Trading pair symbol and candle interval to analyse
+  symbol: BTCUSDT
+  interval: 5m
+  # Number of prediction steps (5-minute candles) the meta-model forecasts
+  forward_steps: 24
+  # Historical window (in days) to fetch when preparing datasets
+  history_days: 1825
+  # Timezone used for time-based features
+  timezone: UTC
+
+database:
+  # Primary SQLite database containing OHLCV candles
+  price_store: db/data/crypto_data.sqlite
+  # Table for persisting model predictions
+  predictions_table: predictions
+  # Table containing on-chain metrics aligned to the candle grid
+  onchain_table: onchain_5m
+  # Optional feature store path (set to null to disable)
+  feature_store: null
+  # Chunk size used when streaming large tables from disk
+  read_chunksize: 100000
+
+runtime:
+  # Maximum number of CPU cores to use (integer or "auto" for all available)
+  cpu_limit: auto
+  # Number of iterations for repeated inference loops
+  repeat_count: 50
+  # Logging verbosity for CLI entrypoints
+  log_level: INFO
+  # Root directory for generated artefacts
+  data_dir: data
+  # Cache directory for temporary data (used by on-chain fetchers as well)
+  cache_dir: data/cache
+  # Directory for transient files (e.g., training checkpoints)
+  tmp_dir: data/tmp
+
+features:
+  # Toggle inclusion of optional feature families
+  include_onchain: true
+  include_orderbook: true
+  include_derivatives: true
+  # Maximum number of forward-fill steps for sparse series
+  forward_fill_limit: 12
+  # Value used to replace remaining NaNs after preprocessing
+  fillna_value: 0.0
+
+models:
+  # Directory storing trained base and meta-model artefacts
+  directory: ml/models
+  # Glob for accuracy/score JSON files used as model weights
+  weights_glob: ml/backtest_acc_*.json
+  # Whether to attempt GPU acceleration for XGBoost learners
+  use_gpu: true
+  # Tree method passed to XGBoost when GPU mode is enabled
+  gpu_tree_method: gpu_hist
+  # Maximum number of base models considered by the meta-ensemble
+  max_models: 16
+  # Random seed for deterministic training routines
+  random_seed: 1337
+
+backtest:
+  # Holdout strategy: "holdout" for static split, "walkforward" for rolling windows
+  mode: holdout
+  # Fraction of data used for validation when performing holdout splits
+  validation_fraction: 0.2
+  # Window size (in days) for each walk-forward evaluation segment
+  walkforward_window_days: 30
+  # Metrics logged during evaluation and backtests
+  metrics:
+    - accuracy
+    - precision
+    - recall
+
+onchain:
+  # Enable/disable individual data providers
+  use_mempool: true
+  use_exchange_flows: true
+  use_usdt_events: true
+  # Cache directory for raw API responses (defaults to runtime.cache_dir/onchain)
+  cache_dir: data/cache/onchain
+  # API credentials (set to null to rely on environment overrides)
+  glassnode_api_key: null
+  whale_api_key: null
+  # Source and path for exchange flow data ("csv" or "glassnode")
+  exchange_flow_source: csv
+  exchange_flow_path: null
+  # Network request configuration
+  request_timeout: 10
+  request_retries: 5

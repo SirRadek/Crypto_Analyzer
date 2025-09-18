@@ -6,20 +6,11 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from pydantic import BaseModel
 from requests.adapters import HTTPAdapter, Retry
 
+from utils.config import CONFIG, OnChainSettings
 
-class OnChainConfig(BaseModel):  # type: ignore[misc]
-    use_mempool: bool = True
-    use_exchange_flows: bool = True
-    use_usdt_events: bool = True
-    cache_dir: str = "data/cache"
-    glassnode_api_key: str | None = None
-    whale_api_key: str | None = None
-
-
-CONFIG = OnChainConfig()
+SETTINGS: OnChainSettings = CONFIG.onchain
 
 
 def _session() -> requests.Session:
@@ -52,7 +43,7 @@ def _get_with_retry(
 
 
 def _cache_path(prefix: str, start: datetime | None = None, end: datetime | None = None) -> Path:
-    cache_dir = Path(CONFIG.cache_dir)
+    cache_dir = Path(SETTINGS.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     if start and end:
         key = f"{prefix}_{start:%Y%m%d%H%M}_{end:%Y%m%d%H%M}.parquet"
@@ -76,13 +67,15 @@ def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
         sess,
         "https://mempool.space/api/tx/15e10745f15593a899cef391191bdd3d7c12412cc4696b7bcb669d0feadc8521/raw",
         params=params,
-        timeout=10,
+        timeout=SETTINGS.request_timeout,
+        retries=SETTINGS.request_retries,
     )
     fee = _get_with_retry(
         sess,
         "https://mempool.space/api/v1/fees/mempool-blocks",
         params=params,
-        timeout=10,
+        timeout=SETTINGS.request_timeout,
+        retries=SETTINGS.request_retries,
     )
     df_tx = pd.DataFrame(tx.json())
     df_fee = pd.DataFrame(fee.json())
@@ -121,14 +114,26 @@ def load_exchange_flows_1h(
         df = pd.read_csv(path, parse_dates=[0])
         df = df.set_index(df.columns[0]).sort_index()
     elif source == "glassnode":
-        key = glassnode_api_key or CONFIG.glassnode_api_key
+        key = glassnode_api_key or SETTINGS.glassnode_api_key
         if not key:
             raise ValueError("glassnode_api_key required")
         sess = _session()
         base = "https://api.glassnode.com/v1/metrics/exchanges"
         params = {"a": "BTC", "i": "1h", "api_key": key}
-        inflow = _get_with_retry(sess, f"{base}/inflow_sum", params=params, timeout=10)
-        outflow = _get_with_retry(sess, f"{base}/outflow_sum", params=params, timeout=10)
+        inflow = _get_with_retry(
+            sess,
+            f"{base}/inflow_sum",
+            params=params,
+            timeout=SETTINGS.request_timeout,
+            retries=SETTINGS.request_retries,
+        )
+        outflow = _get_with_retry(
+            sess,
+            f"{base}/outflow_sum",
+            params=params,
+            timeout=SETTINGS.request_timeout,
+            retries=SETTINGS.request_retries,
+        )
         df_in = pd.DataFrame(inflow.json())
         df_out = pd.DataFrame(outflow.json())
         df = pd.merge(df_in, df_out, on="t", how="outer", suffixes=("_in", "_out"))
@@ -154,7 +159,7 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
     if cache_file.exists():
         return pd.read_parquet(cache_file)
 
-    key = api_key or CONFIG.whale_api_key
+    key = api_key or SETTINGS.whale_api_key
     if not key:
         raise ValueError("api_key required for Whale Alert")
     sess = _session()
@@ -165,7 +170,11 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
         "api_key": key,
     }
     resp = _get_with_retry(
-        sess, "https://api.whale-alert.io/v1/transactions", params=params, timeout=10
+        sess,
+        "https://api.whale-alert.io/v1/transactions",
+        params=params,
+        timeout=SETTINGS.request_timeout,
+        retries=SETTINGS.request_retries,
     )
     data = resp.json().get("transactions", [])
     records: list[dict[str, float]] = []
@@ -189,7 +198,7 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
 
 
 __all__ = [
-    "OnChainConfig",
+    "OnChainSettings",
     "fetch_mempool_5m",
     "load_exchange_flows_1h",
     "fetch_usdt_events",
