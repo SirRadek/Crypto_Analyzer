@@ -75,7 +75,15 @@ python db/btc_import.py
 
 This creates the `db/data/crypto_data.sqlite` file with price data.
 
-### 4. Optional on-chain data
+### 4. Configure the application
+
+Configuration is centralised in `config/app.yaml`. Copy
+`config/app.example.yaml`, adjust the sections to match your environment (e.g.
+database paths, feature toggles, on-chain credentials) and optionally point the
+`APP_CONFIG_FILE` environment variable to your custom file. Every option has a
+documented default so the application still runs without manual changes.
+
+### 5. Optional on-chain data
 
 On-chain metrics can be merged from public APIs:
 
@@ -101,7 +109,7 @@ and Blockchain.com datasets as the mempool.space REST API does not expose
 historical mempool snapshots. The WebSocket logger keeps the table current and
 is intended to be scheduled via `cron`.
 
-### 4. Run analysis and prediction
+### 6. Run analysis and prediction
 
 ```bash
 python main.py
@@ -109,7 +117,7 @@ python main.py
 
 By default, this trains a RandomForest model and outputs the latest signals.
 
-### 5. Run the training pipeline
+### 7. Run the training pipeline
 
 Example commands for 120‑minute horizon:
 
