@@ -16,7 +16,7 @@ from db.predictions_store import create_predictions_table, save_predictions
 from ml.model_utils import match_model_features
 from ml.train import load_model, train_model
 from ml.xgb_price import to_price
-from utils.config import CONFIG
+from utils.config import CONFIG, override_feature_settings
 from utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
 from utils.progress import p, step, timed
 
@@ -112,7 +112,7 @@ def prepare_targets(df: pd.DataFrame, forward_steps: int = 1) -> pd.DataFrame:
 def run_pipeline(
     task: str,
     horizon: int,
-    use_onchain: bool,
+    use_onchain: bool | None,
     txn_cost_bps: float,
     split_params: dict[str, Any],
     gpu: bool,
@@ -127,7 +127,8 @@ def run_pipeline(
     horizon:
         Prediction horizon in minutes.
     use_onchain:
-        Whether to include ``onch_`` features.
+        Optional override for including ``onch_`` features. ``None`` falls back to
+        :data:`CONFIG.features`.
     txn_cost_bps:
         Transaction cost in basis points.
     split_params:
@@ -140,8 +141,14 @@ def run_pipeline(
 
     ensure_dir_exists(out_dir)
 
+    feature_settings = CONFIG.features
+    if use_onchain is not None:
+        feature_settings = override_feature_settings(
+            feature_settings, include_onchain=use_onchain
+        )
+
     df = get_price_data(SYMBOL, db_path=DB_PATH)
-    if use_onchain:
+    if feature_settings.include_onchain:
         import sqlite3
 
         start = pd.to_datetime(df["timestamp"].min(), utc=True)
@@ -159,9 +166,7 @@ def run_pipeline(
             df = df.merge(onch, left_on="timestamp", right_index=True, how="left")
         except Exception as exc:  # pragma: no cover - IO errors
             logger.warning("mempool fetch failed: %s", exc)
-    df = create_features(df)
-    if not use_onchain:
-        df = df.loc[:, ~df.columns.str.startswith("onch_")]
+    df = create_features(df, settings=feature_settings)
 
     horizon_steps = horizon // 5
     if task == "clf":
@@ -333,7 +338,7 @@ def run_pipeline(
     run_cfg = {
         "task": task,
         "horizon": horizon,
-        "use_onchain": use_onchain,
+        "use_onchain": feature_settings.include_onchain,
         "txn_cost_bps": txn_cost_bps,
         "split_params": split_params,
         "gpu": gpu,
@@ -504,11 +509,23 @@ if __name__ == "__main__":
     parser.add_argument("--predict", action="store_true")
     parser.add_argument("--task", choices=["clf", "reg"], default=None)
     parser.add_argument("--horizon", type=int, choices=[120, 240], default=120)
-    parser.add_argument("--use_onchain", action="store_true")
+    parser.add_argument(
+        "--use_onchain",
+        dest="use_onchain",
+        action="store_true",
+        help="Force inclusion of on-chain features",
+    )
+    parser.add_argument(
+        "--no-use_onchain",
+        dest="use_onchain",
+        action="store_false",
+        help="Disable on-chain features regardless of config",
+    )
     parser.add_argument("--txn_cost_bps", type=float, default=0.0)
     parser.add_argument("--split_params", type=str, default="{}")
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--out_dir", type=str, default="outputs")
+    parser.set_defaults(use_onchain=None)
     args = parser.parse_args()
 
     set_cpu_limit(CPU_LIMIT)
