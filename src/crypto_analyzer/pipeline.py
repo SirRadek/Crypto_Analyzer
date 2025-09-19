@@ -211,14 +211,23 @@ def run_pipeline(
         xgboost_available = True
 
     if xgboost_available:
+        from crypto_analyzer.models.model_xgboost import ModelXGBoost, XGBoostConfig
+
         use_gpu_flag = bool(gpu and cfg.models.use_gpu)
-        params = {
-            "n_estimators": 200,
-            "tree_method": "gpu_hist" if use_gpu_flag else "hist",
-            "eval_metric": "logloss",
-            "random_state": random_seed,
-        }
-        model = xgb.XGBClassifier(**params)
+        config = XGBoostConfig(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.08,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            eval_metric="logloss",
+            tree_method="gpu_hist" if use_gpu_flag else "hist",
+            predictor="gpu_predictor" if use_gpu_flag else "cpu_predictor",
+            n_jobs=-1,
+            random_state=random_seed,
+            verbosity=0,
+        )
+        model = ModelXGBoost(config)
     else:
         from sklearn.ensemble import RandomForestClassifier
 

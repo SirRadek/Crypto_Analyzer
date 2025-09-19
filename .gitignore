@@ -13,7 +13,7 @@ env/
 data/
 datasets/
 outputs/
-models/
+/models/
 cache/
 artifacts/
 figures/
