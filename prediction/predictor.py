@@ -33,7 +33,7 @@ def combine_predictions(
     model_paths: list[str] | None = None,
     method: str = "majority",
     use_meta_only: bool = True,
-    usage_path: str = "ml/model_usage.json",
+    usage_path: str | None = None,
     # Ladění pro BTCUSDT 2h:
     weight_ml: float = 0.7,
     weight_rules: float = 0.3,

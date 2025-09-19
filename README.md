@@ -9,11 +9,10 @@ A modular Python project for **cryptocurrency price analysis and prediction** us
 - Imports OHLCV data for any crypto pair (default: BTC/USDT) directly from Binance to SQLite.
 - Calculates technical indicators (SMA, EMA, RSI, etc.).
 - Feature engineering for ML models.
-- Supports both rule-based and machine learning (RandomForest) predictions.
-- Aggregates multiple ML models using usage-based weighting.
-- Forecast loop ensembles all regression models via usage-based weights.
+- Supports both rule-based and machine learning (RandomForest/XGBoost) predictions.
+- Calibrated stacking combines base models while falling back to simple averaging.
 - Combines signals for final trading decision.
-- Price model outputs point forecasts `p_hat` for future prices.
+- Focuses on probabilistic classification for "touch ±0.5 %" style targets.
 - Fully modular and easy to expand.
 
 ---
@@ -122,11 +121,7 @@ By default, this trains a RandomForest model and outputs the latest signals.
 Example commands for 120‑minute horizon:
 
 ```bash
-# Classification
 python main.py --task clf --horizon 120 --split_params '{"test_size":0.2}' --out_dir outputs --use_onchain
-
-# Regression
-python main.py --task reg --horizon 120 --split_params '{"test_size":0.2}' --out_dir outputs --use_onchain
 ```
 
 The pipeline writes metrics and predictions to CSV files and a simple PNG plot

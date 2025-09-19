@@ -64,10 +64,7 @@ REGISTRY = FeatureColumnRegistry(
         "z_volume",
         "rel_close_vwap",
         "ret3",
-        "ret12",
-        "rv_5m",
         "volatility_60m",
-        "parkinson12",
         "atr14",
         "tod_sin",
         "tod_cos",
@@ -248,58 +245,15 @@ def create_features(
     # --- výnosy & momentum ----------------------------------------------------
     ret1 = np.log(df["close"] / df["close"].shift(1)).astype(np.float32)
     df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
-    df["ret12"] = ret1.rolling(12).sum().astype(np.float32)
 
     # --- begin minimal anti-fragmentation patch ---
-    new: dict[str, pd.Series] = {}
-
-    def _maybe_add(name: str, values: pd.Series) -> None:
-        """Register *values* under *name* unless it already exists."""
-
-        if name in df.columns or name in new:
-            return
-        new[name] = values
-
-    cols = [
-        "close","open","high","low",
-        "volume","quote_asset_volume",
-        "taker_buy_base","taker_buy_quote","number_of_trades",
-    ]
-
-    for col in cols:
-        if col not in df.columns:
-            continue
-        s = df[col].astype(np.float32)
-        _maybe_add(f"d_{col}", s.diff())
-        mu = s.rolling(288, min_periods=144).mean()
-        sd = s.rolling(288, min_periods=144).std()
-        _maybe_add(f"z_{col}", (s - mu) / sd)
-
-    # horizonové delty najednou
-    for H, tag in [(24, "120m"), (12, "60m"), (48, "240m")]:
-        fut_low   = df["low"].shift(-H)
-        fut_high  = df["high"].shift(-H)
-        fut_close = df["close"].shift(-H)
-        new[f"delta_low_log_{tag}"]  = np.log(fut_low  / df["close"])
-        new[f"delta_low_lin_{tag}"]  = (fut_low  - df["close"])
-        new[f"delta_high_log_{tag}"] = np.log(fut_high / df["close"])
-        new[f"delta_high_lin_{tag}"] = (fut_high - df["close"])
-        if tag == "120m":
-            new["delta_log_120m"] = np.log(fut_close / df["close"])
-            new["delta_lin_120m"] = (fut_close - df["close"])
-
-    add = pd.DataFrame(new, index=df.index).astype(np.float32)
-    df = pd.concat([df, add], axis=1, copy=False)
-    df = df.copy()  # defragmentace bloků
+    # původní logika přidávala rozsáhlé z-score a delta kopie téměř všech
+    # sloupců. Pro novou minimalistickou sadu rysů je držíme vypnuté, aby
+    # nedublovaly momentum/mean-reversion metriky.
     # --- end patch ---
 
     # --- volatilita -----------------------------------------------------------
-    df["rv_5m"] = ret1.rolling(1).std().astype(np.float32)
     df["volatility_60m"] = ret1.rolling(12).std().astype(np.float32)
-
-    hl_log = np.log(df["high"] / df["low"]).astype(np.float32)
-    parkinson = (hl_log * hl_log) / (4.0 * np.log(2.0))
-    df["parkinson12"] = np.sqrt(parkinson.rolling(12).mean()).astype(np.float32)
 
     tr = pd.concat(
         [
@@ -423,11 +377,8 @@ def create_features(
         "lob_imbalance_L1": "lob_imbalance_L1",
         "lob_imbalance_L2": "lob_imbalance_L2",
         "ret3": "mom_ret3",
-        "ret12": "mom_ret12",
-        "rv_5m": "vol_rv_5m",
         "volatility_60m": "vol_volatility_60m",
         "atr14": "vol_atr14",
-        "parkinson12": "vol_parkinson12",
         "tod_sin": "time_tod_sin",
         "tod_cos": "time_tod_cos",
         "is_day": "time_is_day",
@@ -469,29 +420,7 @@ def create_features(
         df[numeric_cols] = df[numeric_cols].fillna(fill_value)
 
     # --- validace typů --------------------------------------------------------
-    feature_only = df.drop(
-        columns=[
-            "delta_log_120m",
-            "delta_lin_120m",
-            "delta_low_log_120m",
-            "delta_low_lin_120m",
-            "delta_high_log_120m",
-            "delta_high_lin_120m",
-            "delta_log_60m",
-            "delta_lin_60m",
-            "delta_log_240m",
-            "delta_lin_240m",
-            "delta_low_log_60m",
-            "delta_low_lin_60m",
-            "delta_high_log_60m",
-            "delta_high_lin_60m",
-            "delta_low_log_240m",
-            "delta_low_lin_240m",
-            "delta_high_log_240m",
-            "delta_high_lin_240m",
-        ],
-        errors="ignore",
-    )
+    feature_only = df
     onch_cols = [c for c in feature_only.columns if c.startswith("onch_")]
     if feature_only.drop(columns=onch_cols, errors="ignore").isna().any().any():
         raise ValueError("NaN values present after feature engineering")
@@ -515,10 +444,8 @@ FEATURE_GROUPS: dict[str, list[str]] = {
     "lob": [r"^lob_", r"^queue_", r"book_slope", r"^wall_"],
     "momentum_vol": [
         r"ret",
-        r"^rv_",
         r"^volatility_",
         r"^atr_",
-        r"^park_",
         r"skew",
         r"kurt",
     ],
@@ -564,9 +491,9 @@ from .targets import make_targets as _make_targets  # noqa: E402
 def make_targets(df: pd.DataFrame, horizon: int = 120) -> pd.DataFrame:
     """Convenience wrapper around :func:`analysis.targets.make_targets`.
 
-    Generates regression and classification targets for the given ``horizon``
-    (in minutes). By default a 120 minute horizon is used, matching the
-    feature engineering assumptions in this module.
+    Generates classification targets for the given ``horizon`` (in minutes).
+    By default a 120 minute horizon is used, matching the feature engineering
+    assumptions in this module.
     """
 
     return _make_targets(df, horizons_min=[horizon])

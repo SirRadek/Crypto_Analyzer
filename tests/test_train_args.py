@@ -7,7 +7,6 @@ import pytest
     "module_name",
     [
         "ml.train_classifier",
-        "ml.train_regressor",
         "ml.train_meta_classifier",
     ],
 )

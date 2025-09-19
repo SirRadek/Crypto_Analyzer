@@ -1,5 +1,3 @@
-"""Machine learning package."""
+"""Machine learning helpers for classification models."""
 
-from .xgb_price import build_reg, to_price
-
-__all__ = ["build_reg", "to_price"]
+__all__: list[str] = []

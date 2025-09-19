@@ -81,4 +81,3 @@ def _run_pipeline(tmp_path: Path, task: str) -> None:
 
 def test_pipeline_smoke(tmp_path):
     _run_pipeline(tmp_path, "clf")
-    _run_pipeline(tmp_path, "reg")
