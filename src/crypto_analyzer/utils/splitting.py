@@ -61,3 +61,51 @@ class WalkForwardSplit:
             yield train_idx, test_idx
 
             test_start = test_start + pd.Timedelta(days=self.step_days)
+
+
+@dataclass
+class PurgedWalkForwardSplit:
+    """Walk-forward splitter with optional purge and embargo windows."""
+
+    train_span_days: int
+    test_span_days: int
+    step_days: int
+    min_train_days: int
+    purge_minutes: int = 0
+    embargo_minutes: int = 0
+
+    def split(self, df: pd.DataFrame) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        if "timestamp" not in df.columns:
+            raise ValueError("DataFrame must contain 'timestamp' column")
+
+        ts = pd.to_datetime(df["timestamp"]).reset_index(drop=True)
+        step = ts.diff().dropna().median()
+        if not isinstance(step, pd.Timedelta) or step <= pd.Timedelta(0):
+            step = pd.Timedelta(minutes=1)
+        start_time = ts.min() + pd.Timedelta(days=self.min_train_days)
+        test_start = start_time
+        end_time = ts.max() + step
+        embargo_delta = pd.Timedelta(minutes=self.embargo_minutes)
+        purge_delta = pd.Timedelta(minutes=self.purge_minutes)
+
+        while True:
+            train_end = test_start
+            train_start = train_end - pd.Timedelta(days=self.train_span_days)
+            test_end = train_end + pd.Timedelta(days=self.test_span_days)
+            if test_end > end_time:
+                break
+
+            train_mask = (ts >= train_start) & (ts < train_end)
+            if self.purge_minutes:
+                train_mask &= ts < (train_end - purge_delta)
+
+            test_mask = (ts >= train_end) & (ts < test_end)
+            train_idx = np.where(train_mask)[0]
+            test_idx = np.where(test_mask)[0]
+            if len(train_idx) == 0 or len(test_idx) == 0:
+                break
+            yield train_idx, test_idx
+
+            next_start = test_start + pd.Timedelta(days=self.step_days)
+            embargo_start = test_end + embargo_delta
+            test_start = max(next_start, embargo_start)

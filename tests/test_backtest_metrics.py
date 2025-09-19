@@ -20,13 +20,13 @@ def test_run_backtest_produces_equity_and_metrics():
         }
     )
 
-    result = run_backtest(df, fee=0.0)
+    result = run_backtest(df, fee_per_trade=0.0)
     equity = result["equity"]
     metrics = result["metrics"]
 
     assert list(equity.columns) == ["timestamp", "equity"]
     assert equity["equity"].iloc[0] == pytest.approx(1.0, rel=5e-3)
     assert equity["equity"].iloc[-1] >= equity["equity"].iloc[0]
-    assert set(metrics) == {"pnl", "sharpe"}
+    assert {"pnl", "sharpe", "trades", "hit_rate", "avg_ev"}.issubset(metrics.keys())
     assert metrics["pnl"] >= 0.0
     assert np.isfinite(metrics["sharpe"])
