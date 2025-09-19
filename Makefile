@@ -19,4 +19,4 @@ test:
 
 # simple demo entrypoint
 demo:
->PYTHONPATH=src python -m crypto_analyzer.cli
+>python main.py

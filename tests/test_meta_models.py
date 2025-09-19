@@ -1,3 +1,8 @@
+import os
+import sys
+
+sys.path.append(os.getcwd())
+
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import brier_score_loss
 
 from crypto_analyzer.features.engineering import FEATURE_COLUMNS, create_features
-from crypto_analyzer.pipelines import prepare_targets
+from main import prepare_targets
 from crypto_analyzer.models.meta import fit_meta_classifier, predict_meta
 
 
