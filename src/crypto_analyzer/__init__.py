@@ -9,7 +9,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
-__all__ = ["data", "features", "labeling", "models", "eval", "utils", "legacy"]
+__all__ = ["data", "features", "labeling", "models", "eval", "utils", "legacy", "pipelines"]
 
 _SUBMODULES = {name: f"{__name__}.{name}" for name in __all__}
 _ALIAS_MAP = {

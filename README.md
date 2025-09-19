@@ -135,7 +135,7 @@ are no longer wired into the default command sequence above.
 Example commands for 120‑minute horizon:
 
 ```bash
-python main.py --task clf --horizon 120 --split_params '{"test_size":0.2}' --out_dir outputs --use_onchain
+PYTHONPATH=src python -m crypto_analyzer.cli --task clf --horizon 120 --split_params '{"test_size":0.2}' --out_dir outputs --use_onchain
 ```
 
 The pipeline writes metrics, predictions, explainability artefacts and trained
