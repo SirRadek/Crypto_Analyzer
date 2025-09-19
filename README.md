@@ -220,6 +220,21 @@ configuration snapshot and metrics in ``outputs/run_id=.../metadata.json`` and
 XGBoost and PyTorch automatically fall back to CPU if no compatible CUDA wheel
 is available.
 
+## Testing & Quality Checks
+
+The repository ships with both unit tests and static analysis helpers to keep
+pipelines reproducible.  After setting up the virtual environment, run the test
+suite and linters from the project root:
+
+```bash
+pytest
+make lint  # runs the default quality gates defined in the Makefile
+```
+
+Many CI checks depend on cached feature files.  When the required fixtures are
+missing, regenerate them via `scripts/make_features.py` using the configuration
+outlined in the _Quick Start_ section above.
+
 ## Development: pre-commit
 
 Install hooks and run them locally before committing:
