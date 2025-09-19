@@ -20,7 +20,7 @@ def test_parses_args(module_name):
             "--train-end",
             "2024-01-31",
             "--horizon",
-            "5m",
+            "15m",
             "--step",
             "1m",
             "--eval-frac",

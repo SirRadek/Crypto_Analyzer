@@ -9,8 +9,10 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 from utils.config import CONFIG, OnChainSettings
+from utils.timeframes import interval_to_pandas_freq
 
 SETTINGS: OnChainSettings = CONFIG.onchain
+CANDLE_FREQ = interval_to_pandas_freq(CONFIG.interval)
 
 
 def _session() -> requests.Session:
@@ -53,11 +55,11 @@ def _cache_path(prefix: str, start: datetime | None = None, end: datetime | None
 
 
 def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
-    """Fetch 5-minute mempool statistics for the given interval."""
+    """Fetch interval-aligned mempool statistics for the given span."""
 
     start = pd.to_datetime(start, utc=True)
     end = pd.to_datetime(end, utc=True)
-    cache_file = _cache_path("mempool5m", start, end)
+    cache_file = _cache_path(f"mempool_{CONFIG.interval}", start, end)
     if cache_file.exists():
         return pd.read_parquet(cache_file)
 
@@ -82,11 +84,10 @@ def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
     df = pd.merge(df_tx, df_fee, on="time", how="outer")
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
     df = df.set_index("time").sort_index()
-    # label and close on the right edge so that a 5 minute bucket ending at
-    # ``t`` only contains information up to ``t``.  This prevents forward
-    # looking leakage when aligning with price candles labelled by their close
-    # time.
-    df = df.resample("5T", label="right", closed="right").agg(
+    # label and close on the right edge so that a candle ending at ``t`` only
+    # contains information up to ``t``.  This prevents forward looking leakage
+    # when aligning with price candles labelled by their close time.
+    df = df.resample(CANDLE_FREQ, label="right", closed="right").agg(
         {"tx_count": "sum", "median_fee": "median"}
     )
     df.rename(
@@ -187,7 +188,7 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
         df = df.set_index("timestamp").sort_index()
         df["onch_usdt_count"] = 1
         df.rename(columns={"usd": "onch_usd"}, inplace=True)
-        df = df.resample("5T", label="right", closed="right").agg(
+        df = df.resample(CANDLE_FREQ, label="right", closed="right").agg(
             {"onch_usdt_count": "sum", "onch_usd": "sum"}
         )
     else:

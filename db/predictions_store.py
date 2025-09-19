@@ -30,6 +30,7 @@ def create_predictions_table(
             "interval",
             "target_time_ms",
             "p_hat",
+            "prob_move_ge_05",
             "y_true_hat",
             "abs_error",
         }
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS {table_name}_new (
   interval TEXT NOT NULL,
   target_time_ms INTEGER NOT NULL,
   p_hat REAL,
+  prob_move_ge_05 REAL,
   y_true_hat REAL,
   abs_error REAL
 );
@@ -64,6 +66,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} ON {table_name}_new(symbol, in
                 select_cols.append("y_pred AS p_hat")
             else:
                 select_cols.append("NULL AS p_hat")
+            if "prob_move_ge_05" in cols:
+                select_cols.append("prob_move_ge_05")
+            else:
+                select_cols.append("NULL AS prob_move_ge_05")
             if "y_true_hat" in cols:
                 select_cols.append("y_true_hat")
             else:
@@ -74,7 +80,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} ON {table_name}_new(symbol, in
                 select_cols.append("NULL AS abs_error")
             cursor.execute(
                 f"INSERT OR IGNORE INTO {table_name}_new("
-                "symbol, interval, target_time_ms, p_hat, y_true_hat, abs_error"
+                "symbol, interval, target_time_ms, p_hat, prob_move_ge_05, y_true_hat, abs_error"
                 ") SELECT "
                 + ", ".join(select_cols)
                 + f" FROM {table_name}"
@@ -97,11 +103,12 @@ def save_predictions(
         cursor = conn.cursor()
         cursor.executemany(
             f"""
-            INSERT INTO {table_name} (symbol, interval, target_time_ms, p_hat)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO {table_name} (symbol, interval, target_time_ms, p_hat, prob_move_ge_05)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(symbol, interval, target_time_ms)
             DO UPDATE SET
-              p_hat=excluded.p_hat
+              p_hat=excluded.p_hat,
+              prob_move_ge_05=excluded.prob_move_ge_05
             """,
             values,
         )

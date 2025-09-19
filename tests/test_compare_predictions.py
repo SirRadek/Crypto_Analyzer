@@ -12,7 +12,7 @@ def test_backfill_updates_predictions(tmp_path):
         conn.execute(
             "INSERT INTO predictions (symbol, interval, target_time_ms, p_hat)"
             " VALUES (?, ?, ?, ?)",
-            ("BTCUSDT", "5m", 123, 10.0),
+            ("BTCUSDT", "15m", 123, 10.0),
         )
         conn.execute(
             "CREATE TABLE prices (symbol TEXT, open_time INTEGER, close REAL)"

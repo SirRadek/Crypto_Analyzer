@@ -6,10 +6,10 @@ import pandas as pd
 from analysis.feature_engineering import FEATURE_COLUMNS, create_features
 from db.db_connector import get_price_data
 from ml.train_regressor import train_regressor
+from utils.config import CONFIG
 
-DB_PATH = "db/data/crypto_data.sqlite"
-SYMBOL = "BTCUSDT"
-INTERVAL = "5m"
+DB_PATH = CONFIG.db_path
+SYMBOL = CONFIG.symbol
 
 # must match your training features
 FEATURE_COLS = FEATURE_COLUMNS

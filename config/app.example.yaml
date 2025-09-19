@@ -6,9 +6,9 @@
 core:
   # Trading pair symbol and candle interval to analyse
   symbol: BTCUSDT
-  interval: 5m
-  # Number of prediction steps (5-minute candles) the meta-model forecasts
-  forward_steps: 24
+  interval: 15m
+  # Number of prediction steps (15-minute candles) the meta-model forecasts
+  forward_steps: 8
   # Historical window (in days) to fetch when preparing datasets
   history_days: 1825
   # Timezone used for time-based features
@@ -20,7 +20,7 @@ database:
   # Table for persisting model predictions
   predictions_table: predictions
   # Table containing on-chain metrics aligned to the candle grid
-  onchain_table: onchain_5m
+  onchain_table: onchain_15m
   # Optional feature store path (set to null to disable)
   feature_store: null
   # Chunk size used when streaming large tables from disk

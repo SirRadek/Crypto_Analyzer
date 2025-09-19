@@ -7,7 +7,6 @@ from typing import Any
 
 import yaml
 
-
 CONFIG_FILE_ENV = "APP_CONFIG_FILE"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -223,12 +222,12 @@ def _resolve_cpu_limit(value: Any) -> int:
 
 def _build_core_settings(data: dict[str, Any]) -> CoreSettings:
     symbol = os.getenv("SYMBOL") or _as_str(data.get("symbol"), "BTCUSDT")
-    interval = os.getenv("INTERVAL") or _as_str(data.get("interval"), "5m")
+    interval = os.getenv("INTERVAL") or _as_str(data.get("interval"), "15m")
     forward_env = os.getenv("FORWARD_STEPS")
     forward_steps = (
         int(forward_env)
         if forward_env is not None
-        else _as_int(data.get("forward_steps"), 24)
+        else _as_int(data.get("forward_steps"), 8)
     )
     history_days = _as_int(data.get("history_days"), 5 * 365)
     timezone = _as_str(data.get("timezone"), "UTC")
@@ -248,7 +247,7 @@ def _build_database_settings(data: dict[str, Any]) -> DatabaseSettings:
     table_pred = os.getenv("TABLE_PRED") or _as_str(
         data.get("predictions_table"), "predictions"
     )
-    onchain_table = _as_str(data.get("onchain_table"), "onchain_5m")
+    onchain_table = _as_str(data.get("onchain_table"), "onchain_15m")
     feature_store = data.get("feature_store")
     feature_store_str = str(feature_store) if feature_store not in (None, "") else None
     read_chunksize = _as_int(data.get("read_chunksize"), 100_000)

@@ -1,7 +1,7 @@
 """Live mempool WebSocket logger.
 
-Connects to mempool.space WebSocket API and appends five-minute aggregated
-snapshots into the ``onchain_5m`` table. This module is intended to be run via
+Connects to mempool.space WebSocket API and appends interval-aligned aggregated
+snapshots into the configured on-chain table. This module is intended to be run via
 ``cron`` after the historical backfill to keep the dataset up to date.
 """
 
@@ -15,14 +15,19 @@ from typing import Any
 import pandas as pd
 import websocket
 
+from utils.config import CONFIG
+from utils.timeframes import interval_to_pandas_freq
+
 from .backfill_onchain_history import (
     COLUMNS,
-    ensure_onchain_schema,
     _percentile,
     _weighted_avg,
+    ensure_onchain_schema,
 )
 
 WS_URL = "wss://mempool.space/api/v1/ws"
+ONCHAIN_TABLE = CONFIG.database.onchain_table
+FLOOR_FREQ = interval_to_pandas_freq(CONFIG.interval)
 
 
 def log_mempool_ws(db_path: str) -> None:  # pragma: no cover - network
@@ -38,7 +43,7 @@ def log_mempool_ws(db_path: str) -> None:  # pragma: no cover - network
         mempool: dict[str, Any] | None = msg.get("mempool")
         if not isinstance(mempool, dict):
             return
-        ts = pd.Timestamp(datetime.now(UTC)).floor("5min")
+        ts = pd.Timestamp(datetime.now(UTC)).floor(FLOOR_FREQ)
         hist = mempool.get("fee_histogram", [])
         record = {
             "ts_utc": int(ts.timestamp()),
@@ -54,7 +59,7 @@ def log_mempool_ws(db_path: str) -> None:  # pragma: no cover - network
         placeholders = ",".join(["?"] * len(cols))
         values = [record.get(c) for c in cols]
         conn.execute(
-            f"INSERT OR REPLACE INTO onchain_5m ({','.join(cols)}) VALUES ({placeholders})",
+            f"INSERT OR REPLACE INTO {ONCHAIN_TABLE} ({','.join(cols)}) VALUES ({placeholders})",
             values,
         )
         conn.commit()
