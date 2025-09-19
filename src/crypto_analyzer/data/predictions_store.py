@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterable, Sequence
 
-DB_PATH = Path("db/data/crypto_data.sqlite")  # same DB like prices
+DB_PATH = Path("data/crypto_data.sqlite")  # same DB like prices
 TABLE_NAME = "predictions"
 
 

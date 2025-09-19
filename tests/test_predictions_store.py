@@ -1,6 +1,6 @@
 import sqlite3
 
-from db.predictions_store import create_predictions_table, save_predictions
+from crypto_analyzer.data.predictions_store import create_predictions_table, save_predictions
 
 
 def test_predictions_upsert(tmp_path):

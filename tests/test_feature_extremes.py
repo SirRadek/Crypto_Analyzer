@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from analysis.feature_engineering import create_features
+from crypto_analyzer.features.engineering import create_features
 
 
 def test_future_extreme_targets_once():

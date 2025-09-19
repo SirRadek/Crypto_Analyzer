@@ -16,7 +16,7 @@ core:
 
 database:
   # Primary SQLite database containing OHLCV candles
-  price_store: db/data/crypto_data.sqlite
+  price_store: data/crypto_data.sqlite
   # Table for persisting model predictions
   predictions_table: predictions
   # Table containing on-chain metrics aligned to the candle grid
@@ -52,9 +52,9 @@ features:
 
 models:
   # Directory storing trained base and meta-model artefacts
-  directory: ml/models
+  directory: artifacts/models
   # Glob for accuracy/score JSON files used as model weights
-  weights_glob: ml/backtest_acc_*.json
+  weights_glob: artifacts/backtest_acc_*.json
   # Whether to attempt GPU acceleration for XGBoost learners
   use_gpu: true
   # Tree method passed to XGBoost when GPU mode is enabled

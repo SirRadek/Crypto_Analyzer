@@ -6,8 +6,8 @@ import pytest
 @pytest.mark.parametrize(
     "module_name",
     [
-        "ml.train_classifier",
-        "ml.train_meta_classifier",
+        "crypto_analyzer.models.train_classifier",
+        "crypto_analyzer.models.train_meta_classifier",
     ],
 )
 def test_parses_args(module_name):

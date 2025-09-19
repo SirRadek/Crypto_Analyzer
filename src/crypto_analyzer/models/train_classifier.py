@@ -8,16 +8,19 @@ from collections.abc import Sequence
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import joblib
 import numpy as np
-import xgboost as xgb
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 
-MODEL_PATH = "ml/meta_model_clf.joblib"
+MODEL_PATH = "artifacts/meta_model_clf.joblib"
 logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import xgboost as xgb
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -55,8 +58,10 @@ def train_classifier(
     params: dict[str, Any] | None = None,
     use_gpu: bool = False,
     train_window: int | None = None,
-) -> xgb.XGBClassifier:
+) -> "xgb.XGBClassifier":
     """Train an XGBoost classifier with optional GPU acceleration."""
+
+    import xgboost as xgb
 
     if train_window is not None:
         X = X[-train_window:]

@@ -23,8 +23,8 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 import requests
 
-from utils.config import CONFIG
-from utils.timeframes import interval_to_pandas_freq
+from crypto_analyzer.utils.config import CONFIG
+from crypto_analyzer.utils.timeframes import interval_to_pandas_freq
 
 logger = logging.getLogger(__name__)
 

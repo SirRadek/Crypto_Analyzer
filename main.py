@@ -2,21 +2,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import xgboost as xgb
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 
-from analysis.feature_engineering import assign_feature_groups, create_features
-from db.db_connector import get_price_data
-from utils.config import CONFIG, override_feature_settings
-from utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
-from utils.progress import timed
-from utils.timeframes import interval_to_minutes
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+for candidate in (ROOT, SRC):
+    if str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+from crypto_analyzer.features.engineering import assign_feature_groups, create_features
+from crypto_analyzer.data.db_connector import get_price_data
+from crypto_analyzer.utils.config import CONFIG, override_feature_settings
+from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
+from crypto_analyzer.utils.progress import timed
+from crypto_analyzer.utils.timeframes import interval_to_minutes
 
 logger = get_logger(__name__)
 
@@ -93,13 +99,33 @@ def run_pipeline(
     split_cfg.update(split_params)
     X_train, X_test, y_train, y_test = train_test_split(X, y, **split_cfg)
 
-    params = {
-        "n_estimators": 200,
-        "tree_method": "gpu_hist" if gpu else "hist",
-        "eval_metric": "logloss",
-        "random_state": 42,
-    }
-    model = xgb.XGBClassifier(**params)
+    try:
+        import xgboost as xgb
+    except ModuleNotFoundError:  # pragma: no cover - optional dependency
+        xgboost_available = False
+        xgb = None  # type: ignore[assignment]
+    else:
+        xgboost_available = True
+
+    if xgboost_available:
+        params = {
+            "n_estimators": 200,
+            "tree_method": "gpu_hist" if gpu else "hist",
+            "eval_metric": "logloss",
+            "random_state": 42,
+        }
+        model = xgb.XGBClassifier(**params)
+    else:
+        from sklearn.ensemble import RandomForestClassifier
+
+        logger.warning("xgboost not available; falling back to RandomForestClassifier.")
+        model = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=6,
+            n_jobs=-1,
+            random_state=42,
+        )
+
     model.fit(X_train, y_train)
 
     probas = model.predict_proba(X_test)[:, 1]
@@ -121,57 +147,66 @@ def run_pipeline(
     )
     pred_df.to_csv(out_path / "predictions_clf.csv", index=False)
 
-    try:  # optional explainability artefacts
-        import matplotlib.pyplot as plt
-        import shap
-        from sklearn.inspection import permutation_importance
+    if xgboost_available:
+        try:  # optional explainability artefacts
+            import matplotlib.pyplot as plt
+            import shap
+            from sklearn.inspection import permutation_importance
 
-        groups = assign_feature_groups(list(X.columns))
+            groups = assign_feature_groups(list(X.columns))
 
-        perm = permutation_importance(
-            model, X_test, y_test, n_repeats=5, random_state=42
-        )
-        perm_df = pd.DataFrame(
-            {"feature": X.columns, "importance": perm.importances_mean}
-        ).sort_values("importance", ascending=False)
-        perm_df.to_csv(out_path / "perm_importance_clf.csv", index=False)
+            perm = permutation_importance(
+                model, X_test, y_test, n_repeats=5, random_state=42
+            )
+            perm_df = pd.DataFrame(
+                {"feature": X.columns, "importance": perm.importances_mean}
+            ).sort_values("importance", ascending=False)
+            perm_df.to_csv(out_path / "perm_importance_clf.csv", index=False)
 
-        explainer = shap.Explainer(model, X_train)
-        shap_vals = explainer(X_test).values
-        shap_mean = (
-            np.abs(shap_vals)
-            .mean(axis=0)
-        )
-        shap_df = pd.DataFrame(
-            {"feature": X.columns, "mean_abs_shap": shap_mean}
-        ).sort_values("mean_abs_shap", ascending=False)
-        shap_df.to_csv(out_path / "shap_values_clf.csv", index=False)
+            explainer = shap.Explainer(model, X_train)
+            shap_vals = explainer(X_test).values
+            shap_mean = (
+                np.abs(shap_vals)
+                .mean(axis=0)
+            )
+            shap_df = pd.DataFrame(
+                {"feature": X.columns, "mean_abs_shap": shap_mean}
+            ).sort_values("mean_abs_shap", ascending=False)
+            shap_df.to_csv(out_path / "shap_values_clf.csv", index=False)
 
-        shap_df["group"] = shap_df["feature"].map(groups)
-        shap_group = shap_df.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
-        shap_group.to_csv(out_path / "shap_group_clf.csv")
+            shap_df["group"] = shap_df["feature"].map(groups)
+            shap_group = (
+                shap_df.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
+            )
+            shap_group.to_csv(out_path / "shap_group_clf.csv")
 
-        perm_df["group"] = perm_df["feature"].map(groups)
-        perm_group = perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
-        perm_group.to_csv(out_path / "perm_group_clf.csv")
+            perm_df["group"] = perm_df["feature"].map(groups)
+            perm_group = (
+                perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
+            )
+            perm_group.to_csv(out_path / "perm_group_clf.csv")
 
-        fig, ax = plt.subplots()
-        shap_df.head(20).plot.barh(x="feature", y="mean_abs_shap", ax=ax)
-        fig.tight_layout()
-        fig.savefig(out_path / "shap_top20_clf.png")
-        plt.close(fig)
+            fig, ax = plt.subplots()
+            shap_df.head(20).plot.barh(x="feature", y="mean_abs_shap", ax=ax)
+            fig.tight_layout()
+            fig.savefig(out_path / "shap_top20_clf.png")
+            plt.close(fig)
 
-        fig, ax = plt.subplots()
-        perm_df.head(20).plot.barh(x="feature", y="importance", ax=ax)
-        fig.tight_layout()
-        fig.savefig(out_path / "perm_top20_clf.png")
-        plt.close(fig)
+            fig, ax = plt.subplots()
+            perm_df.head(20).plot.barh(x="feature", y="importance", ax=ax)
+            fig.tight_layout()
+            fig.savefig(out_path / "perm_top20_clf.png")
+            plt.close(fig)
 
-    except Exception:  # pragma: no cover - optional deps may be missing
-        logger.info("Skipping explainability outputs due to missing dependencies")
+        except Exception:  # pragma: no cover - optional deps may be missing
+            logger.info("Skipping explainability outputs due to missing dependencies")
 
-    booster_path = out_path / "clf_model.json"
-    model.get_booster().save_model(booster_path)
+        booster_path = out_path / "clf_model.json"
+        model.get_booster().save_model(booster_path)
+    else:
+        booster_path = out_path / "clf_model.json"
+        with booster_path.open("w", encoding="utf-8") as f:
+            json.dump({"model": "RandomForestClassifier"}, f)
 
     run_cfg = {
         "task": task,

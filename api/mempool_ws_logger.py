@@ -15,8 +15,8 @@ from typing import Any
 import pandas as pd
 import websocket
 
-from utils.config import CONFIG
-from utils.timeframes import interval_to_pandas_freq
+from crypto_analyzer.utils.config import CONFIG
+from crypto_analyzer.utils.timeframes import interval_to_pandas_freq
 
 from .backfill_onchain_history import (
     COLUMNS,

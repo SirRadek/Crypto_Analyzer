@@ -24,7 +24,7 @@ def _build_prices_query(symbol: str, target_times: Iterable[int]) -> tuple[str, 
 
 
 def backfill_actuals_and_errors(
-    db_path: str | Path = "db/data/crypto_data.sqlite",
+    db_path: str | Path = "data/crypto_data.sqlite",
     table_pred: str = "predictions",
     symbol: str = "BTCUSDT",
 ) -> None:

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from ml.backtest import run_backtest
+from crypto_analyzer.eval.backtest import run_backtest
 
 
 def test_backtest_equity_length():

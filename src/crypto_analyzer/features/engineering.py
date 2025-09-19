@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
-from utils.config import CONFIG, FeatureSettings
+from crypto_analyzer.utils.config import CONFIG, FeatureSettings
 
 # Lehký FE laděný pro 2h BTCUSDT. Bez těžkých závislostí, vše float32.
 
@@ -485,11 +485,11 @@ def assign_feature_groups(columns: list[str]) -> dict[str, str]:
 
 
 # -- Targets -----------------------------------------------------------------
-from .targets import make_targets as _make_targets  # noqa: E402
+from crypto_analyzer.labeling.targets import make_targets as _make_targets  # noqa: E402
 
 
 def make_targets(df: pd.DataFrame, horizon: int = 120) -> pd.DataFrame:
-    """Convenience wrapper around :func:`analysis.targets.make_targets`.
+    """Convenience wrapper around :func:`crypto_analyzer.labeling.targets.make_targets`.
 
     Generates classification targets for the given ``horizon`` (in minutes).
     By default a 120 minute horizon is used, matching the feature engineering

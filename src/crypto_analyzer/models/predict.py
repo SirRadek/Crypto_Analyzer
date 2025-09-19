@@ -19,14 +19,14 @@ def _load_threshold(path: str) -> float:
 
 
 def _lazy_meta():
-    return importlib.import_module("ml.meta")
+    return importlib.import_module("crypto_analyzer.models.meta")
 
 
 def predict_ml(
     df,
     feature_cols,
-    model_path: str = "ml/meta_model_cls.joblib",
-    threshold_path: str = "ml/threshold.json",
+    model_path: str = "artifacts/meta_model_cls.joblib",
+    threshold_path: str = "artifacts/threshold.json",
 ):
     """Predict class labels (0/1) using the calibrated meta classifier."""
 
@@ -35,7 +35,7 @@ def predict_ml(
     return (probas >= threshold).astype(int)
 
 
-def predict_ml_proba(df, feature_cols, model_path: str = "ml/meta_model_cls.joblib"):
+def predict_ml_proba(df, feature_cols, model_path: str = "artifacts/meta_model_cls.joblib"):
     """Return calibrated probability of the positive class (price up)."""
     return _lazy_meta().predict_meta(df, feature_cols, model_path, proba=True)
 

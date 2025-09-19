@@ -16,8 +16,7 @@ models/
 .env
 *.parquet
 
-ml/*.pkl
-ml/*.joblib
+artifacts/
 
 # modely (ideálně LFS)
 *.pt

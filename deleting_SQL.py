@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import time
 
-from utils.config import CONFIG
+from crypto_analyzer.utils.config import CONFIG
 
 TWO_YEARS_MS = 2 * 365 * 24 * 60 * 60 * 1000
 ONE_YEAR_MS = 1 * 365 * 24 * 60 * 60 * 1000

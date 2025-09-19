@@ -4,7 +4,7 @@ import time
 from sklearn.datasets import make_classification
 from sklearn.ensemble import RandomForestClassifier
 
-from ml.oob import fit_incremental_forest, halving_random_search
+from crypto_analyzer.eval.oob import fit_incremental_forest, halving_random_search
 
 
 def test_incremental_forest_faster_and_oob(tmp_path):
