@@ -56,10 +56,13 @@ def get_price_data(
 
     if "open_time" in df.columns:
         df = df.rename(columns={"open_time": "timestamp"})
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
 
-    drop_cols: Iterable[str] = (col for col in ("symbol", "interval") if col in df.columns)
+    drop_cols: Iterable[str] = (
+        col for col in ("symbol", "interval", "close_time") if col in df.columns
+    )
     if drop := list(drop_cols):
         df = df.drop(columns=drop)
 
+    df = df.sort_values("timestamp").reset_index(drop=True)
     return df

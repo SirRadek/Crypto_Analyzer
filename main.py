@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+import yaml
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 
@@ -18,31 +22,18 @@ for candidate in (ROOT, SRC):
         sys.path.insert(0, str(candidate))
 
 from crypto_analyzer.features.engineering import assign_feature_groups, create_features
+from crypto_analyzer.labeling.targets import make_targets
 from crypto_analyzer.data.db_connector import get_price_data
-from crypto_analyzer.utils.config import CONFIG, override_feature_settings
+from crypto_analyzer.utils.config import CONFIG, config_to_dict, override_feature_settings
 from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
 from crypto_analyzer.utils.progress import timed
 from crypto_analyzer.utils.timeframes import interval_to_minutes
 
 logger = get_logger(__name__)
 
-SYMBOL = CONFIG.symbol
-DB_PATH = CONFIG.db_path
-INTERVAL = CONFIG.interval
-INTERVAL_MINUTES = interval_to_minutes(INTERVAL)
 CPU_LIMIT = CONFIG.cpu_limit
 
-
-def prepare_targets(df: pd.DataFrame, forward_steps: int = 1) -> pd.DataFrame:
-    """Create binary classification targets ``forward_steps`` ahead."""
-
-    df = df.copy(deep=False)
-    df["target_cls"] = (df["close"].shift(-forward_steps) > df["close"]).astype("int8")
-    df = df.dropna(subset=["target_cls"])
-    return df
-
-
-def _build_feature_matrix(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+def _build_feature_matrix(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Series]:
     base_cols = {
         "timestamp",
         "open",
@@ -55,10 +46,57 @@ def _build_feature_matrix(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
         "taker_buy_quote",
         "number_of_trades",
     }
-    feature_cols = [c for c in df.columns if c not in base_cols.union({"target"})]
+    target_columns = {target_col}
+    target_columns.update(
+        c for c in df.columns if c.startswith("cls_sign_") or c.startswith("beyond_costs_")
+    )
+    feature_cols = [c for c in df.columns if c not in base_cols.union(target_columns)]
     X = df[feature_cols].astype(np.float32)
-    y = df["target"].astype(np.int8)
+    y = df[target_col].astype(np.int8)
     return X, y
+
+
+def prepare_targets(
+    df: pd.DataFrame,
+    forward_steps: int = 1,
+    *,
+    txn_cost_bps: float = 1.0,
+) -> pd.DataFrame:
+    """Create a DataFrame with the binary target ``forward_steps`` ahead."""
+
+    if "timestamp" not in df.columns:
+        raise KeyError("Input frame must contain a 'timestamp' column")
+
+    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    if ts.isna().any():
+        raise ValueError("Timestamp column contains non-parsable values")
+    deltas = ts.diff().dropna()
+    if len(deltas) == 0:
+        step_minutes = interval_to_minutes(CONFIG.interval)
+    else:
+        median_delta = deltas.median()
+        step_minutes = (
+            int(round(median_delta.total_seconds() / 60)) if isinstance(median_delta, pd.Timedelta) else 1
+        )
+        step_minutes = max(step_minutes, 1)
+
+    horizon_minutes = max(1, forward_steps) * step_minutes
+    labeled = make_targets(df, horizons_min=[horizon_minutes], txn_cost_bps=txn_cost_bps)
+    target_col = f"cls_sign_{horizon_minutes}m"
+    if target_col not in labeled.columns:
+        raise KeyError(f"Target column {target_col!r} missing from generated targets")
+
+    if forward_steps > 0:
+        if len(labeled) <= forward_steps:
+            raise ValueError("Not enough rows to build forward-looking targets")
+        labeled = labeled.iloc[:-forward_steps, :].copy()
+
+    labeled = labeled.dropna(subset=[target_col]).reset_index(drop=True)
+    drop_cols = [c for c in labeled.columns if c.startswith("beyond_costs_")]
+    if drop_cols:
+        labeled = labeled.drop(columns=drop_cols)
+    labeled = labeled.rename(columns={target_col: "target_cls"})
+    return labeled
 
 
 def run_pipeline(
@@ -73,7 +111,13 @@ def run_pipeline(
     if task != "clf":
         raise ValueError("Only classification pipeline is supported")
 
-    ensure_dir_exists(out_dir)
+    base_out_dir = ensure_dir_exists(Path(out_dir))
+    run_id = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
+    run_dir = ensure_dir_exists(base_out_dir / f"run_id={run_id}")
+
+    random_seed = CONFIG.models.random_seed
+    random.seed(random_seed)
+    np.random.seed(random_seed)
 
     feature_settings = CONFIG.features
     if use_onchain is not None:
@@ -81,22 +125,32 @@ def run_pipeline(
             feature_settings, include_onchain=use_onchain
         )
 
-    df = get_price_data(SYMBOL, db_path=DB_PATH)
-    df = create_features(df, settings=feature_settings)
-
-    if horizon % INTERVAL_MINUTES != 0:
+    interval_minutes = interval_to_minutes(CONFIG.interval)
+    if horizon % interval_minutes != 0:
         raise ValueError(
             "Prediction horizon must be divisible by the candle interval: "
-            f"{horizon}m vs {INTERVAL}"
+            f"{horizon}m vs {CONFIG.interval}"
         )
-    horizon_steps = horizon // INTERVAL_MINUTES
-    df["target"] = (df["close"].shift(-horizon_steps) > df["close"]).astype(np.int8)
-    df = df.dropna(subset=["target"])
+    horizon_steps = max(1, horizon // interval_minutes)
 
-    X, y = _build_feature_matrix(df)
+    df = get_price_data(CONFIG.symbol, db_path=CONFIG.db_path)
+    df = create_features(df, settings=feature_settings)
+    df = make_targets(df, horizons_min=[horizon], txn_cost_bps=txn_cost_bps)
+    target_col = f"cls_sign_{horizon}m"
+    if target_col not in df.columns:
+        raise KeyError(f"Target column {target_col!r} missing from target generation")
+    if horizon_steps > 0:
+        if len(df) <= horizon_steps:
+            raise ValueError("Not enough samples for the requested prediction horizon")
+        df = df.iloc[:-horizon_steps, :].copy()
 
-    split_cfg = {"test_size": 0.2, "shuffle": False}
+    df = df.dropna(subset=[target_col]).reset_index(drop=True)
+
+    X, y = _build_feature_matrix(df, target_col)
+
+    split_cfg = {"test_size": 0.2, "shuffle": False, "random_state": random_seed}
     split_cfg.update(split_params)
+    split_cfg["shuffle"] = False
     X_train, X_test, y_train, y_test = train_test_split(X, y, **split_cfg)
 
     try:
@@ -108,11 +162,12 @@ def run_pipeline(
         xgboost_available = True
 
     if xgboost_available:
+        use_gpu_flag = bool(gpu and CONFIG.models.use_gpu)
         params = {
             "n_estimators": 200,
-            "tree_method": "gpu_hist" if gpu else "hist",
+            "tree_method": "gpu_hist" if use_gpu_flag else "hist",
             "eval_metric": "logloss",
-            "random_state": 42,
+            "random_state": random_seed,
         }
         model = xgb.XGBClassifier(**params)
     else:
@@ -123,7 +178,7 @@ def run_pipeline(
             n_estimators=200,
             max_depth=6,
             n_jobs=-1,
-            random_state=42,
+            random_state=random_seed,
         )
 
     model.fit(X_train, y_train)
@@ -132,9 +187,8 @@ def run_pipeline(
     preds = (probas >= 0.5).astype(np.int8)
     accuracy = float(accuracy_score(y_test, preds))
 
-    out_path = Path(out_dir)
-    metrics = {"accuracy": accuracy}
-    with (out_path / "metrics.json").open("w", encoding="utf-8") as f:
+    metrics = {"accuracy": accuracy, "test_size": split_cfg.get("test_size", 0.2)}
+    with (run_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
     pred_df = pd.DataFrame(
@@ -145,7 +199,7 @@ def run_pipeline(
             "y_pred": preds,
         }
     )
-    pred_df.to_csv(out_path / "predictions_clf.csv", index=False)
+    pred_df.to_csv(run_dir / "predictions_clf.csv", index=False)
 
     if xgboost_available:
         try:  # optional explainability artefacts
@@ -156,12 +210,12 @@ def run_pipeline(
             groups = assign_feature_groups(list(X.columns))
 
             perm = permutation_importance(
-                model, X_test, y_test, n_repeats=5, random_state=42
+                model, X_test, y_test, n_repeats=5, random_state=random_seed
             )
             perm_df = pd.DataFrame(
                 {"feature": X.columns, "importance": perm.importances_mean}
             ).sort_values("importance", ascending=False)
-            perm_df.to_csv(out_path / "perm_importance_clf.csv", index=False)
+            perm_df.to_csv(run_dir / "perm_importance_clf.csv", index=False)
 
             explainer = shap.Explainer(model, X_train)
             shap_vals = explainer(X_test).values
@@ -172,54 +226,61 @@ def run_pipeline(
             shap_df = pd.DataFrame(
                 {"feature": X.columns, "mean_abs_shap": shap_mean}
             ).sort_values("mean_abs_shap", ascending=False)
-            shap_df.to_csv(out_path / "shap_values_clf.csv", index=False)
+            shap_df.to_csv(run_dir / "shap_values_clf.csv", index=False)
 
             shap_df["group"] = shap_df["feature"].map(groups)
             shap_group = (
                 shap_df.groupby("group")["mean_abs_shap"].sum().sort_values(ascending=False)
             )
-            shap_group.to_csv(out_path / "shap_group_clf.csv")
+            shap_group.to_csv(run_dir / "shap_group_clf.csv")
 
             perm_df["group"] = perm_df["feature"].map(groups)
             perm_group = (
                 perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
             )
-            perm_group.to_csv(out_path / "perm_group_clf.csv")
+            perm_group.to_csv(run_dir / "perm_group_clf.csv")
 
             fig, ax = plt.subplots()
             shap_df.head(20).plot.barh(x="feature", y="mean_abs_shap", ax=ax)
             fig.tight_layout()
-            fig.savefig(out_path / "shap_top20_clf.png")
+            fig.savefig(run_dir / "shap_top20_clf.png")
             plt.close(fig)
 
             fig, ax = plt.subplots()
             perm_df.head(20).plot.barh(x="feature", y="importance", ax=ax)
             fig.tight_layout()
-            fig.savefig(out_path / "perm_top20_clf.png")
+            fig.savefig(run_dir / "perm_top20_clf.png")
             plt.close(fig)
 
         except Exception:  # pragma: no cover - optional deps may be missing
             logger.info("Skipping explainability outputs due to missing dependencies")
 
-        booster_path = out_path / "clf_model.json"
+        booster_path = run_dir / "clf_model.json"
         model.get_booster().save_model(booster_path)
     else:
-        booster_path = out_path / "clf_model.json"
+        booster_path = run_dir / "clf_model.json"
         with booster_path.open("w", encoding="utf-8") as f:
             json.dump({"model": "RandomForestClassifier"}, f)
 
-    run_cfg = {
+    config_snapshot = config_to_dict(CONFIG)
+    with (run_dir / "config_snapshot.yaml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(config_snapshot, f, sort_keys=False)
+
+    metadata = {
+        "run_id": run_id,
         "task": task,
-        "horizon": horizon,
-        "use_onchain": feature_settings.include_onchain,
+        "horizon_minutes": horizon,
         "txn_cost_bps": txn_cost_bps,
         "split_params": split_params,
-        "gpu": gpu,
-        "out_dir": out_dir,
-        "random_state": 42,
+        "use_onchain": feature_settings.include_onchain,
+        "gpu_requested": bool(gpu),
+        "random_seed": random_seed,
+        "config_path": str(CONFIG.config_path) if CONFIG.config_path else None,
+        "created_at": datetime.utcnow().isoformat(),
+        "output_dir": str(run_dir),
     }
-    with (out_path / "run_config.json").open("w", encoding="utf-8") as f:
-        json.dump(run_cfg, f, indent=2)
+    with (run_dir / "metadata.json").open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

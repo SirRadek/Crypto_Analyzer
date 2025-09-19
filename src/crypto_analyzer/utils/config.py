@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 CONFIG_FILE_ENV = "APP_CONFIG_FILE"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
+
+load_dotenv(override=False)
 
 
 @dataclass(frozen=True)
@@ -427,4 +430,25 @@ __all__ = [
     "OnChainSettings",
     "RuntimeSettings",
     "override_feature_settings",
+    "config_to_dict",
 ]
+
+
+def _serialise(value: Any) -> Any:
+    if is_dataclass(value):
+        return {k: _serialise(v) for k, v in asdict(value).items()}
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_serialise(v) for v in value]
+    if isinstance(value, list):
+        return [_serialise(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _serialise(v) for k, v in value.items()}
+    return value
+
+
+def config_to_dict(config: AppConfig) -> dict[str, Any]:
+    """Return a JSON/YAML serialisable representation of *config*."""
+
+    return _serialise(config)

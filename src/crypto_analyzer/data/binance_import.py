@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -7,16 +6,16 @@ from pathlib import Path
 import requests
 
 from crypto_analyzer.utils.config import CONFIG
+from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger
 
-# Database location relative to repository root
-DB_PATH = Path(__file__).resolve().parents[3] / "data" / "crypto_data.sqlite"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-TABLE_NAME = 'prices'
+logger = get_logger(__name__)
+
+DB_PATH = Path(CONFIG.db_path)
+ensure_dir_exists(DB_PATH.parent)
+TABLE_NAME = "prices"
 SYMBOL = CONFIG.symbol
 INTERVAL = CONFIG.interval
-
-# Kolik dní zpět stáhnout (≈ půl roku)
-LOOKBACK_DAYS = 1880
+LOOKBACK_DAYS = CONFIG.core.history_days
 
 def get_klines(symbol, interval, start_ts, end_ts, limit=1000):
     url = "https://api.binance.com/api/v3/klines"
@@ -27,9 +26,11 @@ def get_klines(symbol, interval, start_ts, end_ts, limit=1000):
         "endTime": end_ts,
         "limit": limit,
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=10)
     if response.status_code != 200:
-        print(f"API error: {response.status_code}, {response.text}")
+        logger.error(
+            "Binance klines API error", extra={"status": response.status_code, "body": response.text}
+        )
         return []
     return response.json()
 
@@ -107,13 +108,17 @@ def import_latest_data():
         start_ts = max(last_db_ts + 1, lookback_ts)
 
     if start_ts >= end_ts:
-        print("V daném půlročním okně není co stáhnout.")
+        logger.info("V daném okně není co stáhnout.")
         return
 
-    print(
-        f"Downloading {SYMBOL}, interval {INTERVAL} "
-        f"from {datetime.fromtimestamp(start_ts/1000, timezone.utc)} "
-        f"to {datetime.fromtimestamp(end_ts/1000, timezone.utc)}"
+    logger.info(
+        "Downloading klines",
+        extra={
+            "symbol": SYMBOL,
+            "interval": INTERVAL,
+            "start": datetime.fromtimestamp(start_ts / 1000, timezone.utc).isoformat(),
+            "end": datetime.fromtimestamp(end_ts / 1000, timezone.utc).isoformat(),
+        },
     )
 
     curr_ts = start_ts
@@ -125,7 +130,7 @@ def import_latest_data():
         curr_ts = klines[-1][0] + 1
         time.sleep(0.4)
 
-    print("Done! Data saved in database:", DB_PATH)
+    logger.info("Import hotov", extra={"db_path": str(DB_PATH)})
 
 def main():
     import_latest_data()

@@ -6,10 +6,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from crypto_analyzer.utils.helpers import get_logger
+
 PROJECT_ROOT = Path(
     os.environ.get("CRYPTO_ANALYZER_PROJECT_ROOT", Path(__file__).resolve().parents[1])
 )
 MODELS_ROOT = PROJECT_ROOT / "models"
+
+logger = get_logger(__name__)
 
 
 def _ensure_models_dir(dir: Path) -> Path:
@@ -98,15 +102,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.list:
         files = list_artifacts(args.stem, args.dir)
         for f in files:
-            print(f)
+            logger.info("artifact", extra={"path": str(f)})
         return 0
 
     # Purge mode
     files = purge_artifacts(args.stem, args.dir, confirm=args.confirm)
     for f in files:
-        print(f)
+        logger.info("artifact", extra={"path": str(f)})
     if args.dry_run or not args.confirm:
-        print("Dry run - no files deleted")
+        logger.info("Dry run - no files deleted")
     return 0
 
 

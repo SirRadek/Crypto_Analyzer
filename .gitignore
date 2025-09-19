@@ -7,16 +7,22 @@ env/
 .vscode/
 .idea/
 *.iml
+.DS_Store
 
 data/
+datasets/
 outputs/
-cache/
 models/
-*.joblib
-.env
-*.parquet
-
+cache/
 artifacts/
+figures/
+
+*.joblib
+*.parquet
+*.db
+*.sqlite
+
+.env
 
 # modely (ideálně LFS)
 *.pt
