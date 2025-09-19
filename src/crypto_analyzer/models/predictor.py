@@ -5,7 +5,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from analysis.rules import combined_signal
+from crypto_analyzer.labeling.rules import combined_signal
 
 
 def _predict_ml_proba(df: pd.DataFrame, feature_cols: Iterable[str]) -> pd.Series:
@@ -14,10 +14,10 @@ def _predict_ml_proba(df: pd.DataFrame, feature_cols: Iterable[str]) -> pd.Serie
     Preferuje predict_ml_proba, jinak fallback na tvrdé 0/1.
     Lazy import kvůli import_hygiene.
     """
-    from ml.predict import predict_ml  # lazy
+    from crypto_analyzer.models.predict import predict_ml  # lazy
 
     try:
-        from ml.predict import predict_ml_proba  # type: ignore
+        from crypto_analyzer.models.predict import predict_ml_proba  # type: ignore
 
         proba = predict_ml_proba(df, feature_cols)
         return pd.Series(np.asarray(proba, dtype=np.float32), index=df.index)
@@ -55,7 +55,7 @@ def combine_predictions(
     if use_meta_only or not model_paths:
         ml_prob = _predict_ml_proba(df, feature_cols)  # [0,1]
     else:
-        from ml.predict import predict_weighted  # lazy
+        from crypto_analyzer.models.predict import predict_weighted  # lazy
 
         ml_cls = predict_weighted(df, feature_cols, model_paths, usage_path=usage_path)
         ml_prob = pd.Series(np.asarray(ml_cls, dtype=np.float32), index=df.index)

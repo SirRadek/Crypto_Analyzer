@@ -242,7 +242,7 @@ def _build_core_settings(data: dict[str, Any]) -> CoreSettings:
 
 def _build_database_settings(data: dict[str, Any]) -> DatabaseSettings:
     db_path = os.getenv("DB_PATH") or _as_str(
-        data.get("price_store"), "db/data/crypto_data.sqlite"
+        data.get("price_store"), "data/crypto_data.sqlite"
     )
     table_pred = os.getenv("TABLE_PRED") or _as_str(
         data.get("predictions_table"), "predictions"
@@ -299,8 +299,8 @@ def _build_feature_settings(data: dict[str, Any]) -> FeatureSettings:
 
 
 def _build_model_settings(data: dict[str, Any]) -> ModelSettings:
-    directory = _as_str(data.get("directory"), "ml/models")
-    weights_glob = _as_str(data.get("weights_glob"), "ml/backtest_acc_*.json")
+    directory = _as_str(data.get("directory"), "artifacts/models")
+    weights_glob = _as_str(data.get("weights_glob"), "artifacts/backtest_acc_*.json")
     use_gpu = _as_bool(data.get("use_gpu"), True)
     gpu_tree_method = _as_str(data.get("gpu_tree_method"), "gpu_hist")
     max_models = _as_int(data.get("max_models"), 16)

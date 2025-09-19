@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 
-from analysis.rules import combined_signal
-from ml.predict import predict_weighted
-from prediction.predictor import combine_predictions
+from crypto_analyzer.labeling.rules import combined_signal
+from crypto_analyzer.models.predict import predict_weighted
+from crypto_analyzer.models.predictor import combine_predictions
 
 
 def test_legacy_ensemble_path(tmp_path: Path) -> None:

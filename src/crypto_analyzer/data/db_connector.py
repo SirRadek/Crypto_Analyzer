@@ -6,8 +6,8 @@ from typing import Iterable
 
 import pandas as pd
 
-# Resolve database path relative to this file so callers don't depend on CWD
-DEFAULT_DB_PATH = Path(__file__).with_name("data").joinpath("crypto_data.sqlite")
+# Resolve database path relative to the project root so callers don't depend on CWD
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "crypto_data.sqlite"
 
 
 def _normalise_timestamp(value: int | None) -> int | None:

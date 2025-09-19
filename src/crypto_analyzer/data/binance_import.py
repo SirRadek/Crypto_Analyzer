@@ -2,14 +2,15 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import requests
 
-from utils.config import CONFIG
+from crypto_analyzer.utils.config import CONFIG
 
 # Database location relative to repository root
-DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'crypto_data.sqlite')
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+DB_PATH = Path(__file__).resolve().parents[3] / "data" / "crypto_data.sqlite"
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 TABLE_NAME = 'prices'
 SYMBOL = CONFIG.symbol
 INTERVAL = CONFIG.interval

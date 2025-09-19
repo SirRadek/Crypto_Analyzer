@@ -14,10 +14,10 @@ import xgboost as xgb
 from sklearn.model_selection import train_test_split
 
 from crypto_analyzer.model_manager import atomic_write
-from ml.model_utils import evaluate_model
-from utils.splitting import WalkForwardSplit
+from crypto_analyzer.models.utils import evaluate_model
+from crypto_analyzer.utils.splitting import WalkForwardSplit
 
-MODEL_PATH = "ml/meta_model_cls.joblib"
+MODEL_PATH = "artifacts/meta_model_cls.joblib"
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def train_model(
     test_size: float = 0.2,
     random_state: int = 42,
     use_gpu: bool = True,
-    log_path: str = "ml/oob_cls.json",
+    log_path: str = "artifacts/oob_cls.json",
     split: str = "holdout",
     wfs_params: dict[str, int] | None = None,
 ):
@@ -330,7 +330,7 @@ def train_xgb(
     plt.close()
 
     # Group importance
-    from analysis.feature_engineering import assign_feature_groups
+    from crypto_analyzer.features.engineering import assign_feature_groups
 
     groups = assign_feature_groups(list(X_sample.columns))
     fi["group"] = fi["feature"].map(groups)
@@ -430,9 +430,9 @@ def parse_args(argv: Iterable[str] | None = None):
 
 
 def main_cli(args) -> Path:
-    from analysis.feature_engineering import FEATURE_COLUMNS, create_features
+    from crypto_analyzer.features.engineering import FEATURE_COLUMNS, create_features
     from db.db_connector import get_price_data
-    from utils.config import CONFIG
+    from crypto_analyzer.utils.config import CONFIG
 
     run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
     out_dir = Path("outputs") / run_id

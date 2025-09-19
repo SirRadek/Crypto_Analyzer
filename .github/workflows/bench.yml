@@ -51,7 +51,7 @@ xgb_params:
   quantile: {}
 quantiles: {low: 0.1, high: 0.9}
 fees: {taker: 0.0004}
-features: {path: analysis/feature_list.json}
+features: {path: src/crypto_analyzer/features/feature_list.json}
 n_jobs: 2
 CFG
       - name: Run benchmark

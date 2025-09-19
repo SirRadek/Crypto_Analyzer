@@ -21,26 +21,23 @@ A modular Python project for **cryptocurrency price analysis and prediction** us
 
 ```
 
-crypto\_analyzer/
-│
-├── db/
-│   ├── data/crypto_data.sqlite # Database and raw data storage
-│   ├── db_connector.py       # Load data from SQLite
-│   └── btc_import.py         # Download OHLCV data from Binance
-├── analysis/
-│   ├── indicators.py         # Technical indicators
-│   ├── feature_engineering.py # Feature creation for ML
-│   └── rules.py              # Rule-based signals
-├── ml/
-│   ├── train.py              # ML model training
-│   ├── predict.py            # ML prediction
-│   └── model_utils.py        # Save/load/evaluate models
-├── prediction/
-│   └── predictor.py          # Signal combination logic
-├── utils/
-│   └── helpers.py            # Helper utilities
-├── main.py                   # Project entry point
-├── requirements.txt
+.
+├── src/
+│   └── crypto_analyzer/
+│       ├── data/            # Data access (SQLite, ingestion helpers)
+│       ├── features/        # Feature engineering pipelines
+│       ├── labeling/        # Target generation utilities
+│       ├── models/          # Training, prediction & ensembles
+│       ├── eval/            # Backtests, CV utilities, metrics
+│       ├── utils/           # Shared configuration and helpers
+│       └── legacy/          # Backwards-compatible adapters
+├── scripts/
+│   ├── make_features.py     # CLI for feature engineering
+│   ├── train.py             # CLI for model training
+│   └── backtest.py          # CLI for quick backtests
+├── archive/                 # Historical experiments & shell scripts
+├── config/
+├── tests/
 └── README.md
 
 ````
@@ -66,13 +63,14 @@ pip install -r requirements.txt
 
 ### 3. Download OHLCV data from Binance
 
-Edit settings in `db/btc_import.py` (symbol, interval, date range if needed), then run:
+Edit settings in `src/crypto_analyzer/data/binance_import.py` (symbol, interval, date
+range if needed), then run:
 
 ```bash
-python db/btc_import.py
+python -m crypto_analyzer.data.binance_import
 ```
 
-This creates the `db/data/crypto_data.sqlite` file with price data.
+This creates the `data/crypto_data.sqlite` file with price data.
 
 ### 4. Configure the application
 
@@ -99,8 +97,8 @@ Historical mempool and difficulty data can be imported into a dedicated table
 and continuously updated:
 
 ```bash
-python api/backfill_onchain_history.py --start 2020-07-22 --end 2020-07-23 --db db/data/crypto_data.sqlite
-python -m api.mempool_ws_logger --db db/data/crypto_data.sqlite
+python api/backfill_onchain_history.py --start 2020-07-22 --end 2020-07-23 --db data/crypto_data.sqlite
+python -m api.mempool_ws_logger --db data/crypto_data.sqlite
 ```
 
 The backfill aligns snapshots to a 5‑minute UTC grid and uses Jochen Hoenicke
@@ -111,12 +109,17 @@ is intended to be scheduled via `cron`.
 ### 6. Run analysis and prediction
 
 ```bash
-python main.py
+python scripts/make_features.py --output data/features.parquet
+python scripts/train.py --features data/features.parquet --model-path artifacts/meta_model.joblib
+python scripts/backtest.py data/predictions.csv --equity-output reports/equity.csv
 ```
 
-By default, this trains a RandomForest model and outputs the latest signals.
+The CLI entry points can be combined with your own data source by pointing
+`scripts/make_features.py` to a CSV/Parquet file (`--source file --input ...`). The
+trained model is stored at the path provided via `--model-path` and the backtest
+command writes both metrics (`backtest_metrics.json`) and the equity curve to CSV.
 
-### 7. Run the training pipeline
+### 7. Legacy pipeline
 
 Example commands for 120‑minute horizon:
 
@@ -140,41 +143,48 @@ produce models for later inference.  The following example demonstrates a
 typical workflow for a 2‑hour classification horizon:
 
 1. **Download candles** – adjust the symbol and date range in
-   `db/btc_import.py` and run:
+   `src/crypto_analyzer/data/binance_import.py` and run:
 
    ```bash
-   python db/btc_import.py
+   python -m crypto_analyzer.data.binance_import
    ```
 
-2. **(Optional) Merge additional on‑chain metrics** – mempool stats are
+2. **(Optional) Merge additional on-chain metrics** – mempool stats are
    fetched automatically, but other metrics (e.g. exchange flows) can be
    retrieved via `api/onchain.py` and stored with the `onch_` prefix in the
    SQLite `prices` table.
 
-3. **Feature engineering & target creation** – invoke the training pipeline
-   which automatically builds all features and targets:
+3. **Feature engineering** – export engineered features to disk:
 
    ```bash
-   python main.py --task clf --horizon 120 --out_dir outputs --use_onchain
+   python scripts/make_features.py --output data/features.parquet
    ```
 
-   The command writes predictions, metrics and diagnostic plots into the
-   `outputs/` directory.  Additional artefacts such as permutation and SHAP
-   importances are also exported for further analysis.
+4. **Model training** – train the gradient boosted meta-classifier:
 
-4. **Inspect results** – review the generated CSV files and graphs in
-   `outputs/` to understand model performance and feature behaviour.  The file
-   `run_config.json` captures the exact parameters used for the run, ensuring
-   full reproducibility.
+   ```bash
+   python scripts/train.py --features data/features.parquet --model-path artifacts/meta_model.joblib
+   ```
+
+5. **Backtest predictions** – evaluate the resulting forecasts on a hold-out
+   set or historical predictions:
+
+   ```bash
+   python scripts/backtest.py data/predictions.csv --equity-output reports/equity.csv
+   ```
+
+6. **Inspect results** – review the generated CSV files and graphs in
+   `reports/` (or your chosen output directory) to understand model performance
+   and feature behaviour.
 
 ---
 
 ## Customization
 
-* Add or change features in `analysis/feature_engineering.py`.
-* Adjust or create new rules in `analysis/rules.py`.
-* Tune ML model or use another classifier in `ml/train.py`.
-* Combine rule and ML signals as you wish in `prediction/predictor.py`.
+* Add or change features in `src/crypto_analyzer/features/engineering.py`.
+* Adjust or create new rules in `src/crypto_analyzer/labeling/rules.py`.
+* Tune ML models in `src/crypto_analyzer/models/train.py`.
+* Combine rule and ML signals in `src/crypto_analyzer/models/predictor.py`.
 
 ---
 
@@ -186,7 +196,7 @@ typical workflow for a 2‑hour classification horizon:
 ## Determinism & Repro
 
 Training routines default to ``random_state=42`` as defined in
-``ml/train.py``. The chosen value, together with other parameters, is logged to
+``src/crypto_analyzer/models/train.py``. The chosen value, together with other parameters, is logged to
 ``outputs/run_config.json`` to ensure runs are repeatable.
 
 ## Troubleshooting

@@ -8,8 +8,8 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-from utils.config import CONFIG, OnChainSettings
-from utils.timeframes import interval_to_pandas_freq
+from crypto_analyzer.utils.config import CONFIG, OnChainSettings
+from crypto_analyzer.utils.timeframes import interval_to_pandas_freq
 
 SETTINGS: OnChainSettings = CONFIG.onchain
 CANDLE_FREQ = interval_to_pandas_freq(CONFIG.interval)

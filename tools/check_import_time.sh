@@ -14,11 +14,11 @@ print(cand[0])
 PY
 )
 export MAIN_MODULE
-mkdir -p ml
-python -X importtime -c "import ${MAIN_MODULE}" 2> ml/import.log
-python -m tuna ml/import.log -o ml >/dev/null 2>&1 || true
+mkdir -p artifacts/import_time
+python -X importtime -c "import ${MAIN_MODULE}" 2> artifacts/import_time/import.log
+python -m tuna artifacts/import_time/import.log -o artifacts/import_time >/dev/null 2>&1 || true
 python - <<'PY'
 import json, pathlib
-log = pathlib.Path('ml/import.log').read_text().splitlines()
-pathlib.Path('ml/importtime.json').write_text(json.dumps(log))
+log = pathlib.Path('artifacts/import_time/import.log').read_text().splitlines()
+pathlib.Path('artifacts/import_time/importtime.json').write_text(json.dumps(log))
 PY

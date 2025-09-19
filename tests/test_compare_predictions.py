@@ -1,7 +1,7 @@
 import sqlite3
 
-from analysis.compare_predictions import backfill_actuals_and_errors
-from db.predictions_store import create_predictions_table
+from crypto_analyzer.eval.comparison import backfill_actuals_and_errors
+from crypto_analyzer.data.predictions_store import create_predictions_table
 
 
 def test_backfill_updates_predictions(tmp_path):

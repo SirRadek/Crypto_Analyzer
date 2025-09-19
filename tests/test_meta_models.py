@@ -11,9 +11,9 @@ from sklearn.datasets import make_classification
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import brier_score_loss
 
-from analysis.feature_engineering import FEATURE_COLUMNS, create_features
+from crypto_analyzer.features.engineering import FEATURE_COLUMNS, create_features
 from main import prepare_targets
-from ml.meta import fit_meta_classifier, predict_meta
+from crypto_analyzer.models.meta import fit_meta_classifier, predict_meta
 
 
 def _synthetic_prices(n: int = 200) -> pd.DataFrame:

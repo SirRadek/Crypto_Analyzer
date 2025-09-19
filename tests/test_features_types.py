@@ -2,13 +2,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from analysis.feature_engineering import (
+from crypto_analyzer.features.engineering import (
     FEATURE_COLUMNS,
     create_features,
     get_feature_columns,
     validate_feature_inputs,
 )
-from utils.config import FeatureSettings
+from crypto_analyzer.utils.config import FeatureSettings
 
 
 def test_features_types():
