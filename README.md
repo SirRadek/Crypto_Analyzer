@@ -2,17 +2,16 @@
 
 [![CI](https://github.com/SirRadek/Crypto_Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/SirRadek/Crypto_Analyzer/actions/workflows/ci.yml)
 
-A modular Python project for **cryptocurrency price analysis and prediction** using both rule-based strategies and machine learning.
+A modular Python project for **cryptocurrency price analysis and prediction** focused on probabilistic classification of short-term ±0.5 % moves.
 
 ## Features
 
 - Imports OHLCV data for any crypto pair (default: BTC/USDT) directly from Binance to SQLite.
 - Calculates technical indicators (SMA, EMA, RSI, etc.).
 - Feature engineering for ML models.
-- Supports both rule-based and machine learning (RandomForest/XGBoost) predictions.
-- Calibrated stacking combines base models while falling back to simple averaging.
-- Combines signals for final trading decision.
-- Focuses on probabilistic classification for "touch ±0.5 %" style targets.
+- Supports both rule-based and machine learning classifiers (RandomForest/XGBoost) tuned for directional moves.
+- Outputs calibrated probabilities for "touch ±0.5 %" style targets over configurable horizons.
+- Lightweight signal aggregation keeps the default pipeline purely classification-based.
 - Fully modular and easy to expand.
 
 ---
@@ -30,7 +29,7 @@ A modular Python project for **cryptocurrency price analysis and prediction** us
 │       ├── models/          # Training, prediction & ensembles
 │       ├── eval/            # Backtests, CV utilities, metrics
 │       ├── utils/           # Shared configuration and helpers
-│       └── legacy/          # Backwards-compatible adapters
+│       └── legacy/          # Backwards-compatible regression / usage ensembles
 ├── scripts/
 │   ├── make_features.py     # CLI for feature engineering
 │   ├── train.py             # CLI for model training
@@ -116,8 +115,20 @@ python scripts/backtest.py data/predictions.csv --equity-output reports/equity.c
 
 The CLI entry points can be combined with your own data source by pointing
 `scripts/make_features.py` to a CSV/Parquet file (`--source file --input ...`). The
-trained model is stored at the path provided via `--model-path` and the backtest
-command writes both metrics (`backtest_metrics.json`) and the equity curve to CSV.
+trained model stores calibrated probabilities for the default ±0.5 % "touch"
+target at the path provided via `--model-path` and the backtest command writes
+both metrics (`backtest_metrics.json`) and the equity curve to CSV.
+
+---
+
+## Default classification target
+
+The current production pipeline predicts whether price will touch ±0.5 % from
+the open within the selected horizon.  Feature engineering, training and
+backtesting CLIs therefore operate on classification labels and expose
+probabilities that can be thresholded for position sizing.  Legacy regression or
+usage-based ensembles remain available under `src/crypto_analyzer/legacy/`, but
+are no longer wired into the default command sequence above.
 
 ### 7. Legacy pipeline
 
@@ -162,7 +173,8 @@ typical workflow for a 2‑hour classification horizon:
    python scripts/make_features.py --output data/features.parquet
    ```
 
-4. **Model training** – train the gradient boosted meta-classifier:
+4. **Model training** – train the gradient boosted classifier for the ±0.5 %
+   target:
 
    ```bash
    python scripts/train.py --features data/features.parquet --model-path artifacts/meta_model.joblib

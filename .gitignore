@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 env/
+# IDE settings
 .vscode/
 .idea/
 *.iml
