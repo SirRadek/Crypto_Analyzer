@@ -56,7 +56,9 @@ def _build_feature_matrix(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFra
     }
     target_columns = {target_col}
     target_columns.update(
-        c for c in df.columns if c.startswith("cls_sign_") or c.startswith("beyond_costs_")
+        c
+        for c in df.columns
+        if c.startswith(("cls_sign_", "beyond_costs_", "triple_barrier_"))
     )
     feature_cols = [c for c in df.columns if c not in base_cols.union(target_columns)]
     X = df[feature_cols].astype(np.float32)
@@ -103,7 +105,11 @@ def prepare_targets(
         labeled = labeled.iloc[:-forward_steps, :].copy()
 
     labeled = labeled.dropna(subset=[target_col]).reset_index(drop=True)
-    drop_cols = [c for c in labeled.columns if c.startswith("beyond_costs_")]
+    drop_cols = [
+        c
+        for c in labeled.columns
+        if c.startswith(("beyond_costs_", "triple_barrier_"))
+    ]
     if drop_cols:
         labeled = labeled.drop(columns=drop_cols)
     labeled = labeled.rename(columns={target_col: "target_cls"})
