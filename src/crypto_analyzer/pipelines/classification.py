@@ -1,12 +1,12 @@
+"""Classification training pipeline utilities."""
+
 from __future__ import annotations
 
-import argparse
 import json
 import random
-import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 import numpy as np
@@ -15,25 +15,19 @@ import yaml
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 
-ROOT = Path(__file__).resolve().parent
-SRC = ROOT / "src"
-for candidate in (ROOT, SRC):
-    if str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
-
+from crypto_analyzer.data.db_connector import get_price_data
 from crypto_analyzer.features.engineering import assign_feature_groups, create_features
 from crypto_analyzer.labeling.targets import make_targets
-from crypto_analyzer.data.db_connector import get_price_data
 from crypto_analyzer.utils.config import CONFIG, config_to_dict, override_feature_settings
-from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
-from crypto_analyzer.utils.progress import timed
+from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger
 from crypto_analyzer.utils.timeframes import interval_to_minutes
 
 logger = get_logger(__name__)
 
-CPU_LIMIT = CONFIG.cpu_limit
 
 def _build_feature_matrix(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Series]:
+    """Split engineered ``df`` into ``X`` feature matrix and ``y`` targets."""
+
     base_cols = {
         "timestamp",
         "open",
@@ -62,7 +56,7 @@ def prepare_targets(
     *,
     txn_cost_bps: float = 1.0,
 ) -> pd.DataFrame:
-    """Create a DataFrame with the binary target ``forward_steps`` ahead."""
+    """Create a target-ready frame by shifting labels ``forward_steps`` ahead."""
 
     if "timestamp" not in df.columns:
         raise KeyError("Input frame must contain a 'timestamp' column")
@@ -70,14 +64,16 @@ def prepare_targets(
     ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
     if ts.isna().any():
         raise ValueError("Timestamp column contains non-parsable values")
+
     deltas = ts.diff().dropna()
     if len(deltas) == 0:
         step_minutes = interval_to_minutes(CONFIG.interval)
     else:
         median_delta = deltas.median()
-        step_minutes = (
-            int(round(median_delta.total_seconds() / 60)) if isinstance(median_delta, pd.Timedelta) else 1
-        )
+        if isinstance(median_delta, pd.Timedelta):
+            step_minutes = int(round(median_delta.total_seconds() / 60))
+        else:
+            step_minutes = 1
         step_minutes = max(step_minutes, 1)
 
     horizon_minutes = max(1, forward_steps) * step_minutes
@@ -99,15 +95,18 @@ def prepare_targets(
     return labeled
 
 
-def run_pipeline(
+def run_classification_pipeline(
+    *,
     task: str,
     horizon: int,
     use_onchain: bool | None,
     txn_cost_bps: float,
-    split_params: dict[str, Any],
+    split_params: Mapping[str, Any] | None,
     gpu: bool,
-    out_dir: str,
-) -> None:
+    out_dir: str | Path,
+) -> Path:
+    """Train the classification pipeline and persist artefacts to ``out_dir``."""
+
     if task != "clf":
         raise ValueError("Only classification pipeline is supported")
 
@@ -121,9 +120,7 @@ def run_pipeline(
 
     feature_settings = CONFIG.features
     if use_onchain is not None:
-        feature_settings = override_feature_settings(
-            feature_settings, include_onchain=use_onchain
-        )
+        feature_settings = override_feature_settings(feature_settings, include_onchain=use_onchain)
 
     interval_minutes = interval_to_minutes(CONFIG.interval)
     if horizon % interval_minutes != 0:
@@ -139,18 +136,20 @@ def run_pipeline(
     target_col = f"cls_sign_{horizon}m"
     if target_col not in df.columns:
         raise KeyError(f"Target column {target_col!r} missing from target generation")
+
     if horizon_steps > 0:
         if len(df) <= horizon_steps:
             raise ValueError("Not enough samples for the requested prediction horizon")
         df = df.iloc[:-horizon_steps, :].copy()
 
     df = df.dropna(subset=[target_col]).reset_index(drop=True)
-
     X, y = _build_feature_matrix(df, target_col)
 
-    split_cfg = {"test_size": 0.2, "shuffle": False, "random_state": random_seed}
-    split_cfg.update(split_params)
+    split_cfg: dict[str, Any] = {"test_size": 0.2, "shuffle": False, "random_state": random_seed}
+    if split_params:
+        split_cfg.update(dict(split_params))
     split_cfg["shuffle"] = False
+
     X_train, X_test, y_train, y_test = train_test_split(X, y, **split_cfg)
 
     try:
@@ -219,10 +218,7 @@ def run_pipeline(
 
             explainer = shap.Explainer(model, X_train)
             shap_vals = explainer(X_test).values
-            shap_mean = (
-                np.abs(shap_vals)
-                .mean(axis=0)
-            )
+            shap_mean = np.abs(shap_vals).mean(axis=0)
             shap_df = pd.DataFrame(
                 {"feature": X.columns, "mean_abs_shap": shap_mean}
             ).sort_values("mean_abs_shap", ascending=False)
@@ -271,7 +267,7 @@ def run_pipeline(
         "task": task,
         "horizon_minutes": horizon,
         "txn_cost_bps": txn_cost_bps,
-        "split_params": split_params,
+        "split_params": dict(split_params or {}),
         "use_onchain": feature_settings.include_onchain,
         "gpu_requested": bool(gpu),
         "random_seed": random_seed,
@@ -282,42 +278,7 @@ def run_pipeline(
     with (run_dir / "metadata.json").open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the classification pipeline")
-    parser.add_argument("--task", default="clf")
-    parser.add_argument("--horizon", type=int, default=120)
-    parser.add_argument("--use_onchain", action="store_true")
-    parser.add_argument("--txn_cost_bps", type=float, default=1.0)
-    parser.add_argument("--split_params", type=str, default="{}")
-    parser.add_argument("--gpu", action="store_true")
-    parser.add_argument("--out_dir", type=str, default="outputs")
-    parser.add_argument("--cpu_limit", type=int, default=CPU_LIMIT)
-    return parser.parse_args(argv)
+    return run_dir
 
 
-def _main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    if args.cpu_limit:
-        set_cpu_limit(args.cpu_limit)
-
-    try:
-        split_params = json.loads(args.split_params)
-    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
-        raise SystemExit(f"Invalid --split_params JSON: {exc}") from exc
-
-    with timed("train_pipeline"):
-        run_pipeline(
-            task=args.task,
-            horizon=args.horizon,
-            use_onchain=True if args.use_onchain else None,
-            txn_cost_bps=args.txn_cost_bps,
-            split_params=split_params,
-            gpu=args.gpu,
-            out_dir=args.out_dir,
-        )
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(_main())
+__all__ = ["run_classification_pipeline", "prepare_targets"]

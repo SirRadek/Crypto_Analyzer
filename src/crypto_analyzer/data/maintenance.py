@@ -1,24 +1,19 @@
-"""Utility for purging old data from the SQLite database."""
+"""Utilities for maintaining the SQLite dataset."""
 
 from __future__ import annotations
 
 import sqlite3
 import time
+from pathlib import Path
 
 from crypto_analyzer.utils.config import CONFIG
 
-TWO_YEARS_MS = 2 * 365 * 24 * 60 * 60 * 1000
-ONE_YEAR_MS = 1 * 365 * 24 * 60 * 60 * 1000
-HALF_YEAR_MS = 0.5 * 365 * 24 * 60 * 60 * 1000
+ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000
 SIX_HOURS_MS = 6 * 60 * 60 * 1000
 
 
-def delete_old_records(db_path: str = CONFIG.db_path) -> tuple[int, int]:
-    """Delete stale rows from the prices and prediction tables.
-
-    Returns:
-        Tuple[int, int]: counts of deleted rows from prices and prediction.
-    """
+def delete_old_records(db_path: str | Path = CONFIG.db_path) -> tuple[int, int]:
+    """Delete stale rows from the prices and prediction tables."""
 
     now_ms = int(time.time() * 1000)
     prices_before = now_ms - ONE_YEAR_MS
