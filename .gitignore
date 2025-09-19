@@ -10,7 +10,7 @@ env/
 *.iml
 .DS_Store
 
-/data/
+data/
 datasets/
 outputs/
 models/

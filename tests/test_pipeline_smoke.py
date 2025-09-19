@@ -2,7 +2,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -63,15 +62,9 @@ def _run_pipeline(tmp_path: Path, task: str) -> None:
     out_dir = tmp_path / "outputs"
     env = os.environ.copy()
     env["DB_PATH"] = str(db_path)
-    src_path = Path(__file__).resolve().parent.parent / "src"
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        f"{src_path}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(src_path)
-    )
     cmd = [
-        sys.executable,
-        "-m",
-        "crypto_analyzer.cli",
+        "python",
+        "main.py",
         "--task",
         task,
         "--horizon",
