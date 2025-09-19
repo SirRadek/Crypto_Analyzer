@@ -19,4 +19,4 @@ test:
 
 # simple demo entrypoint
 demo:
->python main.py
+>python -m crypto_analyzer.cli.train
