@@ -21,7 +21,7 @@ def make_targets(
     txn_cost_bps: float = 1.0,
     use_three_class: bool = False,
 ) -> pd.DataFrame:
-    """Create regression and classification targets for future price moves.
+    """Create classification targets for future price moves.
 
     Parameters
     ----------
@@ -52,13 +52,6 @@ def make_targets(
         fut_close = df["close"].shift(-periods)
         delta_log = np.log(fut_close / df["close"]).astype(np.float32)
         delta_lin = (fut_close - df["close"]).astype(np.float32)
-        df[f"delta_log_{horizon}m"] = delta_log
-        df[f"delta_lin_{horizon}m"] = delta_lin
-
-        fut_high = df["high"].shift(-periods + 1).rolling(periods).max()
-        fut_low = df["low"].shift(-periods + 1).rolling(periods).min()
-        df[f"delta_high_{horizon}m"] = (fut_high - df["close"]).astype(np.float32)
-        df[f"delta_low_{horizon}m"] = (fut_low - df["close"]).astype(np.float32)
 
         df[f"cls_sign_{horizon}m"] = (delta_log > 0).astype(np.int8)
 

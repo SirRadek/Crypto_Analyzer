@@ -131,8 +131,8 @@ def _reset_metadata() -> None:
     MODELS_ROOT.mkdir(parents=True, exist_ok=True)
     for name in ["model_usage.json", "model_performance.json"]:
         path = MODELS_ROOT / name
-        atomic_write(path, b"{}")
-        json.loads(path.read_text())  # validate
+        if path.exists():
+            path.unlink()
 
 
 def _log_run(config: dict[str, object]) -> None:

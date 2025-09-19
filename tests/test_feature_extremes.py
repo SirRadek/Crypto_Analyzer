@@ -31,19 +31,4 @@ def test_future_extreme_targets_once():
 
     out = create_features(df)
     cols = [c for c in out.columns if c.startswith("delta_low") or c.startswith("delta_high")]
-    assert cols == [
-        "delta_low_log_120m",
-        "delta_low_lin_120m",
-        "delta_high_log_120m",
-        "delta_high_lin_120m",
-        "delta_low_log_60m",
-        "delta_low_lin_60m",
-        "delta_high_log_60m",
-        "delta_high_lin_60m",
-        "delta_low_log_240m",
-        "delta_low_lin_240m",
-        "delta_high_log_240m",
-        "delta_high_lin_240m",
-    ]
-    for c in cols:
-        assert out[c].dtype == np.float32
+    assert cols == []

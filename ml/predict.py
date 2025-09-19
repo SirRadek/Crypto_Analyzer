@@ -44,9 +44,9 @@ def predict_weighted(
     df,
     feature_cols,
     model_paths,
-    usage_path="ml/model_usage.json",
+    usage_path: str | None = None,
 ):
-    """Backward-compatible wrapper for weighted base-model ensembling."""
+    """Backward-compatible wrapper for base-model ensembling."""
 
     from .ensemble import predict_weighted as _predict_weighted
 

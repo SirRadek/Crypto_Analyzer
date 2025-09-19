@@ -32,16 +32,14 @@ def test_legacy_ensemble_path(tmp_path: Path) -> None:
     model_path = tmp_path / "base.joblib"
     joblib.dump(model, model_path)
 
-    usage_path = tmp_path / "usage.json"
-    ml_preds = predict_weighted(df, feature_cols, [str(model_path)], usage_path=usage_path)
+    ml_preds = predict_weighted(df, feature_cols, [str(model_path)])
     rule_preds = combined_signal(df)
-    expected = ((rule_preds + ml_preds) > 0).astype(int)
+    expected = ((rule_preds + (ml_preds >= 0.5).astype("float32")) > 0).astype(int)
 
     res = combine_predictions(
         df,
         feature_cols,
         model_paths=[str(model_path)],
         use_meta_only=False,
-        usage_path=usage_path,
     )
     assert res.equals(expected)
