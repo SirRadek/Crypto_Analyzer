@@ -10,10 +10,11 @@ from analysis.feature_engineering import FEATURE_COLUMNS
 def test_smoke_train_price(monkeypatch, tmp_path):
     rng = np.random.default_rng(0)
     n = 1050
-    ts = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC")
     close = 100 + rng.normal(scale=1, size=n).cumsum()
     high = close + rng.random(n)
     low = close - rng.random(n)
+    open_ = (high + low) / 2
     volume = rng.random(n) + 1
     qvol = volume * close
     tbb = volume * 0.5
@@ -21,6 +22,7 @@ def test_smoke_train_price(monkeypatch, tmp_path):
     df = pd.DataFrame(
         {
             "timestamp": ts,
+            "open": open_,
             "close": close,
             "high": high,
             "low": low,

@@ -26,18 +26,18 @@ def _create_synth_db(db_path: Path) -> None:
             number_of_trades INTEGER,
             taker_buy_base REAL,
             taker_buy_quote REAL,
-            onch_dummy REAL
+            onch_fee_fast_satvb REAL
         )
         """
     )
     base_ts = pd.Timestamp("2024-01-01", tz="UTC")
-    periods = 10 * 24 * 12  # 10 days of 5m data
-    ts = base_ts + pd.to_timedelta(np.arange(periods) * 5, unit="m")
+    periods = 10 * 24 * 4  # 10 days of 15m data
+    ts = base_ts + pd.to_timedelta(np.arange(periods) * 15, unit="m")
     df = pd.DataFrame(
         {
             "open_time": (ts.view("int64") // 1_000_000).astype(int),
             "symbol": "BTCUSDT",
-            "interval": "5m",
+            "interval": "15m",
             "open": np.random.rand(periods) + 10000,
             "high": np.random.rand(periods) + 10001,
             "low": np.random.rand(periods) + 9999,
@@ -47,7 +47,7 @@ def _create_synth_db(db_path: Path) -> None:
             "number_of_trades": np.random.randint(1, 100, size=periods),
             "taker_buy_base": np.random.rand(periods),
             "taker_buy_quote": np.random.rand(periods),
-            "onch_dummy": np.random.rand(periods),
+            "onch_fee_fast_satvb": np.random.rand(periods),
         }
     )
     df.to_sql("prices", conn, if_exists="append", index=False)

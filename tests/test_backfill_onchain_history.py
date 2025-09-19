@@ -43,7 +43,7 @@ def _make_df(idx: pd.DatetimeIndex) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
 def test_backfill_onchain_history(tmp_path, monkeypatch):
     start = "2021-01-01 00:02"
     end = "2021-01-01 00:12"
-    idx = pd.date_range("2021-01-01 00:00", periods=3, freq="5min", tz="UTC")
+    idx = pd.date_range("2021-01-01 00:00", periods=3, freq="15min", tz="UTC")
     fee, bc, diff = _make_df(idx)
     hash_df = pd.DataFrame({"onch_hashrate_ehs": [10.0, 11.0, 12.0]}, index=idx)
     bc = bc.iloc[0:0]
@@ -62,11 +62,11 @@ def test_backfill_onchain_history(tmp_path, monkeypatch):
     mod.backfill_onchain_history(start, end, str(db_path))
 
     conn = sqlite3.connect(db_path)
-    df = pd.read_sql_query("SELECT * FROM onchain_5m ORDER BY ts_utc", conn)
+    df = pd.read_sql_query("SELECT * FROM onchain_15m ORDER BY ts_utc", conn)
     conn.close()
 
-    assert list(df["ts_utc"]) == [1609459200, 1609459500, 1609459800, 1609460100]
-    assert df["onch_fee_fast_satvb"].isna().iloc[:2].all()
+    assert list(df["ts_utc"]) == [1609459200, 1609460100]
+    assert df["onch_fee_fast_satvb"].isna().iloc[0]
     assert df.loc[0, "onch_fee_wavg_satvb"] == 1.0
 
 
@@ -75,7 +75,7 @@ def test_ensure_schema_adds_missing_columns(tmp_path):
     conn = sqlite3.connect(db_path)
     conn.execute(
         """
-        CREATE TABLE onchain_5m (
+        CREATE TABLE onchain_15m (
             ts_utc INTEGER PRIMARY KEY,
             onch_fee_fast_satvb REAL
         )
@@ -86,8 +86,8 @@ def test_ensure_schema_adds_missing_columns(tmp_path):
 
     with sqlite3.connect(db_path) as conn2:
         mod.ensure_onchain_schema(conn2)
-        columns = {row[1] for row in conn2.execute("PRAGMA table_info(onchain_5m)")}
-        indexes = {row[1] for row in conn2.execute("PRAGMA index_list(onchain_5m)")}
+        columns = {row[1] for row in conn2.execute("PRAGMA table_info(onchain_15m)")}
+        indexes = {row[1] for row in conn2.execute("PRAGMA index_list(onchain_15m)")}
 
     assert set(mod.COLUMNS).issubset(columns)
     assert "ix_onchain_ts" in indexes

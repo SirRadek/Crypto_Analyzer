@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Backfill five-minute Bitcoin on-chain aggregates.
+"""Backfill interval-aligned Bitcoin on-chain aggregates.
 
 The script collects public on-chain metrics from a couple of unauthenticated
-APIs and stores them in the ``onchain_5m`` SQLite table.  The upstream
+APIs and stores them in the configured on-chain SQLite table.  The upstream
 providers are not perfectly consistent in their payloads, therefore most helper
 functions focus on validating inputs, coercing numbers and normalising
 timestamps.  Whenever a response cannot be parsed the offending rows are simply
@@ -23,6 +23,9 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 import requests
 
+from utils.config import CONFIG
+from utils.timeframes import interval_to_pandas_freq
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,7 +34,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_TIMEOUT = 15.0
-FIVE_MINUTES = "5min"
+CANDLE_FREQ = interval_to_pandas_freq(CONFIG.interval)
 
 HOENICKE_BASE_URL = "https://mempool.jhoenicke.de/api/v1/fees"
 MEMPOOL_SUMMARY_URL = "https://mempool.space/api/mempool"
@@ -62,6 +65,8 @@ COLUMN_DEFINITIONS: list[tuple[str, str]] = [
 COLUMNS = [name for name, _ in COLUMN_DEFINITIONS]
 
 _INT_COLUMNS = {"onch_height", "onch_mempool_count", "onch_mempool_total_fee_sat"}
+
+ONCHAIN_TABLE = CONFIG.database.onchain_table
 
 __all__ = [
     "COLUMNS",
@@ -298,11 +303,11 @@ def _percentile(hist: Any, q: float) -> float | None:
 
 
 def _build_index(start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeIndex:
-    floor = start.floor(FIVE_MINUTES)
-    ceil = end.ceil(FIVE_MINUTES)
+    floor = start.floor(CANDLE_FREQ)
+    ceil = end.ceil(CANDLE_FREQ)
     if ceil < floor:
         ceil = floor
-    return pd.date_range(floor, ceil, freq=FIVE_MINUTES, tz=UTC)
+    return pd.date_range(floor, ceil, freq=CANDLE_FREQ, tz=UTC)
 
 
 def _chart_params(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, Any]:
@@ -334,21 +339,25 @@ def _rows_from_dataframe(df: pd.DataFrame) -> Iterable[list[Any]]:
 
 
 def ensure_onchain_schema(conn: sqlite3.Connection) -> None:
-    """Ensure the SQLite schema for ``onchain_5m`` is up to date."""
+    """Ensure the SQLite schema for the on-chain table is up to date."""
 
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("CREATE TABLE IF NOT EXISTS onchain_5m (ts_utc INTEGER PRIMARY KEY)")
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {ONCHAIN_TABLE} (ts_utc INTEGER PRIMARY KEY)"
+    )
 
     existing_columns = {
         row[1]
-        for row in conn.execute("PRAGMA table_info(onchain_5m)")
+        for row in conn.execute(f"PRAGMA table_info({ONCHAIN_TABLE})")
     }
     for column, column_type in COLUMN_DEFINITIONS:
         if column not in existing_columns:
             conn.execute(
-                f"ALTER TABLE onchain_5m ADD COLUMN {column} {column_type}"
+                f"ALTER TABLE {ONCHAIN_TABLE} ADD COLUMN {column} {column_type}"
             )
-    conn.execute("CREATE INDEX IF NOT EXISTS ix_onchain_ts ON onchain_5m(ts_utc)")
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS ix_onchain_ts ON {ONCHAIN_TABLE}(ts_utc)"
+    )
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -387,7 +396,12 @@ def fetch_hoenicke_fees(
         hist: Any | None = None
         if isinstance(item, Mapping):
             ts = item.get("time") or item.get("timestamp") or item.get("ts")
-            wavg = item.get("weighted_fee") or item.get("avg") or item.get("mean") or item.get("wavg")
+            wavg = (
+                item.get("weighted_fee")
+                or item.get("avg")
+                or item.get("mean")
+                or item.get("wavg")
+            )
             p50 = item.get("median") or item.get("p50")
             p90 = item.get("p90") or item.get("percentile90") or item.get("p95")
             vsize = item.get("vsize") or item.get("size") or item.get("total_vsize")
@@ -525,7 +539,7 @@ def fetch_blockchain_mempool(
 
     snapshot = _fetch_mempool_snapshot(session)
     if snapshot:
-        combined[end_ts.floor(FIVE_MINUTES)].update(snapshot)
+        combined[end_ts.floor(CANDLE_FREQ)].update(snapshot)
 
     idx = pd.DatetimeIndex(sorted(combined), tz=UTC)
     df = pd.DataFrame([combined[ts] for ts in idx], index=idx)
@@ -555,7 +569,11 @@ def fetch_mining_difficulty(
             ts = item.get("time") or item.get("timestamp") or item.get("x")
             height = item.get("height")
             diff = item.get("difficulty") or item.get("y") or item.get("value")
-            next_diff = item.get("next_difficulty") or item.get("nextDiff") or item.get("estimated_next")
+            next_diff = (
+                item.get("next_difficulty")
+                or item.get("nextDiff")
+                or item.get("estimated_next")
+            )
             change_pct = item.get("change") or item.get("diff_change_pct")
         elif isinstance(item, Sequence) and not isinstance(item, (bytes, str)):
             ts = item[0] if len(item) > 0 else None
@@ -591,7 +609,9 @@ def fetch_mining_difficulty(
     if "onch_diff_change_pct" in df.columns:
         values = df["onch_diff_change_pct"].to_numpy(copy=True)
         for i in range(1, len(values)):
-            if pd.isna(values[i]) and not pd.isna(values[i - 1]) and not pd.isna(df.iloc[i]["onch_difficulty"]):
+            prev_val = values[i - 1]
+            curr_diff = df.iloc[i]["onch_difficulty"]
+            if pd.isna(values[i]) and not pd.isna(prev_val) and not pd.isna(curr_diff):
                 prev = df.iloc[i - 1]["onch_difficulty"]
                 curr = df.iloc[i]["onch_difficulty"]
                 if prev not in (None, 0):
@@ -645,7 +665,7 @@ def fetch_current_snapshot(
 ) -> pd.DataFrame:
     """Return the latest mempool snapshot aligned to the five-minute grid."""
 
-    ts = _ensure_timestamp(timestamp).floor(FIVE_MINUTES)
+    ts = _ensure_timestamp(timestamp).floor(CANDLE_FREQ)
     data = _fetch_mempool_snapshot(session)
     if not data:
         return _empty_frame(COLUMNS)
@@ -703,8 +723,9 @@ def _write_dataframe(db_path: Path, df: pd.DataFrame) -> None:
         if not rows:
             return
         placeholders = ",".join(["?"] * (1 + len(COLUMNS)))
+        columns = ",".join(COLUMNS)
         conn.executemany(
-            f"INSERT OR REPLACE INTO onchain_5m (ts_utc,{','.join(COLUMNS)}) VALUES ({placeholders})",
+            f"INSERT OR REPLACE INTO {ONCHAIN_TABLE} (ts_utc,{columns}) VALUES ({placeholders})",
             rows,
         )
         conn.commit()
@@ -717,7 +738,7 @@ def backfill_onchain_history(
     *,
     session: requests.Session | None = None,
 ) -> None:
-    """Backfill the ``onchain_5m`` table for the requested time range."""
+    """Backfill the on-chain table for the requested time range."""
 
     start_ts = _ensure_timestamp(start)
     end_ts = _ensure_timestamp(end)

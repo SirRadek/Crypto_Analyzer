@@ -19,6 +19,7 @@ from ml.xgb_price import to_price
 from utils.config import CONFIG, override_feature_settings
 from utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
 from utils.progress import p, step, timed
+from utils.timeframes import interval_to_minutes
 
 logger = get_logger(__name__)
 
@@ -27,24 +28,16 @@ DB_PATH = CONFIG.db_path
 FEATURE_COLS = FEATURE_COLUMNS
 TABLE_PRED = CONFIG.table_pred
 INTERVAL = CONFIG.interval
-# number of future five-minute steps to predict, e.g. 24 -> next 2 hours
+INTERVAL_MINUTES = interval_to_minutes(INTERVAL)
+# number of future steps to predict, e.g. 8 -> next 2 hours on 15m candles
 FORWARD_STEPS = CONFIG.forward_steps
 CPU_LIMIT = CONFIG.cpu_limit
 REPEAT_COUNT = CONFIG.repeat_count
-INTERVAL_TO_MIN = {
-    "1m": 1,
-    "3m": 3,
-    "5m": 5,
-    "15m": 15,
-    "30m": 30,
-    "1h": 60,
-    "2h": 120,
-    "4h": 240,
-    "1d": 1440,
-}
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 CLS_MODEL_COUNT = 1
 REG_MODEL_COUNT = 1
+PRICE_MOVE_THRESHOLD = 0.005
+ONCHAIN_TABLE = CONFIG.database.onchain_table
 CLS_ACC_PATH = Path("ml/backtest_acc_cls.json")
 REG_ACC_PATH = Path("ml/backtest_acc_reg.json")
 
@@ -109,6 +102,26 @@ def prepare_targets(df: pd.DataFrame, forward_steps: int = 1) -> pd.DataFrame:
     return df
 
 
+def price_move_probability(
+    *,
+    predicted_price: float,
+    current_price: float,
+    up_probability: float,
+    threshold: float,
+) -> float:
+    """Estimate the probability of a price move exceeding ``threshold``."""
+
+    if current_price <= 0:
+        return 0.0
+    change = (predicted_price - current_price) / current_price
+    if not np.isfinite(change):
+        return 0.0
+    if abs(change) < threshold:
+        return 0.0
+    direction_prob = up_probability if change >= 0 else 1.0 - up_probability
+    return float(np.clip(direction_prob, 0.0, 1.0))
+
+
 def run_pipeline(
     task: str,
     horizon: int,
@@ -156,7 +169,7 @@ def run_pipeline(
         try:
             conn = sqlite3.connect(DB_PATH)
             onch = pd.read_sql_query(
-                "SELECT * FROM onchain_5m WHERE ts_utc BETWEEN ? AND ?",
+                f"SELECT * FROM {ONCHAIN_TABLE} WHERE ts_utc BETWEEN ? AND ?",
                 conn,
                 params=(int(start.timestamp()), int(end.timestamp())),
                 index_col="ts_utc",
@@ -168,7 +181,12 @@ def run_pipeline(
             logger.warning("mempool fetch failed: %s", exc)
     df = create_features(df, settings=feature_settings)
 
-    horizon_steps = horizon // 5
+    if horizon % INTERVAL_MINUTES != 0:
+        raise ValueError(
+            "Prediction horizon must be divisible by the candle interval: "
+            f"{horizon}m vs {INTERVAL}"
+        )
+    horizon_steps = horizon // INTERVAL_MINUTES
     if task == "clf":
         df["target"] = (df["close"].shift(-horizon_steps) > df["close"]).astype(np.int32)
     else:
@@ -481,13 +499,21 @@ def main(train: bool = True) -> None:
             last_close = float(last_row["close"].iloc[0])
             combined_price = last_close + (reg_pred - last_close) * prob_up
 
-        target_time = pred_time + pd.Timedelta(minutes=horizon * INTERVAL_TO_MIN[INTERVAL])
+        target_time = pred_time + pd.Timedelta(minutes=horizon * INTERVAL_MINUTES)
+
+        prob_change = price_move_probability(
+            predicted_price=combined_price,
+            current_price=last_close,
+            up_probability=prob_up,
+            threshold=PRICE_MOVE_THRESHOLD,
+        )
 
         row = (
             SYMBOL,
             INTERVAL,
             int(target_time.value // 1_000_000),
             float(combined_price),
+            prob_change,
         )
         rows_to_save.append(row)
 

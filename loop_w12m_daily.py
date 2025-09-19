@@ -15,6 +15,7 @@ from db.predictions_store import create_predictions_table, save_predictions
 from ml.predict_regressor import predict_weighted_prices
 from ml.train_regressor import train_regressor
 from utils.config import CONFIG
+from utils.timeframes import interval_to_minutes
 
 try:
     from utils.progress import p, step, timed
@@ -35,27 +36,18 @@ except Exception:
         p(f"{label} done")
 
 
-SYMBOL = "BTCUSDT"
-INTERVAL = "5m"
-DB_PATH = "db/data/crypto_data.sqlite"
-TABLE_PRED = "predictions"
+SYMBOL = CONFIG.symbol
+INTERVAL = CONFIG.interval
+DB_PATH = CONFIG.db_path
+TABLE_PRED = CONFIG.table_pred
 TRAIN_WINDOW_Y = 5
 FORWARD_STEPS = 1
 # Forward prediction horizon in hours
 PREDICT_HOURS = 2
 # Features available when rolling forward without full re-computation
 FEATURE_COLS = ["return_1d", "sma_7", "sma_14", "ema_7", "ema_14", "rsi_14"]
-INTERVAL_TO_MIN = {
-    "1m": 1,
-    "3m": 3,
-    "5m": 5,
-    "15m": 15,
-    "30m": 30,
-    "1h": 60,
-    "2h": 120,
-    "4h": 240,
-    "1d": 1440,
-}
+
+INTERVAL_MINUTES = interval_to_minutes(INTERVAL)
 REPEAT_COUNT = CONFIG.repeat_count
 def _ensure_indexes(table_name: str):
     conn = sqlite3.connect(DB_PATH)
@@ -225,12 +217,12 @@ def _update_state_with_pred(state, new_close):
     state["rsi_avg_gain"] = (state["rsi_avg_gain"] * (period - 1) + gain) / period
     state["rsi_avg_loss"] = (state["rsi_avg_loss"] * (period - 1) + loss) / period
     state["close"] = new_close
-    state["time"] = state["time"] + timedelta(minutes=INTERVAL_TO_MIN["5m"])
+    state["time"] = state["time"] + timedelta(minutes=INTERVAL_MINUTES)
 
 
 def _predict_forward_steps(model_paths, state, steps, usage_path="ml/model_usage.json"):
     rows = []
-    step_minutes = INTERVAL_TO_MIN[INTERVAL]
+    step_minutes = INTERVAL_MINUTES
     for _ in range(steps):
         pred_time = state["time"]
         target_time = pred_time + timedelta(minutes=step_minutes)
@@ -245,6 +237,7 @@ def _predict_forward_steps(model_paths, state, steps, usage_path="ml/model_usage
                 INTERVAL,
                 int(pd.Timestamp(target_time).value // 1_000_000),
                 new_close,
+                0.0,
             )
         )
         _update_state_with_pred(state, new_close)
@@ -314,7 +307,7 @@ def main():
         model_paths = sorted(glob("ml/model_reg*.pkl"))
         step(5, 7, f"Predict next {PREDICT_HOURS}h")
         state = _init_forward_state(df)
-        steps = int(PREDICT_HOURS * 60 / INTERVAL_TO_MIN[INTERVAL])
+        steps = int(PREDICT_HOURS * 60 / INTERVAL_MINUTES)
         rows = _predict_forward_steps(model_paths, state, steps)
         if rows:
             save_predictions(rows, DB_PATH, TABLE_PRED)
