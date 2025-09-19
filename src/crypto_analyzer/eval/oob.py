@@ -5,12 +5,14 @@ from typing import Any
 from sklearn.experimental import enable_halving_search_cv  # noqa: F401
 from sklearn.model_selection import HalvingRandomSearchCV  # type: ignore[attr-defined]
 
+from crypto_analyzer.utils.config import CONFIG
+
 
 def halving_random_search(
     X,
     y,
     estimator_class: type[Any],
-    random_state: int = 42,
+    random_state: int | None = None,
 ) -> dict[str, Any]:
     """Return best hyperparameters via a small ``HalvingRandomSearchCV``.
 
@@ -25,11 +27,13 @@ def halving_random_search(
         "min_samples_leaf": [1, 2, 4],
     }
 
+    seed = CONFIG.models.random_seed if random_state is None else random_state
+
     base = estimator_class(
         oob_score=True,
         warm_start=True,
         n_jobs=-1,
-        random_state=random_state,
+        random_state=seed,
     )
     search = HalvingRandomSearchCV(
         base,
@@ -38,7 +42,7 @@ def halving_random_search(
         max_resources=400,
         min_resources=50,
         factor=2,
-        random_state=random_state,
+        random_state=seed,
         n_jobs=-1,
     )
     search.fit(X, y)
@@ -55,7 +59,7 @@ def fit_incremental_forest(
     step: int = 50,
     max_estimators: int = 400,
     tol: float = 1e-3,
-    random_state: int = 42,
+    random_state: int | None = None,
     log_path: str | None = None,
     **params: Any,
 ) -> tuple[Any, list[float]]:
@@ -79,12 +83,14 @@ def fit_incremental_forest(
         Extra parameters passed to the estimator constructor.
     """
 
+    seed = CONFIG.models.random_seed if random_state is None else random_state
+
     model = estimator_class(
         n_estimators=0,
         warm_start=True,
         oob_score=True,
         n_jobs=-1,
-        random_state=random_state,
+        random_state=seed,
         **params,
     )
     oob_scores: list[float] = []

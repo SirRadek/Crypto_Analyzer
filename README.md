@@ -127,9 +127,11 @@ Example commands for 120‑minute horizon:
 python main.py --task clf --horizon 120 --split_params '{"test_size":0.2}' --out_dir outputs --use_onchain
 ```
 
-The pipeline writes metrics and predictions to CSV files and a simple PNG plot
-into the chosen `outputs/` directory.  Run configuration is logged as
-`outputs/run_config.json`.
+The pipeline writes metrics, predictions, explainability artefacts and trained
+models into a timestamped directory under the requested output root.  Each run
+is stored as `outputs/run_id=.../` and contains `metadata.json`,
+`config_snapshot.yaml`, `metrics.json`, the trained model and generated
+artefacts so that the experiment can be reproduced.
 
 > **Note:** When adding on-chain signals, resample them to the candle interval
 > (5 min) before merging to prevent look‑ahead leakage.
@@ -191,13 +193,15 @@ typical workflow for a 2‑hour classification horizon:
 ## Requirements
 
 * Python 3.13
-* [See `requirements.txt`](./requirements.txt) – notable pin: `xgboost>=2.1,<4`
+* [See `requirements.txt`](./requirements.txt) – all runtime dependencies are
+  version pinned for reproducibility.
 
 ## Determinism & Repro
 
-Training routines default to ``random_state=42`` as defined in
-``src/crypto_analyzer/models/train.py``. The chosen value, together with other parameters, is logged to
-``outputs/run_config.json`` to ensure runs are repeatable.
+Training routines default to the seed defined in the configuration
+(``models.random_seed``).  Every pipeline execution records the effective seed,
+configuration snapshot and metrics in ``outputs/run_id=.../metadata.json`` and
+``config_snapshot.yaml`` to ensure runs are repeatable.
 
 ## Troubleshooting
 

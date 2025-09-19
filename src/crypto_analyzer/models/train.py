@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 
 from crypto_analyzer.model_manager import atomic_write
 from crypto_analyzer.models.utils import evaluate_model
+from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.splitting import WalkForwardSplit
 
 MODEL_PATH = "artifacts/meta_model_cls.joblib"
@@ -39,7 +40,7 @@ def train_model(
     *,
     model_path: str = MODEL_PATH,
     test_size: float = 0.2,
-    random_state: int = 42,
+    random_state: int | None = None,
     use_gpu: bool = True,
     log_path: str = "artifacts/oob_cls.json",
     split: str = "holdout",
@@ -62,6 +63,11 @@ def train_model(
     xgb.XGBClassifier
         Trained model.
     """
+    if random_state is None:
+        random_state = CONFIG.models.random_seed
+
+    np.random.seed(random_state)
+
     base_params: dict[str, Any] = dict(
         n_estimators=400,
         max_depth=6,

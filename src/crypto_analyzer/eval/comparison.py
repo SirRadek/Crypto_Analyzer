@@ -6,6 +6,11 @@ from typing import Iterable
 
 import pandas as pd
 
+from crypto_analyzer.utils.config import CONFIG
+from crypto_analyzer.utils.helpers import get_logger
+
+logger = get_logger(__name__)
+
 
 def _build_prices_query(symbol: str, target_times: Iterable[int]) -> tuple[str, list[int]]:
     """Return SQL query and parameters for the prices lookup."""
@@ -24,9 +29,9 @@ def _build_prices_query(symbol: str, target_times: Iterable[int]) -> tuple[str, 
 
 
 def backfill_actuals_and_errors(
-    db_path: str | Path = "data/crypto_data.sqlite",
-    table_pred: str = "predictions",
-    symbol: str = "BTCUSDT",
+    db_path: str | Path = CONFIG.db_path,
+    table_pred: str = CONFIG.table_pred,
+    symbol: str = CONFIG.symbol,
 ) -> None:
     """Fill in ``y_true_hat`` and ``abs_error`` for pending predictions.
 
@@ -45,7 +50,7 @@ def backfill_actuals_and_errors(
             params=(symbol,),
         ).dropna(subset=["target_time_ms"])
         if preds.empty:
-            print("No predictions to backfill.")
+            logger.info("No predictions to backfill")
             return
 
         query, params = _build_prices_query(symbol, preds["target_time_ms"].to_list())
@@ -64,7 +69,7 @@ def backfill_actuals_and_errors(
             if pd.notna(row.y_true_hat)
         ]
         if not updates:
-            print("No matching price data found for pending predictions.")
+            logger.info("No matching price data found for pending predictions")
             return
 
         conn.executemany(
@@ -72,4 +77,4 @@ def backfill_actuals_and_errors(
             updates,
         )
         conn.commit()
-        print("Backfill complete.")
+        logger.info("Backfill complete")
