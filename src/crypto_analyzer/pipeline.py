@@ -1,9 +1,16 @@
+"""Training pipeline utilities for Crypto Analyzer.
+
+This module exposes the imperative helpers previously provided via the
+``main.py`` script.  Moving the implementation into the package ensures
+callers (and tests) can import the functionality without relying on a
+repo-local entrypoint.  It also makes it easier to integrate the
+pipeline into other applications.
+"""
+
 from __future__ import annotations
 
-import argparse
 import json
 import random
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,25 +22,26 @@ import yaml
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 
-ROOT = Path(__file__).resolve().parent
-SRC = ROOT / "src"
-for candidate in (ROOT, SRC):
-    if str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
-
+from crypto_analyzer.data.db_connector import get_price_data
 from crypto_analyzer.features.engineering import assign_feature_groups, create_features
 from crypto_analyzer.labeling.targets import make_targets
-from crypto_analyzer.data.db_connector import get_price_data
-from crypto_analyzer.utils.config import CONFIG, config_to_dict, override_feature_settings
-from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger, set_cpu_limit
-from crypto_analyzer.utils.progress import timed
+from crypto_analyzer.utils.config import (
+    CONFIG,
+    AppConfig,
+    config_to_dict,
+    override_feature_settings,
+)
+from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger
 from crypto_analyzer.utils.timeframes import interval_to_minutes
 
 logger = get_logger(__name__)
 
-CPU_LIMIT = CONFIG.cpu_limit
+__all__ = ["prepare_targets", "run_pipeline"]
+
 
 def _build_feature_matrix(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Series]:
+    """Split the feature matrix ``X`` and target vector ``y`` from ``df``."""
+
     base_cols = {
         "timestamp",
         "open",
@@ -61,9 +69,11 @@ def prepare_targets(
     forward_steps: int = 1,
     *,
     txn_cost_bps: float = 1.0,
+    config: AppConfig | None = None,
 ) -> pd.DataFrame:
     """Create a DataFrame with the binary target ``forward_steps`` ahead."""
 
+    cfg = config or CONFIG
     if "timestamp" not in df.columns:
         raise KeyError("Input frame must contain a 'timestamp' column")
 
@@ -72,12 +82,13 @@ def prepare_targets(
         raise ValueError("Timestamp column contains non-parsable values")
     deltas = ts.diff().dropna()
     if len(deltas) == 0:
-        step_minutes = interval_to_minutes(CONFIG.interval)
+        step_minutes = interval_to_minutes(cfg.interval)
     else:
         median_delta = deltas.median()
-        step_minutes = (
-            int(round(median_delta.total_seconds() / 60)) if isinstance(median_delta, pd.Timedelta) else 1
-        )
+        if isinstance(median_delta, pd.Timedelta):
+            step_minutes = int(round(median_delta.total_seconds() / 60))
+        else:  # pragma: no cover - defensive branch for unexpected inputs
+            step_minutes = 1
         step_minutes = max(step_minutes, 1)
 
     horizon_minutes = max(1, forward_steps) * step_minutes
@@ -106,8 +117,40 @@ def run_pipeline(
     txn_cost_bps: float,
     split_params: dict[str, Any],
     gpu: bool,
-    out_dir: str,
-) -> None:
+    out_dir: str | Path,
+    *,
+    config: AppConfig | None = None,
+) -> Path:
+    """Execute the end-to-end training pipeline.
+
+    Parameters
+    ----------
+    task:
+        Supported task identifier. Only ``"clf"`` is currently accepted.
+    horizon:
+        Prediction horizon in minutes.
+    use_onchain:
+        Override for including on-chain features. ``None`` keeps the value from
+        configuration.
+    txn_cost_bps:
+        Transaction costs in basis points used when generating targets.
+    split_params:
+        Extra keyword arguments forwarded to :func:`train_test_split`.
+    gpu:
+        Whether GPU acceleration was requested by the caller.
+    out_dir:
+        Directory where run artefacts will be stored.
+    config:
+        Optional :class:`~crypto_analyzer.utils.config.AppConfig` override.  When
+        omitted, the global ``CONFIG`` object is used.
+
+    Returns
+    -------
+    pathlib.Path
+        The directory containing the artefacts of the executed run.
+    """
+
+    cfg = config or CONFIG
     if task != "clf":
         raise ValueError("Only classification pipeline is supported")
 
@@ -115,25 +158,25 @@ def run_pipeline(
     run_id = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:8]}"
     run_dir = ensure_dir_exists(base_out_dir / f"run_id={run_id}")
 
-    random_seed = CONFIG.models.random_seed
+    random_seed = cfg.models.random_seed
     random.seed(random_seed)
     np.random.seed(random_seed)
 
-    feature_settings = CONFIG.features
+    feature_settings = cfg.features
     if use_onchain is not None:
         feature_settings = override_feature_settings(
             feature_settings, include_onchain=use_onchain
         )
 
-    interval_minutes = interval_to_minutes(CONFIG.interval)
+    interval_minutes = interval_to_minutes(cfg.interval)
     if horizon % interval_minutes != 0:
         raise ValueError(
             "Prediction horizon must be divisible by the candle interval: "
-            f"{horizon}m vs {CONFIG.interval}"
+            f"{horizon}m vs {cfg.interval}"
         )
     horizon_steps = max(1, horizon // interval_minutes)
 
-    df = get_price_data(CONFIG.symbol, db_path=CONFIG.db_path)
+    df = get_price_data(cfg.symbol, db_path=cfg.db_path)
     df = create_features(df, settings=feature_settings)
     df = make_targets(df, horizons_min=[horizon], txn_cost_bps=txn_cost_bps)
     target_col = f"cls_sign_{horizon}m"
@@ -162,7 +205,7 @@ def run_pipeline(
         xgboost_available = True
 
     if xgboost_available:
-        use_gpu_flag = bool(gpu and CONFIG.models.use_gpu)
+        use_gpu_flag = bool(gpu and cfg.models.use_gpu)
         params = {
             "n_estimators": 200,
             "tree_method": "gpu_hist" if use_gpu_flag else "hist",
@@ -262,7 +305,7 @@ def run_pipeline(
         with booster_path.open("w", encoding="utf-8") as f:
             json.dump({"model": "RandomForestClassifier"}, f)
 
-    config_snapshot = config_to_dict(CONFIG)
+    config_snapshot = config_to_dict(cfg)
     with (run_dir / "config_snapshot.yaml").open("w", encoding="utf-8") as f:
         yaml.safe_dump(config_snapshot, f, sort_keys=False)
 
@@ -275,49 +318,11 @@ def run_pipeline(
         "use_onchain": feature_settings.include_onchain,
         "gpu_requested": bool(gpu),
         "random_seed": random_seed,
-        "config_path": str(CONFIG.config_path) if CONFIG.config_path else None,
+        "config_path": str(cfg.config_path) if cfg.config_path else None,
         "created_at": datetime.utcnow().isoformat(),
         "output_dir": str(run_dir),
     }
     with (run_dir / "metadata.json").open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the classification pipeline")
-    parser.add_argument("--task", default="clf")
-    parser.add_argument("--horizon", type=int, default=120)
-    parser.add_argument("--use_onchain", action="store_true")
-    parser.add_argument("--txn_cost_bps", type=float, default=1.0)
-    parser.add_argument("--split_params", type=str, default="{}")
-    parser.add_argument("--gpu", action="store_true")
-    parser.add_argument("--out_dir", type=str, default="outputs")
-    parser.add_argument("--cpu_limit", type=int, default=CPU_LIMIT)
-    return parser.parse_args(argv)
-
-
-def _main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    if args.cpu_limit:
-        set_cpu_limit(args.cpu_limit)
-
-    try:
-        split_params = json.loads(args.split_params)
-    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
-        raise SystemExit(f"Invalid --split_params JSON: {exc}") from exc
-
-    with timed("train_pipeline"):
-        run_pipeline(
-            task=args.task,
-            horizon=args.horizon,
-            use_onchain=True if args.use_onchain else None,
-            txn_cost_bps=args.txn_cost_bps,
-            split_params=split_params,
-            gpu=args.gpu,
-            out_dir=args.out_dir,
-        )
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(_main())
+    return run_dir

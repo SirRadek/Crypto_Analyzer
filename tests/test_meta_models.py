@@ -1,8 +1,3 @@
-import os
-import sys
-
-sys.path.append(os.getcwd())
-
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import brier_score_loss
 
 from crypto_analyzer.features.engineering import FEATURE_COLUMNS, create_features
-from main import prepare_targets
+from crypto_analyzer.pipeline import prepare_targets
 from crypto_analyzer.models.meta import fit_meta_classifier, predict_meta
 
 
@@ -70,7 +65,12 @@ def test_classifier_deterministic_oob(tmp_path: Path) -> None:
     assert np.isclose(f1_1, f1_2)
     assert all(c.estimator.oob_score_ > 0 for c in model1.calibrated_classifiers_)
 
-    probas = predict_meta(train_df, FEATURE_COLUMNS, model_path=str(tmp_path / "m1.joblib"), proba=True)
+    probas = predict_meta(
+        train_df,
+        FEATURE_COLUMNS,
+        model_path=str(tmp_path / "m1.joblib"),
+        proba=True,
+    )
     assert isinstance(probas, np.ndarray)
     assert probas.shape[0] == len(train_df)
 
