@@ -1,4 +1,4 @@
-"""Calibration utilities for probabilistic classification outputs."""
+"""Utilities for fitting simple probability calibrators and visualising calibration."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,55 +10,73 @@ import numpy as np
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss, log_loss as sklearn_log_loss
+from sklearn.metrics import brier_score_loss, log_loss
 
 
-class ProbabilityCalibrator(Protocol):
-    """Protocol for simple 1D probability calibrators."""
+class Calibrator(Protocol):
+    """Simple protocol representing a fitted probability calibrator."""
 
-    def fit(self, probs: np.ndarray, y_true: np.ndarray) -> "ProbabilityCalibrator":
-        ...
-
-    def predict(self, probs: np.ndarray) -> np.ndarray:
-        ...
+    def predict(self, probs: Iterable[float]) -> np.ndarray:
+        """Transform raw probability estimates to calibrated values."""
 
 
-@dataclass
-class IsotonicCalibrator:
-    """One-dimensional isotonic regression calibrator."""
+@dataclass(slots=True)
+class _IsotonicCalibrator:
+    model: IsotonicRegression
 
-    out_of_bounds: str = "clip"
-
-    def __post_init__(self) -> None:
-        self._model = IsotonicRegression(out_of_bounds=self.out_of_bounds)
-
-    def fit(self, probs: np.ndarray, y_true: np.ndarray) -> "IsotonicCalibrator":
-        self._model.fit(probs, y_true)
-        return self
-
-    def predict(self, probs: np.ndarray) -> np.ndarray:
-        calibrated = self._model.predict(probs)
+    def predict(self, probs: Iterable[float]) -> np.ndarray:
+        arr = np.asarray(list(probs), dtype=float)
+        calibrated = self.model.predict(arr)
         return np.clip(calibrated, 1e-6, 1 - 1e-6)
 
 
-@dataclass
-class PlattCalibrator:
-    """Platt scaling calibrator implemented via logistic regression."""
+@dataclass(slots=True)
+class _PlattCalibrator:
+    model: LogisticRegression
+    use_logit: bool
 
-    max_iter: int = 100
+    @staticmethod
+    def _to_scores(raw: Iterable[float], *, use_logit: bool) -> np.ndarray:
+        scores = np.asarray(list(raw), dtype=float)
+        if use_logit:
+            scores = np.clip(scores, 1e-6, 1 - 1e-6)
+            odds = scores / (1 - scores)
+            scores = np.log(odds)
+        return scores.reshape(-1, 1)
 
-    def __post_init__(self) -> None:
-        self._model = LogisticRegression(max_iter=self.max_iter)
-
-    def fit(self, probs: np.ndarray, y_true: np.ndarray) -> "PlattCalibrator":
-        X = probs.reshape(-1, 1)
-        self._model.fit(X, y_true)
-        return self
-
-    def predict(self, probs: np.ndarray) -> np.ndarray:
-        X = probs.reshape(-1, 1)
-        calibrated = self._model.predict_proba(X)[:, 1]
+    def predict(self, probs: Iterable[float]) -> np.ndarray:
+        X = self._to_scores(probs, use_logit=self.use_logit)
+        calibrated = self.model.predict_proba(X)[:, 1]
         return np.clip(calibrated, 1e-6, 1 - 1e-6)
+
+
+def fit_isotonic(p_raw: Iterable[float], y: Iterable[float]) -> Calibrator:
+    """Fit an isotonic regression calibrator on raw probability estimates."""
+
+    model = IsotonicRegression(out_of_bounds="clip")
+    p_arr = np.asarray(list(p_raw), dtype=float)
+    y_arr = np.asarray(list(y), dtype=float)
+    model.fit(p_arr, y_arr)
+    return _IsotonicCalibrator(model)
+
+
+def fit_platt(logits_or_p: Iterable[float], y: Iterable[float]) -> Calibrator:
+    """Fit Platt scaling via logistic regression."""
+
+    raw_arr = np.asarray(list(logits_or_p), dtype=float)
+    use_logit = False
+    if np.all(np.isfinite(raw_arr)) and np.all((0.0 <= raw_arr) & (raw_arr <= 1.0)):
+        use_logit = True
+        raw_arr = np.clip(raw_arr, 1e-6, 1 - 1e-6)
+        odds = raw_arr / (1 - raw_arr)
+        raw_arr = np.log(odds)
+
+    X = raw_arr.reshape(-1, 1)
+    y_arr = np.asarray(list(y), dtype=int)
+
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X, y_arr)
+    return _PlattCalibrator(model=model, use_logit=use_logit)
 
 
 def reliability_curve(
@@ -67,51 +85,71 @@ def reliability_curve(
     *,
     n_bins: int = 10,
     strategy: str = "uniform",
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return mean predicted value and fraction of positives per bin."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+    """Compute reliability curve statistics for binary classification."""
+
+    y_arr = np.asarray(list(y_true), dtype=float)
+    p_arr = np.asarray(list(probs), dtype=float)
+    p_arr = np.clip(p_arr, 1e-6, 1 - 1e-6)
 
     frac_pos, mean_pred = calibration_curve(
-        y_true, probs, n_bins=n_bins, strategy=strategy
+        y_arr, p_arr, n_bins=n_bins, strategy=strategy
     )
-    return mean_pred, frac_pos
 
+    # Align with manual bin centres for plotting clarity
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
-def brier_score(y_true: Iterable[float], probs: Iterable[float]) -> float:
-    """Wrapper around :func:`sklearn.metrics.brier_score_loss`."""
+    # Map calibration_curve outputs back onto our grid
+    obs = np.full_like(bin_centres, np.nan, dtype=float)
+    exp = np.full_like(bin_centres, np.nan, dtype=float)
 
-    return float(brier_score_loss(y_true, probs))
+    if len(mean_pred) == len(frac_pos):
+        # Determine closest bins to the computed mean predictions
+        indices = np.digitize(mean_pred, bin_edges[1:-1], right=True)
+        for idx, (m_pred, f_pos) in enumerate(zip(mean_pred, frac_pos)):
+            bin_idx = indices[idx]
+            obs[bin_idx] = f_pos
+            exp[bin_idx] = m_pred
 
+    brier = float(brier_score_loss(y_arr, p_arr))
+    loss = float(log_loss(y_arr, p_arr))
 
-def log_loss(y_true: Iterable[float], probs: Iterable[float]) -> float:
-    """Numerically-stable log-loss for binary probabilities."""
-
-    probs_arr = np.clip(np.asarray(list(probs)), 1e-6, 1 - 1e-6)
-    return float(sklearn_log_loss(y_true, probs_arr))
+    return bin_centres, obs, exp, brier, loss
 
 
 def plot_reliability(
     y_true: Iterable[float],
-    prob_dict: Dict[str, Iterable[float]],
-    path: Path,
+    prob_series: Dict[str, Iterable[float]] | Iterable[float],
+    path_png: str | Path,
     *,
     n_bins: int = 10,
-    title: str = "Reliability diagram",
+    title: str | None = None,
 ) -> None:
-    """Plot a reliability diagram for the provided probability series."""
+    """Save a reliability diagram for one or more probability series."""
 
-    path = Path(path)
+    if not isinstance(prob_series, dict):
+        prob_series = {"Predicted": prob_series}
+
+    path = Path(path_png)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(6, 6))
     plt.plot([0, 1], [0, 1], "--", color="gray", label="Perfect calibration")
 
-    for label, probs in prob_dict.items():
-        mean_pred, frac_pos = reliability_curve(y_true, probs, n_bins=n_bins)
-        plt.plot(mean_pred, frac_pos, marker="o", label=label)
+    for label, probs in prob_series.items():
+        bins, obs, exp, _, _ = reliability_curve(
+            y_true, probs, n_bins=n_bins, strategy="uniform"
+        )
+        mask = ~np.isnan(obs) & ~np.isnan(exp)
+        if not np.any(mask):
+            continue
+        plt.plot(exp[mask], obs[mask], marker="o", label=label)
 
     plt.xlabel("Mean predicted value")
     plt.ylabel("Fraction of positives")
-    plt.title(title)
+    if title:
+        plt.title(title)
     plt.legend()
     plt.xlim(0, 1)
     plt.ylim(0, 1)
