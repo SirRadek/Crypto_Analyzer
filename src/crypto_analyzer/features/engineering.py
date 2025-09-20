@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,39 @@ from crypto_analyzer.utils.config import CONFIG, FeatureSettings
 # Lehký FE laděný pro 2h BTCUSDT. Bez těžkých závislostí, vše float32.
 
 H = 24  # 120min horizon in 5m candles
+
+MULTI_TF_MINUTES: tuple[int, ...] = (15, 60, 240, 1440)
+PARKINSON_CONST = 1.0 / (4.0 * np.log(2.0))
+
+CROSS_ASSET_KEYWORDS: dict[str, Sequence[str]] = {
+    "ethbtc": ("ethbtc",),
+    "btcd": ("btc.d", "btc_dom", "btcdominance", "btc_d"),
+    "dxy": ("dxy",),
+    "es": ("es1", "es_", "sp500", "spx"),
+    "nq": ("nq1", "nasdaq", "nq_"),
+    "gold": ("xau", "gold"),
+}
+
+FUNDING_COLUMN_CANDIDATES: tuple[str, ...] = (
+    "deriv_funding_rate",
+    "funding_rate",
+    "funding_8h",
+    "perp_funding_rate",
+)
+
+LIQUIDATION_LONG_CANDIDATES: tuple[str, ...] = (
+    "deriv_liq_long",
+    "liquidations_long",
+    "liquidations_buy",
+    "liq_long",
+)
+
+LIQUIDATION_SHORT_CANDIDATES: tuple[str, ...] = (
+    "deriv_liq_short",
+    "liquidations_short",
+    "liquidations_sell",
+    "liq_short",
+)
 
 ONCHAIN_FEATURES = (
     "onch_fee_fast_satvb",
@@ -64,14 +97,59 @@ REGISTRY = FeatureColumnRegistry(
         "z_volume",
         "rel_close_vwap",
         "ret3",
+        "ofi_base_roll_15m",
+        "ofi_base_roll_1h",
+        "ofi_quote_roll_15m",
+        "ofi_quote_roll_1h",
+        "tbr_base_roll_15m",
+        "tbr_base_roll_1h",
+        "mom_log_ret_15m",
+        "mom_log_ret_1h",
+        "mom_log_ret_4h",
+        "mom_log_ret_1d",
         "volatility_60m",
         "atr14",
+        "vol_realized_15m",
+        "vol_realized_1h",
+        "vol_realized_4h",
+        "vol_realized_1d",
+        "vol_of_vol_15m",
+        "vol_of_vol_1h",
+        "vol_of_vol_4h",
+        "vol_of_vol_1d",
+        "vol_range_parkinson_15m",
+        "vol_range_parkinson_1h",
+        "vol_range_parkinson_4h",
+        "vol_range_parkinson_1d",
+        "mom_microtrend_ema_ratio",
         "tod_sin",
         "tod_cos",
         "is_day",
         "is_night",
         "is_weekend",
         "is_weekday",
+        "time_hour_sin",
+        "time_hour_cos",
+        "time_dow_sin",
+        "time_dow_cos",
+        "cross_ethbtc_ret",
+        "cross_ethbtc_divergence",
+        "cross_ethbtc_corr_4h",
+        "cross_btcd_ret",
+        "cross_btcd_divergence",
+        "cross_btcd_corr_4h",
+        "cross_dxy_ret",
+        "cross_dxy_divergence",
+        "cross_dxy_corr_4h",
+        "cross_es_ret",
+        "cross_es_divergence",
+        "cross_es_corr_4h",
+        "cross_nq_ret",
+        "cross_nq_divergence",
+        "cross_nq_corr_4h",
+        "cross_gold_ret",
+        "cross_gold_divergence",
+        "cross_gold_corr_4h",
     ),
     orderbook=(
         "lob_imbalance_L1",
@@ -80,10 +158,25 @@ REGISTRY = FeatureColumnRegistry(
         "wall_bid_size_rel",
         "wall_ask_dist_bps",
         "wall_ask_size_rel",
+        "lob_spread_bps",
+        "lob_depth_imbalance",
+        "lob_bid_slope_bps",
+        "lob_ask_slope_bps",
     ),
     derivatives=(
         "oi_delta_15m",
         "basis_annualized",
+        "deriv_funding_rate",
+        "deriv_funding_rate_change",
+        "deriv_funding_rate_smooth",
+        "deriv_basis_trend",
+        "deriv_basis_slope",
+        "deriv_open_interest",
+        "deriv_oi_change_pct",
+        "deriv_oi_velocity",
+        "deriv_liq_total",
+        "deriv_liq_net",
+        "deriv_liq_to_oi",
     ),
     onchain=ONCHAIN_FEATURES,
 )
@@ -100,6 +193,59 @@ _REQUIRED_BASE_INPUTS: tuple[str, ...] = (
     "taker_buy_base",
     "taker_buy_quote",
 )
+
+
+def _infer_step_minutes(ts: pd.Series) -> int:
+    """Infer the base candle interval expressed in minutes."""
+
+    deltas = ts.diff().dropna()
+    if deltas.empty:
+        return 1
+    median_delta = deltas.median()
+    if isinstance(median_delta, pd.Timedelta):
+        minutes = median_delta.total_seconds() / 60.0
+    else:  # pragma: no cover - defensive for unexpected inputs
+        minutes = float(median_delta)
+    return max(1, int(round(minutes)))
+
+
+def _format_minutes_label(minutes: int) -> str:
+    """Human-readable suffix for timeframe-derived features."""
+
+    if minutes % 1440 == 0:
+        days = minutes // 1440
+        return f"{days}d"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
+def _build_timeframe_info(ts: pd.Series, durations: Sequence[int]) -> dict[int, tuple[int, str]]:
+    """Map timeframe duration (minutes) to (window, label)."""
+
+    step_minutes = _infer_step_minutes(ts)
+    info: dict[int, tuple[int, str]] = {}
+    for minutes in durations:
+        if minutes <= 0:
+            continue
+        if minutes < step_minutes:
+            continue
+        window = max(1, int(round(minutes / step_minutes)))
+        info[minutes] = (window, _format_minutes_label(minutes))
+    return info
+
+
+def _match_column(df: pd.DataFrame, candidates: Sequence[str]) -> str | None:
+    """Return the first column containing any of the ``candidates`` substrings."""
+
+    lowered = {col.lower(): col for col in df.columns}
+    for candidate in candidates:
+        cand = candidate.lower()
+        for col_lower, original in lowered.items():
+            if cand in col_lower:
+                return original
+    return None
 
 
 def _ensure_numeric(df: pd.DataFrame, columns: Iterable[str]) -> None:
@@ -207,6 +353,12 @@ def create_features(
         if drop_cols:
             df = df.drop(columns=drop_cols)
 
+    ts = pd.to_datetime(df["timestamp"], utc=True)
+    timeframe_info = _build_timeframe_info(ts, MULTI_TF_MINUTES)
+    timeframe_windows = {minutes: window for minutes, (window, _) in timeframe_info.items()}
+    timeframe_labels = {minutes: label for minutes, (_, label) in timeframe_info.items()}
+    supported_minutes = set(timeframe_windows)
+
     # --- základní numerika ---------------------------------------------------
     # nech timestamp beze změny, ostatní numerické sloupce konvertuj na float32
     numeric = df.select_dtypes(include=["number"]).columns.drop(["timestamp"], errors="ignore")
@@ -238,13 +390,66 @@ def create_features(
     df["ema12_tbr_base"] = df["tbr_base"].ewm(span=12, adjust=False).mean().astype(np.float32)
     df["z_volume"] = ((vol - vol.rolling(36).mean()) / vol.rolling(36).std()).astype(np.float32)
 
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"ofi_base_roll_{label}"] = np.float32(fill_value)
+            df[f"ofi_quote_roll_{label}"] = np.float32(fill_value)
+            df[f"tbr_base_roll_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        df[f"ofi_base_roll_{label}"] = df["ofi_base"].rolling(window).mean().astype(np.float32)
+        df[f"ofi_quote_roll_{label}"] = df["ofi_quote"].rolling(window).mean().astype(np.float32)
+        df[f"tbr_base_roll_{label}"] = df["tbr_base"].rolling(window).mean().astype(np.float32)
+
     # --- VWAP vztah ----------------------------------------------------------
     vwap = (qvol / vol).astype(np.float32)
     df["rel_close_vwap"] = ((df["close"] - vwap).abs() / vwap).astype(np.float32)
 
     # --- výnosy & momentum ----------------------------------------------------
-    ret1 = np.log(df["close"] / df["close"].shift(1)).astype(np.float32)
+    safe_close = df["close"].replace(0.0, np.nan)
+    log_close = np.log(safe_close)
+    ret1 = log_close.diff().astype(np.float32)
     df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
+
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"mom_log_ret_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        df[f"mom_log_ret_{label}"] = log_close.diff(window).astype(np.float32)
+
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"vol_realized_{label}"] = np.float32(fill_value)
+            df[f"vol_of_vol_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        realized = ret1.rolling(window).std()
+        df[f"vol_realized_{label}"] = realized.astype(np.float32)
+        vol_of_vol = realized.rolling(window).std()
+        df[f"vol_of_vol_{label}"] = vol_of_vol.astype(np.float32)
+
+    high = df["high"].replace(0.0, np.nan)
+    low = df["low"].replace(0.0, np.nan)
+    log_range = np.log(high / low).pow(2)
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"vol_range_parkinson_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        pk_var = log_range.rolling(window).mean() * PARKINSON_CONST
+        df[f"vol_range_parkinson_{label}"] = np.sqrt(pk_var).astype(np.float32)
+
+    fast_span = max(2, timeframe_windows.get(60, 12))
+    slow_span = max(fast_span + 1, timeframe_windows.get(240, fast_span * 4))
+    fast_ema = df["close"].ewm(span=fast_span, adjust=False).mean()
+    slow_ema = df["close"].ewm(span=slow_span, adjust=False).mean()
+    denom = df["close"].replace(0.0, np.nan)
+    df["mom_microtrend_ema_ratio"] = ((fast_ema - slow_ema) / denom).astype(np.float32)
 
     # --- begin minimal anti-fragmentation patch ---
     # původní logika přidávala rozsáhlé z-score a delta kopie téměř všech
@@ -279,6 +484,70 @@ def create_features(
             df["oi_delta_15m"] = df["open_interest"].diff(3).astype(np.float32)
         elif "oi_delta_15m" not in df.columns:
             df["oi_delta_15m"] = fill_value
+
+        funding_col = _match_column(df, FUNDING_COLUMN_CANDIDATES)
+        if funding_col is not None:
+            funding = pd.to_numeric(df[funding_col], errors="coerce")
+            df["deriv_funding_rate"] = funding.astype(np.float32)
+        elif "deriv_funding_rate" not in df.columns:
+            df["deriv_funding_rate"] = fill_value
+
+        df["deriv_funding_rate_change"] = (
+            df["deriv_funding_rate"].diff().astype(np.float32)
+        )
+        smooth_window = max(1, timeframe_windows.get(240, 12))
+        df["deriv_funding_rate_smooth"] = (
+            df["deriv_funding_rate"].rolling(smooth_window).mean().astype(np.float32)
+        )
+
+        basis = df["basis_annualized"].astype(np.float32)
+        basis_window = max(1, timeframe_windows.get(240, 12))
+        df["deriv_basis_trend"] = (
+            (basis - basis.rolling(basis_window).mean()).astype(np.float32)
+        )
+        df["deriv_basis_slope"] = basis.diff(basis_window).astype(np.float32)
+
+        if "open_interest" in df.columns:
+            oi = pd.to_numeric(df["open_interest"], errors="coerce").astype(np.float32)
+            df["deriv_open_interest"] = oi
+            pct = oi.pct_change().replace([np.inf, -np.inf], np.nan)
+            df["deriv_oi_change_pct"] = pct.astype(np.float32)
+            vel_window = max(1, timeframe_windows.get(60, 3))
+            df["deriv_oi_velocity"] = oi.diff(vel_window).astype(np.float32)
+        else:
+            if "deriv_open_interest" not in df.columns:
+                df["deriv_open_interest"] = fill_value
+            df["deriv_oi_change_pct"] = fill_value
+            df["deriv_oi_velocity"] = fill_value
+
+        long_col = _match_column(df, LIQUIDATION_LONG_CANDIDATES)
+        short_col = _match_column(df, LIQUIDATION_SHORT_CANDIDATES)
+        if long_col is not None or short_col is not None:
+            long_vals = (
+                pd.to_numeric(df.get(long_col, fill_value), errors="coerce")
+                if long_col is not None
+                else pd.Series(fill_value, index=df.index, dtype=np.float32)
+            )
+            short_vals = (
+                pd.to_numeric(df.get(short_col, fill_value), errors="coerce")
+                if short_col is not None
+                else pd.Series(fill_value, index=df.index, dtype=np.float32)
+            )
+            long_vals = long_vals.astype(np.float32)
+            short_vals = short_vals.astype(np.float32)
+            df["deriv_liq_total"] = (long_vals + short_vals).astype(np.float32)
+            df["deriv_liq_net"] = (long_vals - short_vals).astype(np.float32)
+            if "open_interest" in df.columns:
+                oi_base = df["open_interest"].replace(0.0, np.nan)
+                df["deriv_liq_to_oi"] = (
+                    ((long_vals + short_vals) / oi_base).astype(np.float32)
+                )
+            else:
+                df["deriv_liq_to_oi"] = fill_value
+        else:
+            df["deriv_liq_total"] = fill_value
+            df["deriv_liq_net"] = fill_value
+            df["deriv_liq_to_oi"] = fill_value
     else:
         df = df.drop(columns=list(REGISTRY.derivatives), errors="ignore")
         df = df.drop(columns=[c for c in df.columns if c.startswith("deriv_")], errors="ignore")
@@ -348,6 +617,60 @@ def create_features(
         else:
             df["wall_ask_dist_bps"] = fill_value
             df["wall_ask_size_rel"] = fill_value
+
+        if bid_px_cols and ask_px_cols:
+            best_bid = df[bid_px_cols[0]].astype(np.float32)
+            best_ask = df[ask_px_cols[0]].astype(np.float32)
+            mid = ((best_bid + best_ask) / 2.0).replace(0.0, np.nan)
+            df["lob_spread_bps"] = ((best_ask - best_bid) / mid * 1e4).astype(np.float32)
+        else:
+            df["lob_spread_bps"] = fill_value
+
+        if bid_sz_cols and ask_sz_cols:
+            total_bid = df[bid_sz_cols].sum(axis=1).astype(np.float32)
+            total_ask = df[ask_sz_cols].sum(axis=1).astype(np.float32)
+            depth_denom = (total_bid + total_ask).replace(0.0, np.nan)
+            df["lob_depth_imbalance"] = (
+                ((total_bid - total_ask) / depth_denom).astype(np.float32)
+            )
+        else:
+            df["lob_depth_imbalance"] = fill_value
+
+        if bid_px_cols and bid_sz_cols:
+            bid_px = df[bid_px_cols].to_numpy(dtype=np.float32)
+            bid_sz = df[bid_sz_cols].to_numpy(dtype=np.float32)
+            total_bid = np.nansum(bid_sz, axis=1)
+            weighted_bid = np.divide(
+                np.nansum(bid_px * bid_sz, axis=1),
+                total_bid,
+                out=np.full(len(df), np.nan, dtype=np.float32),
+                where=total_bid != 0,
+            )
+            weighted_bid = pd.Series(weighted_bid, index=df.index)
+            best_bid = df[bid_px_cols[0]].astype(np.float32)
+            df["lob_bid_slope_bps"] = (
+                ((weighted_bid - best_bid) / best_bid.replace(0.0, np.nan)) * 1e4
+            ).astype(np.float32)
+        else:
+            df["lob_bid_slope_bps"] = fill_value
+
+        if ask_px_cols and ask_sz_cols:
+            ask_px = df[ask_px_cols].to_numpy(dtype=np.float32)
+            ask_sz = df[ask_sz_cols].to_numpy(dtype=np.float32)
+            total_ask = np.nansum(ask_sz, axis=1)
+            weighted_ask = np.divide(
+                np.nansum(ask_px * ask_sz, axis=1),
+                total_ask,
+                out=np.full(len(df), np.nan, dtype=np.float32),
+                where=total_ask != 0,
+            )
+            weighted_ask = pd.Series(weighted_ask, index=df.index)
+            best_ask = df[ask_px_cols[0]].astype(np.float32)
+            df["lob_ask_slope_bps"] = (
+                ((weighted_ask - best_ask) / best_ask.replace(0.0, np.nan)) * 1e4
+            ).astype(np.float32)
+        else:
+            df["lob_ask_slope_bps"] = fill_value
     else:
         drop_lob = [c for c in df.columns if c.startswith("lob_") or c.startswith("wall_")]
         if drop_lob:
@@ -365,6 +688,36 @@ def create_features(
     is_weekend = (ts.dt.dayofweek >= 5).astype(np.float32)
     df["is_weekend"] = is_weekend
     df["is_weekday"] = (1.0 - is_weekend).astype(np.float32)
+    df["time_hour_sin"] = np.sin(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
+    df["time_hour_cos"] = np.cos(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
+    df["time_dow_sin"] = np.sin(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
+    df["time_dow_cos"] = np.cos(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
+
+    # --- cross-asset features -------------------------------------------------
+    corr_minutes = 240
+    corr_window = timeframe_windows.get(corr_minutes, max(1, timeframe_windows.get(60, 1)))
+    corr_label = timeframe_labels.get(corr_minutes, _format_minutes_label(corr_minutes))
+    for asset, keywords in CROSS_ASSET_KEYWORDS.items():
+        col_name = _match_column(df, keywords)
+        ret_col = f"cross_{asset}_ret"
+        div_col = f"cross_{asset}_divergence"
+        corr_col = f"cross_{asset}_corr_{corr_label}"
+        if col_name is None:
+            df[ret_col] = np.float32(fill_value)
+            df[div_col] = np.float32(fill_value)
+            df[corr_col] = np.float32(fill_value)
+            continue
+        series = pd.to_numeric(df[col_name], errors="coerce")
+        series = series.astype(np.float32)
+        log_series = np.log(series.replace(0.0, np.nan))
+        asset_ret = log_series.diff()
+        df[ret_col] = asset_ret.astype(np.float32)
+        df[div_col] = (ret1 - asset_ret).astype(np.float32)
+        if corr_window > 1:
+            corr = ret1.rolling(corr_window).corr(asset_ret)
+            df[corr_col] = corr.astype(np.float32)
+        else:
+            df[corr_col] = np.float32(fill_value)
 
     # --- prefixed helper copies ----------------------------------------------
     # Duplicate selected features using explicit prefixes so that downstream
@@ -397,7 +750,7 @@ def create_features(
             df[dst] = df[src].astype(np.float32)
 
     # --- z-scores and deltas for prefixed features ---------------------------
-    prefixes = ["mom_", "vol_", "time_"]
+    prefixes = ["mom_", "vol_", "time_", "cross_"]
     if settings.include_onchain:
         prefixes.insert(0, "onch_")
     if settings.include_derivatives:
@@ -451,6 +804,7 @@ FEATURE_GROUPS: dict[str, list[str]] = {
     ],
     "time": [r"^tod_", r"^session_", r"funding_cycle", r"^dow_", r"^time_"],
     "onchain": [r"^onch_"],
+    "cross_asset": [r"^cross_"],
     # exact matches to avoid mapping e.g. "open_interest" to this group
     "price_ref": [r"^open$", r"^high$", r"^low$", r"^close$", r"^mid$"],
 }
