@@ -207,6 +207,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Minimal amount of training data required for walk-forward evaluation.",
     )
+    parser.add_argument(
+        "--cv",
+        choices=("purged-wf",),
+        help="Optional cross-validation strategy to evaluate during training.",
+    )
+    parser.add_argument(
+        "--embargo_min",
+        type=int,
+        choices=(120, 240, 360),
+        default=120,
+        help="Embargo window in minutes used for purged walk-forward cross-validation.",
+    )
     parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
     return parser
 
@@ -233,7 +245,7 @@ def main(argv: list[str] | None = None) -> Path:
         )
 
     X = df[feature_cols].astype("float32")
-    if args.split == "walkforward" and "timestamp" in df.columns:
+    if (args.split == "walkforward" or args.cv == "purged-wf") and "timestamp" in df.columns:
         X = X.assign(timestamp=df["timestamp"].values)
 
     y = df[label_col].astype("int8")
@@ -262,6 +274,8 @@ def main(argv: list[str] | None = None) -> Path:
         log_path=str(args.log_path),
         split=args.split,
         wfs_params=wfs_params,
+        cv=args.cv,
+        embargo_min=args.embargo_min,
     )
     print(f"Model trained and stored at {args.model_path}")
     return args.model_path

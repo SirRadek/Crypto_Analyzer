@@ -13,6 +13,7 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 
+from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.model_manager import atomic_write
 from crypto_analyzer.models.utils import evaluate_model
 from crypto_analyzer.utils.config import CONFIG
@@ -45,6 +46,8 @@ def train_model(
     log_path: str = "artifacts/oob_cls.json",
     split: str = "holdout",
     wfs_params: dict[str, int] | None = None,
+    cv: str | None = None,
+    embargo_min: int | None = None,
 ):
     """Train the meta-classifier using deterministic XGBoost defaults.
 
@@ -55,8 +58,8 @@ def train_model(
         :class:`numpy.ndarray`.
     model_path:
         Path where the trained model will be stored.
-    test_size, random_state, use_gpu, log_path, split, wfs_params:
-        Optional knobs controlling the evaluation split and logging.
+    test_size, random_state, use_gpu, log_path, split, wfs_params, cv, embargo_min:
+        Optional knobs controlling the evaluation split, cross-validation and logging.
 
     Returns
     -------
@@ -81,6 +84,96 @@ def train_model(
         random_state=random_state,
         verbosity=0,
     )
+
+    if cv == "purged-wf":
+        if not isinstance(X, pd.DataFrame) or "timestamp" not in X.columns:
+            raise ValueError("Purged walk-forward CV vyžaduje DataFrame s 'timestamp'")
+
+        df = X.reset_index(drop=True)
+        timestamps = pd.to_datetime(df["timestamp"])
+        features = df.drop(columns=["timestamp"])  # training features
+        y_series = pd.Series(y).reset_index(drop=True)
+
+        embargo = int(embargo_min or 0)
+        if embargo < 0:
+            raise ValueError("embargo_min must be non-negative")
+
+        max_splits = len(df) - 1
+        if max_splits < 1:
+            raise ValueError("Not enough observations for purged walk-forward CV")
+
+        requested_splits = 5
+        n_splits = min(requested_splits, max_splits)
+
+        splits = purged_walkforward_splits(timestamps, n_splits=n_splits, embargo_min=embargo)
+        if not splits:
+            raise ValueError("Purged walk-forward CV failed to generate any folds")
+
+        fold_metrics: list[dict[str, float]] = []
+        preds_frames: list[pd.DataFrame] = []
+
+        for fold, (train_idx, test_idx) in enumerate(splits):
+            if len(train_idx) == 0 or len(test_idx) == 0:
+                continue
+
+            X_train = _to_f32(features.iloc[train_idx])
+            y_train = y_series.iloc[train_idx]
+            X_val = _to_f32(features.iloc[test_idx])
+            y_val = y_series.iloc[test_idx]
+
+            clf = xgb.XGBClassifier(**base_params)
+            try:
+                _fit_no_es(clf, X_train, y_train, X_val, y_val)
+            except xgb.core.XGBoostError:
+                logger.warning("CUDA not available or failed. Falling back to CPU.")
+                clf.set_params(tree_method="hist", predictor="cpu_predictor")
+                _fit_no_es(clf, X_train, y_train, X_val, y_val)
+
+            acc, f1 = evaluate_model(clf, X_val, y_val)
+            fold_metrics.append({"fold": fold, "accuracy": acc, "f1": f1})
+
+            preds = clf.predict(X_val)
+            preds_frames.append(
+                pd.DataFrame(
+                    {"fold": fold, "y_true": y_val, "y_pred": preds},
+                    index=test_idx,
+                )
+            )
+
+        if not fold_metrics:
+            raise ValueError("Purged walk-forward CV produced no valid folds")
+
+        metrics_data = {
+            "cv": cv,
+            "embargo_minutes": embargo,
+            "n_splits": n_splits,
+            "folds": fold_metrics,
+        }
+        atomic_write(Path(log_path), json.dumps(metrics_data, indent=2).encode("utf-8"))
+
+        if preds_frames:
+            preds_df = pd.concat(preds_frames).sort_index()
+            pred_path = Path(log_path).with_suffix(".preds.csv")
+            preds_df.to_csv(pred_path, index_label="index")
+
+        X_full = _to_f32(features)
+        y_full = y_series
+        clf = xgb.XGBClassifier(**base_params)
+        try:
+            _fit_no_es(clf, X_full, y_full, X_full, y_full)
+        except xgb.core.XGBoostError:
+            logger.warning("CUDA not available or failed. Falling back to CPU.")
+            clf.set_params(tree_method="hist", predictor="cpu_predictor")
+            _fit_no_es(clf, X_full, y_full, X_full, y_full)
+
+        buffer = BytesIO()
+        joblib.dump(clf, buffer)
+        atomic_write(Path(model_path), buffer.getvalue())
+        logger.info("Model saved to %s", model_path)
+        return clf
+
+    if cv is not None:
+        raise ValueError(f"Unsupported CV strategy: {cv}")
 
     if split == "walkforward":
         if not isinstance(X, pd.DataFrame) or "timestamp" not in X.columns:
