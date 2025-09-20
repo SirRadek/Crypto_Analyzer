@@ -16,11 +16,10 @@ from sklearn.model_selection import train_test_split
 from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.model_manager import atomic_write
 from crypto_analyzer.models.calibration import (
-    IsotonicCalibrator,
-    PlattCalibrator,
-    brier_score,
-    log_loss as calibration_log_loss,
+    fit_isotonic,
+    fit_platt,
     plot_reliability,
+    reliability_curve,
 )
 from crypto_analyzer.models.conformal import generate_touch_conformal_report
 from crypto_analyzer.models.utils import evaluate_model
@@ -478,18 +477,34 @@ def train_xgb(
         )
 
         labels = (preds >= class_threshold).astype(int)
+        raw_bins, raw_obs, raw_exp, raw_brier, raw_logloss = reliability_curve(
+            y_test, preds
+        )
         metrics_raw: dict[str, float] = {
             "accuracy": float(accuracy_score(y_test, labels)),
             "f1": float(f1_score(y_test, labels)),
             "precision": float(precision_score(y_test, labels)),
             "recall": float(recall_score(y_test, labels)),
             "roc_auc": float(roc_auc_score(y_test, preds)),
-            "brier_score": float(brier_score(y_test, preds)),
-            "log_loss": float(calibration_log_loss(y_test, preds)),
+            "brier_score": raw_brier,
+            "log_loss": raw_logloss,
         }
 
         metrics_df = pd.DataFrame([metrics_raw])
         metrics_df.to_csv(output_dir / "metrics_cv.csv", index=False)
+
+        def _series_to_list(values: np.ndarray) -> list[float | None]:
+            return [None if np.isnan(val) else float(val) for val in values]
+
+        reliability_report: dict[str, dict[str, object]] = {
+            "raw": {
+                "bins": raw_bins.tolist(),
+                "observed": _series_to_list(raw_obs),
+                "expected": _series_to_list(raw_exp),
+                "brier_score": raw_brier,
+                "log_loss": raw_logloss,
+            }
+        }
 
         prob_series = {"Raw": preds}
         metrics_report["raw"] = metrics_raw
@@ -503,9 +518,9 @@ def train_xgb(
             cal_probs = booster.predict(xgb.DMatrix(X_cal))
         if calibration_possible and cal_probs is not None:
             calibrator = (
-                IsotonicCalibrator().fit(cal_probs, y_cal.values)
+                fit_isotonic(cal_probs, y_cal.values)
                 if calibration_method == "isotonic"
-                else PlattCalibrator().fit(cal_probs, y_cal.values)
+                else fit_platt(cal_probs, y_cal.values)
             )
             calibrated_probs = calibrator.predict(preds)
             prob_series[f"Calibrated ({calibration_method})"] = calibrated_probs
@@ -513,22 +528,33 @@ def train_xgb(
             calibrated_probs_calibration = calibrator.predict(cal_probs)
 
             labels_cal = (calibrated_probs >= class_threshold).astype(int)
+            cal_bins, cal_obs, cal_exp, cal_brier, cal_logloss = reliability_curve(
+                y_test, calibrated_probs
+            )
             metrics_cal: dict[str, float] = {
                 "accuracy": float(accuracy_score(y_test, labels_cal)),
                 "f1": float(f1_score(y_test, labels_cal)),
                 "precision": float(precision_score(y_test, labels_cal)),
                 "recall": float(recall_score(y_test, labels_cal)),
                 "roc_auc": float(roc_auc_score(y_test, calibrated_probs)),
-                "brier_score": float(brier_score(y_test, calibrated_probs)),
-                "log_loss": float(calibration_log_loss(y_test, calibrated_probs)),
+                "brier_score": cal_brier,
+                "log_loss": cal_logloss,
             }
             metrics_report["calibrated"] = metrics_cal
             metrics_report["calibration_samples"] = int(len(y_cal))
             calibration_applied = True
+            reliability_report["calibrated"] = {
+                "bins": cal_bins.tolist(),
+                "observed": _series_to_list(cal_obs),
+                "expected": _series_to_list(cal_exp),
+                "brier_score": cal_brier,
+                "log_loss": cal_logloss,
+            }
         elif calibration_method != "none" and task == "clf":
             metrics_report["calibration_skipped"] = "insufficient data"
 
         metrics_report["calibration_applied"] = calibration_applied
+        metrics_report["reliability"] = reliability_report
 
         final_run_id = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
         reports_dir = Path("reports")
@@ -540,6 +566,7 @@ def train_xgb(
             reliability_path,
             title=f"Reliability ({final_run_id})",
         )
+        metrics_report["reliability_plot"] = reliability_path.name
         if conformal_requested:
             conformal_path = reports_dir / f"conformal_{final_run_id}.json"
             if cal_probs is not None and y_cal is not None and len(y_cal) > 0:
