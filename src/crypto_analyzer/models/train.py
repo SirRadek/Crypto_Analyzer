@@ -22,6 +22,7 @@ from crypto_analyzer.models.calibration import (
     log_loss as calibration_log_loss,
     plot_reliability,
 )
+from crypto_analyzer.models.conformal import generate_touch_conformal_report
 from crypto_analyzer.models.utils import evaluate_model
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.splitting import WalkForwardSplit
@@ -343,6 +344,7 @@ def train_xgb(
     half_life_days: float = 30.0,
     calibration: str = "none",
     run_id: str | None = None,
+    conformal: dict[str, float] | None = None,
 ) -> xgb.Booster:
     """Train XGBoost model with exponential time decay weighting."""
 
@@ -374,13 +376,24 @@ def train_xgb(
     calibration_method = (calibration or "none").lower()
     calibration_possible = task == "clf" and calibration_method in {"isotonic", "platt"}
 
+    conformal_cfg = conformal or None
+    if conformal_cfg is not None and task != "clf":
+        raise ValueError("Conformal intervals are only supported for classification tasks")
+    conformal_alpha = 0.1
+    if conformal_cfg is not None:
+        conformal_alpha = float(conformal_cfg.get("alpha", 0.1))
+        if not (0.0 < conformal_alpha < 1.0):
+            raise ValueError("conformal alpha must lie in (0, 1)")
+    conformal_requested = conformal_cfg is not None
+
     X_train = X_train_full
     y_train = y_train_full
     ts_train = ts_train_full
     X_cal = None
     y_cal = None
 
-    if calibration_possible and len(X_train_full) > 1:
+    need_calibration_split = (calibration_possible or conformal_requested) and len(X_train_full) > 1
+    if need_calibration_split:
         cal_size = max(int(len(X_train_full) * 0.2), 1)
         cal_size = min(cal_size, len(X_train_full) - 1)
         if cal_size > 0:
@@ -447,9 +460,12 @@ def train_xgb(
         metrics_report["class_threshold"] = class_threshold
 
         calibrated_probs = None
+        calibrated_probs_calibration = None
         calibration_applied = False
-        if calibration_possible and X_cal is not None and len(X_cal) > 0:
+        cal_probs = None
+        if (calibration_possible or conformal_requested) and X_cal is not None and len(X_cal) > 0:
             cal_probs = booster.predict(xgb.DMatrix(X_cal))
+        if calibration_possible and cal_probs is not None:
             calibrator = (
                 IsotonicCalibrator().fit(cal_probs, y_cal.values)
                 if calibration_method == "isotonic"
@@ -457,6 +473,8 @@ def train_xgb(
             )
             calibrated_probs = calibrator.predict(preds)
             prob_series[f"Calibrated ({calibration_method})"] = calibrated_probs
+
+            calibrated_probs_calibration = calibrator.predict(cal_probs)
 
             labels_cal = (calibrated_probs >= class_threshold).astype(int)
             metrics_cal: dict[str, float] = {
@@ -486,6 +504,43 @@ def train_xgb(
             reliability_path,
             title=f"Reliability ({final_run_id})",
         )
+        if conformal_requested:
+            conformal_path = reports_dir / f"conformal_{final_run_id}.json"
+            if cal_probs is not None and y_cal is not None and len(y_cal) > 0:
+                raw_report = generate_touch_conformal_report(
+                    y_cal=y_cal.values if isinstance(y_cal, pd.Series) else y_cal,
+                    p_cal=cal_probs,
+                    y_test=y_test.values if isinstance(y_test, pd.Series) else y_test,
+                    p_test=preds,
+                    alpha=conformal_alpha,
+                )
+                conformal_payload: dict[str, object] = {"raw": raw_report}
+                if calibrated_probs is not None and calibrated_probs_calibration is not None:
+                    calibrated_report = generate_touch_conformal_report(
+                        y_cal=y_cal.values if isinstance(y_cal, pd.Series) else y_cal,
+                        p_cal=calibrated_probs_calibration,
+                        y_test=y_test.values if isinstance(y_test, pd.Series) else y_test,
+                        p_test=calibrated_probs,
+                        alpha=conformal_alpha,
+                    )
+                    conformal_payload["calibrated"] = calibrated_report
+                with conformal_path.open("w", encoding="utf-8") as f:
+                    json.dump(conformal_payload, f, indent=2)
+                metrics_report.setdefault("conformal", {})
+                metrics_report["conformal"].update(
+                    {
+                        "alpha": conformal_alpha,
+                        "report": conformal_path.name,
+                    }
+                )
+            else:
+                with conformal_path.open("w", encoding="utf-8") as f:
+                    json.dump(
+                        {"error": "insufficient calibration data", "alpha": conformal_alpha},
+                        f,
+                        indent=2,
+                    )
+
         metrics_path = reports_dir / f"metrics_{final_run_id}.json"
         with metrics_path.open("w", encoding="utf-8") as f:
             json.dump(metrics_report, f, indent=2)
@@ -636,7 +691,39 @@ def parse_args(argv: Iterable[str] | None = None):
         help="Probability calibration method for classification",
     )
     parser.add_argument("--run_id", type=str, default=None)
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--conformal",
+        nargs="*",
+        help="Enable conformal prediction report; optionally pass alpha=0.1",
+    )
+
+    args = parser.parse_args(argv)
+
+    conformal_args = args.conformal
+    if conformal_args is None:
+        args.conformal = None
+        return args
+
+    conformal_cfg: dict[str, float] = {"alpha": 0.1}
+    if len(conformal_args) == 0:
+        args.conformal = conformal_cfg
+        return args
+
+    for item in conformal_args:
+        if "=" not in item:
+            parser.error(f"Invalid --conformal specification: {item}")
+        key, value = item.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key != "alpha":
+            parser.error(f"Unsupported --conformal option: {key}")
+        try:
+            conformal_cfg["alpha"] = float(value)
+        except ValueError:
+            parser.error(f"Invalid alpha value for --conformal: {value}")
+
+    args.conformal = conformal_cfg
+    return args
 
 
 def main_cli(args) -> Path:
@@ -679,6 +766,7 @@ def main_cli(args) -> Path:
         half_life_days=args.half_life,
         calibration=args.calibration,
         run_id=run_id,
+        conformal=args.conformal,
     )
     return out_dir
 

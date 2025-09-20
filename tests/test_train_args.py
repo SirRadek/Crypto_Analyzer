@@ -40,3 +40,29 @@ def test_parses_args(module_name):
         ]
     )
     assert args2.train_window == "10 days"
+
+
+def test_train_cli_conformal_parse():
+    pytest.importorskip("xgboost")
+    from crypto_analyzer.models import train as train_module
+
+    args = train_module.parse_args(
+        [
+            "--task",
+            "clf",
+            "--horizon",
+            "120",
+            "--conformal",
+            "alpha=0.05",
+        ]
+    )
+    assert args.conformal == {"alpha": 0.05}
+
+    args_default = train_module.parse_args([
+        "--task",
+        "clf",
+        "--horizon",
+        "120",
+        "--conformal",
+    ])
+    assert args_default.conformal == {"alpha": 0.1}
