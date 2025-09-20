@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
+
+import numpy as np
 import pandas as pd
 
 from crypto_analyzer.eval.backtest import run_backtest
@@ -70,24 +73,70 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reference price column used when computing trade returns.",
     )
     parser.add_argument(
-        "--fee",
+        "--prob-column",
+        default=None,
+        help="Optional probability column for EV-based backtest rules.",
+    )
+    parser.add_argument(
+        "--fee-bps",
         type=float,
-        default=0.0004,
-        help="Proportional transaction cost per trade (in decimal form).",
+        default=4.0,
+        help="Proportional transaction cost per trade in basis points.",
     )
     parser.add_argument(
-        "--metrics-output",
-        type=Path,
-        default=Path("backtest_metrics.json"),
-        help="Destination JSON file for summary metrics.",
+        "--slip-bps",
+        type=float,
+        default=0.0,
+        help="Slippage assumption in basis points added to the fee.",
     )
     parser.add_argument(
-        "--equity-output",
-        type=Path,
-        default=Path("backtest_equity.csv"),
-        help="Destination CSV file storing the equity curve.",
+        "--latency-min",
+        type=float,
+        default=0.0,
+        help="Execution latency in minutes applied by shifting the entry candle forward.",
+    )
+    parser.add_argument(
+        "--p-touch-thr",
+        type=float,
+        default=None,
+        help="Minimum probability of touching the target required to open a trade.",
+    )
+    parser.add_argument(
+        "--p-up-thr",
+        type=float,
+        default=None,
+        help=(
+            "Directional probability threshold. Values above open longs, below (1-thr) open shorts."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Optional identifier used when storing reports. Defaults to a UTC timestamp.",
     )
     return parser
+
+
+def _infer_latency_steps(timestamps: pd.Series, latency_minutes: float) -> int:
+    if latency_minutes <= 0:
+        return 0
+
+    if timestamps.empty:
+        return 0
+
+    ordered = timestamps.sort_values().reset_index(drop=True)
+    diffs = ordered.diff().dropna()
+    if diffs.empty:
+        return 0
+
+    step_minutes = diffs.dt.total_seconds().median() / 60.0
+    if not np.isfinite(step_minutes) or step_minutes <= 0:
+        return 0
+
+    steps = int(round(latency_minutes / step_minutes))
+    if steps <= 0:
+        steps = 1
+    return steps
 
 
 def main(argv: list[str] | None = None) -> tuple[Path, Path]:
@@ -103,21 +152,60 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
         price_col=args.price_column,
     )
 
-    result = run_backtest(normalised, fee=args.fee)
+    latency_steps = _infer_latency_steps(normalised["timestamp"], args.latency_min)
 
-    args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
-    args.equity_output.parent.mkdir(parents=True, exist_ok=True)
+    prob_col: Optional[str] = args.prob_column or None
+    if prob_col is not None and prob_col == args.prediction_column:
+        prob_col = "p_hat"
+    p_up_col = "p_up" if "p_up" in normalised.columns else None
 
-    equity = result["equity"]
+    result = run_backtest(
+        normalised,
+        fee_bps=args.fee_bps,
+        slippage_bps=args.slip_bps,
+        prob_col=prob_col,
+        latency_steps=latency_steps,
+        p_touch_col="p_hat" if args.p_touch_thr is not None else None,
+        p_touch_threshold=args.p_touch_thr,
+        p_up_col=p_up_col,
+        p_up_threshold=args.p_up_thr,
+    )
+
+    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    reports_dir = Path("reports")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    equity = result["equity"].assign(run_id=run_id)
     metrics = result["metrics"]
-    equity.to_csv(args.equity_output, index=False)
-    args.metrics_output.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    equity_output = reports_dir / f"equity_{run_id}.csv"
+    summary_output = reports_dir / f"summary_{run_id}.json"
+
+    equity.to_csv(equity_output, index=False)
+
+    summary = {
+        "run_id": run_id,
+        "parameters": {
+            "fee_bps": args.fee_bps,
+            "slip_bps": args.slip_bps,
+            "latency_minutes": args.latency_min,
+            "p_touch_threshold": args.p_touch_thr,
+            "p_up_threshold": args.p_up_thr,
+            "prob_column": prob_col,
+            "latency_steps": latency_steps,
+        },
+        "metrics": metrics,
+    }
+    summary_output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print(
         "Backtest complete. Final equity: "
-        f"{float(equity['equity'].iloc[-1]):.4f}, PnL: {metrics['pnl']:.4f}"
+        f"{float(equity['equity'].iloc[-1]):.4f}, PnL: {metrics['pnl']:.4f}, "
+        f"Sharpe: {metrics['sharpe']:.4f}, EV: {metrics['ev']:.6f}, "
+        f"MaxDD: {metrics['max_drawdown']:.4f}"
     )
-    return args.metrics_output, args.equity_output
+
+    return summary_output, equity_output
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour
