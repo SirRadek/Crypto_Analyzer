@@ -178,6 +178,29 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
     equity = result["equity"].assign(run_id=run_id)
     metrics = result["metrics"]
 
+    summary_metrics = {
+        "ev": metrics.get("ev"),
+        "hit_rate": metrics.get("hit_rate"),
+        "sharpe": metrics.get("sharpe"),
+        "maxDD": metrics.get("maxDD", metrics.get("max_drawdown")),
+    }
+
+    for key, value in summary_metrics.items():
+        display: str
+        if value is None:
+            display = "nan"
+        else:
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                display = str(value)
+            else:
+                if not np.isfinite(numeric_value):
+                    display = "nan"
+                else:
+                    display = f"{numeric_value:.6f}"
+        print(f"{key}: {display}")
+
     equity_output = reports_dir / f"equity_{run_id}.csv"
     summary_output = reports_dir / f"summary_{run_id}.json"
 
@@ -194,7 +217,7 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
             "prob_column": prob_col,
             "latency_steps": latency_steps,
         },
-        "metrics": metrics,
+        "metrics": summary_metrics,
     }
     summary_output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
