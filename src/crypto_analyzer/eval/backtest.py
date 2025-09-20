@@ -148,6 +148,7 @@ def run_backtest(
         "ev": avg_ev,
         "hit_rate_vs_prediction": hit_rate_vs_prediction,
         "max_drawdown": max_drawdown,
+        "maxDD": max_drawdown,
     }
     equity_frame = pd.DataFrame({"timestamp": working["timestamp"], "equity": equity})
     return {"equity": equity_frame, "metrics": metrics}
