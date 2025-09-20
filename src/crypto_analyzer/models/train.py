@@ -119,8 +119,43 @@ def train_model(
 
         fold_metrics: list[dict[str, float]] = []
         preds_frames: list[pd.DataFrame] = []
+        split_details: list[dict[str, Any]] = []
 
         for fold, (train_idx, test_idx) in enumerate(splits):
+            train_times = timestamps.iloc[train_idx] if len(train_idx) else pd.Series(dtype="datetime64[ns]")
+            test_times = timestamps.iloc[test_idx] if len(test_idx) else pd.Series(dtype="datetime64[ns]")
+
+            detail = {
+                "fold": fold,
+                "train": {
+                    "count": int(len(train_idx)),
+                    "start_idx": int(train_idx[0]) if len(train_idx) else None,
+                    "end_idx": int(train_idx[-1]) if len(train_idx) else None,
+                    "start_time": train_times.iloc[0].isoformat() if len(train_times) else None,
+                    "end_time": train_times.iloc[-1].isoformat() if len(train_times) else None,
+                },
+                "test": {
+                    "count": int(len(test_idx)),
+                    "start_idx": int(test_idx[0]) if len(test_idx) else None,
+                    "end_idx": int(test_idx[-1]) if len(test_idx) else None,
+                    "start_time": test_times.iloc[0].isoformat() if len(test_times) else None,
+                    "end_time": test_times.iloc[-1].isoformat() if len(test_times) else None,
+                },
+                "embargo": {
+                    "start_time": (
+                        (test_times.iloc[0] - pd.Timedelta(minutes=embargo)).isoformat()
+                        if len(test_times)
+                        else None
+                    ),
+                    "end_time": (
+                        (test_times.iloc[-1] + pd.Timedelta(minutes=embargo)).isoformat()
+                        if len(test_times)
+                        else None
+                    ),
+                },
+            }
+            split_details.append(detail)
+
             if len(train_idx) == 0 or len(test_idx) == 0:
                 continue
 
@@ -156,6 +191,7 @@ def train_model(
             "embargo_minutes": embargo,
             "n_splits": n_splits,
             "folds": fold_metrics,
+            "splits": split_details,
         }
         atomic_write(Path(log_path), json.dumps(metrics_data, indent=2).encode("utf-8"))
 
