@@ -15,6 +15,13 @@ from sklearn.model_selection import train_test_split
 
 from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.model_manager import atomic_write
+from crypto_analyzer.models.calibration import (
+    IsotonicCalibrator,
+    PlattCalibrator,
+    brier_score,
+    log_loss as calibration_log_loss,
+    plot_reliability,
+)
 from crypto_analyzer.models.utils import evaluate_model
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.splitting import WalkForwardSplit
@@ -334,6 +341,8 @@ def train_xgb(
     class_threshold: float = 0.5,
     scale_pos_weight: float = 1.0,
     half_life_days: float = 30.0,
+    calibration: str = "none",
+    run_id: str | None = None,
 ) -> xgb.Booster:
     """Train XGBoost model with exponential time decay weighting."""
 
@@ -352,14 +361,38 @@ def train_xgb(
         "tree_method": tree_method,
         "seed": seed,
     }
+
     if task == "clf":
         params["scale_pos_weight"] = scale_pos_weight
 
     # chronological train/test split (80/20)
     split_idx = int(len(X) * 0.8)
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-    ts_train, ts_test = timestamps.iloc[:split_idx], timestamps.iloc[split_idx:]
+    X_train_full, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train_full, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+    ts_train_full, ts_test = timestamps.iloc[:split_idx], timestamps.iloc[split_idx:]
+
+    calibration_method = (calibration or "none").lower()
+    calibration_possible = task == "clf" and calibration_method in {"isotonic", "platt"}
+
+    X_train = X_train_full
+    y_train = y_train_full
+    ts_train = ts_train_full
+    X_cal = None
+    y_cal = None
+
+    if calibration_possible and len(X_train_full) > 1:
+        cal_size = max(int(len(X_train_full) * 0.2), 1)
+        cal_size = min(cal_size, len(X_train_full) - 1)
+        if cal_size > 0:
+            X_cal = X_train_full.iloc[-cal_size:]
+            y_cal = y_train_full.iloc[-cal_size:]
+            X_train = X_train_full.iloc[:-cal_size]
+            y_train = y_train_full.iloc[:-cal_size]
+            ts_train = ts_train_full.iloc[:-cal_size]
+        else:
+            calibration_possible = False
+    else:
+        calibration_possible = False
 
     weights = _exp_weights(ts_train, half_life_days)
 
@@ -377,7 +410,15 @@ def train_xgb(
 
     # Evaluation metrics
     preds = booster.predict(dtest)
-    metrics: dict[str, float] = {}
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_report: dict[str, Any] = {
+        "task": task,
+        "calibration_method": calibration_method,
+        "test_samples": int(len(y_test)),
+        "calibration_applied": False,
+    }
+
     if task == "clf":
         from sklearn.metrics import (
             accuracy_score,
@@ -388,21 +429,85 @@ def train_xgb(
         )
 
         labels = (preds >= class_threshold).astype(int)
-        metrics["accuracy"] = float(accuracy_score(y_test, labels))
-        metrics["f1"] = float(f1_score(y_test, labels))
-        metrics["precision"] = float(precision_score(y_test, labels))
-        metrics["recall"] = float(recall_score(y_test, labels))
-        metrics["roc_auc"] = float(roc_auc_score(y_test, preds))
+        metrics_raw: dict[str, float] = {
+            "accuracy": float(accuracy_score(y_test, labels)),
+            "f1": float(f1_score(y_test, labels)),
+            "precision": float(precision_score(y_test, labels)),
+            "recall": float(recall_score(y_test, labels)),
+            "roc_auc": float(roc_auc_score(y_test, preds)),
+            "brier_score": float(brier_score(y_test, preds)),
+            "log_loss": float(calibration_log_loss(y_test, preds)),
+        }
+
+        metrics_df = pd.DataFrame([metrics_raw])
+        metrics_df.to_csv(output_dir / "metrics_cv.csv", index=False)
+
+        prob_series = {"Raw": preds}
+        metrics_report["raw"] = metrics_raw
+        metrics_report["class_threshold"] = class_threshold
+
+        calibrated_probs = None
+        calibration_applied = False
+        if calibration_possible and X_cal is not None and len(X_cal) > 0:
+            cal_probs = booster.predict(xgb.DMatrix(X_cal))
+            calibrator = (
+                IsotonicCalibrator().fit(cal_probs, y_cal.values)
+                if calibration_method == "isotonic"
+                else PlattCalibrator().fit(cal_probs, y_cal.values)
+            )
+            calibrated_probs = calibrator.predict(preds)
+            prob_series[f"Calibrated ({calibration_method})"] = calibrated_probs
+
+            labels_cal = (calibrated_probs >= class_threshold).astype(int)
+            metrics_cal: dict[str, float] = {
+                "accuracy": float(accuracy_score(y_test, labels_cal)),
+                "f1": float(f1_score(y_test, labels_cal)),
+                "precision": float(precision_score(y_test, labels_cal)),
+                "recall": float(recall_score(y_test, labels_cal)),
+                "roc_auc": float(roc_auc_score(y_test, calibrated_probs)),
+                "brier_score": float(brier_score(y_test, calibrated_probs)),
+                "log_loss": float(calibration_log_loss(y_test, calibrated_probs)),
+            }
+            metrics_report["calibrated"] = metrics_cal
+            metrics_report["calibration_samples"] = int(len(y_cal))
+            calibration_applied = True
+        elif calibration_method != "none" and task == "clf":
+            metrics_report["calibration_skipped"] = "insufficient data"
+
+        metrics_report["calibration_applied"] = calibration_applied
+
+        final_run_id = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+        reports_dir = Path("reports")
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        reliability_path = reports_dir / f"reliability_{final_run_id}.png"
+        plot_reliability(
+            y_test,
+            prob_series,
+            reliability_path,
+            title=f"Reliability ({final_run_id})",
+        )
+        metrics_path = reports_dir / f"metrics_{final_run_id}.json"
+        with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(metrics_report, f, indent=2)
     else:
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-        metrics["rmse"] = float(np.sqrt(mean_squared_error(y_test, preds)))
-        metrics["mae"] = float(mean_absolute_error(y_test, preds))
-        metrics["r2"] = float(r2_score(y_test, preds))
+        metrics: dict[str, float] = {
+            "rmse": float(np.sqrt(mean_squared_error(y_test, preds))),
+            "mae": float(mean_absolute_error(y_test, preds)),
+            "r2": float(r2_score(y_test, preds)),
+        }
+        metrics_df = pd.DataFrame([metrics])
+        metrics_df.to_csv(output_dir / "metrics_cv.csv", index=False)
+        metrics_report["raw"] = metrics
+        metrics_report["calibration_applied"] = False
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    metrics_df = pd.DataFrame([metrics])
-    metrics_df.to_csv(output_dir / "metrics_cv.csv", index=False)
+        final_run_id = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+        reports_dir = Path("reports")
+        metrics_path = reports_dir / f"metrics_{final_run_id}.json"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(metrics_report, f, indent=2)
 
     # SHAP feature importance
     import shap
@@ -524,6 +629,12 @@ def parse_args(argv: Iterable[str] | None = None):
     parser.add_argument(
         "--half_life", type=float, default=30.0, help="Half-life in days for weights"
     )
+    parser.add_argument(
+        "--calibration",
+        choices=["none", "isotonic", "platt"],
+        default="none",
+        help="Probability calibration method for classification",
+    )
     parser.add_argument("--run_id", type=str, default=None)
     return parser.parse_args(argv)
 
@@ -566,6 +677,8 @@ def main_cli(args) -> Path:
         class_threshold=args.class_threshold,
         scale_pos_weight=args.scale_pos_weight,
         half_life_days=args.half_life,
+        calibration=args.calibration,
+        run_id=run_id,
     )
     return out_dir
 
