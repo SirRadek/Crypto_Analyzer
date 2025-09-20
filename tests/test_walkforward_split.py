@@ -1,5 +1,6 @@
 import pandas as pd
 
+from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.utils.splitting import PurgedWalkForwardSplit, WalkForwardSplit
 
 
@@ -45,3 +46,30 @@ def test_purged_walkforward_respects_embargo_and_purge():
     if len(splits) > 1:
         for (_, test_idx), (next_train_idx, _) in zip(splits, splits[1:]):
             assert test_idx.max() < next_train_idx.min()
+
+
+def test_purged_walkforward_split_function_respects_embargo():
+    index = pd.date_range("2024-01-01", periods=72, freq="h", tz="UTC")
+    embargo_min = 180
+
+    splits = purged_walkforward_splits(index, n_splits=4, embargo_min=embargo_min)
+    assert splits, "Expected purged walk-forward splitter to return folds"
+
+    embargo_delta = pd.Timedelta(minutes=embargo_min)
+    seen_windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    for train_idx, test_idx in splits:
+        assert train_idx.size > 0 and test_idx.size > 0
+        assert train_idx.max() < test_idx.min()
+
+        train_times = index[train_idx]
+        test_times = index[test_idx]
+
+        window_start = test_times[0] - embargo_delta
+        window_end = test_times[-1] + embargo_delta
+
+        assert not ((train_times >= window_start) & (train_times <= window_end)).any()
+        for start, end in seen_windows:
+            assert not ((train_times >= start) & (train_times <= end)).any()
+
+        seen_windows.append((window_start, window_end))

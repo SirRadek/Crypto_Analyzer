@@ -216,8 +216,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--embargo_min",
         type=int,
         choices=(120, 240, 360),
-        default=120,
-        help="Embargo window in minutes used for purged walk-forward cross-validation.",
+        default=360,
+        help=(
+            "Embargo window in minutes used for purged walk-forward cross-validation."
+            " Defaults to 360 minutes."
+        ),
     )
     parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
     return parser
