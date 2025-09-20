@@ -84,9 +84,22 @@ def train_stacking_meta_learner(
         raise ValueError("base_predictions and target must have matching rows")
 
     base = _build_base(cfg.random_state)
+
+    def _resolve_cv_size(target_array: np.ndarray) -> int:
+        counts = np.bincount(target_array)
+        nonzero = counts[counts > 0]
+        if nonzero.size < 2:
+            raise ValueError("Calibration requires at least two classes in the target.")
+        max_cv = int(nonzero.min())
+        cv_size = min(cfg.cv_splits, max_cv)
+        if cv_size < 2:
+            raise ValueError("Not enough samples per class to perform calibration.")
+        return cv_size
+
     if cfg.calibrate:
+        calibration_cv = _resolve_cv_size(y)
         model: CalibratedClassifierCV | Pipeline = CalibratedClassifierCV(
-            base, cv=cfg.cv_splits, method=cfg.calibration_method
+            base, cv=calibration_cv, method=cfg.calibration_method
         )
     else:
         model = base
@@ -100,8 +113,9 @@ def train_stacking_meta_learner(
     for train_idx, test_idx in cv.split(X, y):
         base_clone = _build_base(cfg.random_state)
         if cfg.calibrate:
+            fold_cv = _resolve_cv_size(y[train_idx])
             fold_model = CalibratedClassifierCV(
-                base_clone, cv=cfg.cv_splits, method=cfg.calibration_method
+                base_clone, cv=fold_cv, method=cfg.calibration_method
             )
         else:
             fold_model = base_clone
