@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from crypto_analyzer.config.schema import (
@@ -26,13 +25,14 @@ from crypto_analyzer.config.schema import (
     RuntimeSettings,
 )
 from crypto_analyzer.utils.errors import ConfigError
+from crypto_analyzer.utils.secrets import get_secret, load_environment
 
 CONFIG_FILE_ENV = "APP_CONFIG_FILE"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
-load_dotenv(override=False)
+load_environment()
 
 
 def _read_config_file() -> tuple[dict[str, Any], Path | None]:
@@ -243,24 +243,29 @@ def _build_backtest_settings(data: dict[str, Any]) -> BacktestSettings:
     )
 
 
-def _build_onchain_settings(
-    data: dict[str, Any], runtime: RuntimeSettings
-) -> OnChainSettings:
+def _build_onchain_settings(data: dict[str, Any], runtime: RuntimeSettings) -> OnChainSettings:
     defaults = OnChainSettings()
     use_mempool = _as_bool(data.get("use_mempool"), defaults.use_mempool)
-    use_exchange_flows = _as_bool(
-        data.get("use_exchange_flows"), defaults.use_exchange_flows
-    )
+    use_exchange_flows = _as_bool(data.get("use_exchange_flows"), defaults.use_exchange_flows)
     use_usdt_events = _as_bool(data.get("use_usdt_events"), defaults.use_usdt_events)
     cache_default = runtime.cache_dir / "onchain"
     cache_dir = Path(_as_str(data.get("cache_dir"), str(cache_default)))
-    glassnode_api_key = data.get("glassnode_api_key")
-    glassnode = str(glassnode_api_key).strip() or None if glassnode_api_key is not None else None
-    whale_api_key = data.get("whale_api_key")
-    whale = str(whale_api_key).strip() or None if whale_api_key is not None else None
-    exchange_flow_source = _as_str(
-        data.get("exchange_flow_source"), defaults.exchange_flow_source
-    )
+    glassnode_secret = get_secret("GLASSNODE_API_KEY")
+    whale_secret = get_secret("WHALE_API_KEY")
+    if glassnode_secret is not None:
+        glassnode = glassnode_secret
+    else:
+        glassnode_api_key = data.get("glassnode_api_key")
+        glassnode = (
+            str(glassnode_api_key).strip() or None if glassnode_api_key is not None else None
+        )
+
+    if whale_secret is not None:
+        whale = whale_secret
+    else:
+        whale_api_key = data.get("whale_api_key")
+        whale = str(whale_api_key).strip() or None if whale_api_key is not None else None
+    exchange_flow_source = _as_str(data.get("exchange_flow_source"), defaults.exchange_flow_source)
     exchange_flow_path_value = data.get("exchange_flow_path")
     if exchange_flow_path_value in (None, ""):
         exchange_flow_path = None
@@ -421,4 +426,3 @@ __all__ = [
     "override_feature_settings",
     "config_to_dict",
 ]
-

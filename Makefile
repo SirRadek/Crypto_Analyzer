@@ -1,22 +1,37 @@
-.RECIPEPREFIX := >
-.PHONY: install format lint typecheck test demo
+.PHONY: setup format lint type test audit features train backtest ablation deadcode
 
-install:
->pip install -e .[dev]
+setup:
+python -m pip install --upgrade pip
+python -m pip install -e .[dev]
 
 format:
->black .
->isort .
+black .
+isort .
 
 lint:
->ruff check .
+ruff check .
+ruff format --check .
 
-typecheck:
->mypy .
+deadcode:
+vulture src/crypto_analyzer
+
+type:
+mypy .
+
+audit:
+deptry .
 
 test:
->PYTHONPATH=. pytest -q
+PYTHONPATH=. pytest -q
 
-# simple demo entrypoint
-demo:
->python -m crypto_analyzer.cli.train
+features:
+python -m scripts.make_features
+
+train:
+python -m scripts.train
+
+backtest:
+python -m scripts.backtest
+
+ablation:
+python -m scripts.ablation
