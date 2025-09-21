@@ -14,6 +14,50 @@ A modular Python project for **cryptocurrency price analysis and prediction** fo
 - Lightweight signal aggregation keeps the default pipeline purely classification-based.
 - Fully modular and easy to expand.
 
+## Rozšířené rysy
+
+Advanced data sources can be merged into the default feature table without
+introducing look-ahead bias. All auxiliary loaders align their inputs using
+**left-label resampling**: external snapshots are resampled to the candle
+frequency with the *label* aligned to the left edge of the interval and then
+forward-filled so that the feature timestamp never exceeds the candle open.
+
+### Derivátová data
+
+Enable the derivative enrichments while generating features:
+
+```bash
+python scripts/make_features.py --use_derivatives
+```
+
+The loader expects either the columns to be present in the raw OHLCV source or
+external tables configured via `config/app.yaml`. The following columns are
+produced after left-label alignment:
+
+| Sloupec | Popis |
+| --- | --- |
+| `funding_z` | Z-skóre posledního funding rate s ohledem na historický průměr a směrodatnou odchylku. |
+| `basis_bp` | Perpetual basis přepočtený na basis points (bp) a zarovnaný na mřížku svíček. |
+| `oi_change_rate` | Relativní změna (pct change) open interestu mezi jednotlivými snapshoty. |
+
+### Order book signály
+
+Depth snapshots a event stream lze zapojit přes praktický přepínač:
+
+```bash
+python scripts/make_features.py --use_orderbook
+```
+
+Při zpracování se používá stejná left-label resampling logika – order book depth
+je agregován k času otevření svíčky a nikdy nevidí budoucí tick. Výstup obsahuje
+tyto metriky:
+
+| Sloupec | Popis |
+| --- | --- |
+| `depth_imbalance` | Poměr kumulativních bid/ask velikostí `(bid - ask) / (bid + ask)` v rámci sledovaných hladin. |
+| `spread` | Quoted spread v basis points spočítaný z nejlepšího bidu a asku. |
+| `ofi` | Order flow imbalance agregovaný ze streamu obchodů / objednávek podle timestampu. |
+
 ---
 
 ## Project Structure
@@ -117,6 +161,13 @@ Cost-aware backtest with latency and probability gates:
 
 ```bash
 python scripts/backtest.py data/predictions.csv --fee_bps 1 --slip_bps 1 --latency_min 1 --p_touch_thr 0.6 --p_up_thr 0.55
+```
+
+To explore how execution costs interact with the probability gates you can run
+an EV sweep and heatmap export:
+
+```bash
+python scripts/optimize_thresholds.py data/predictions.csv --fee_bps 1 --slip_bps 1 --latency_min 1
 ```
 
 The CLI entry points can be combined with your own data source by pointing

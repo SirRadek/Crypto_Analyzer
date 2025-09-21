@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from crypto_analyzer.eval.backtest import run_backtest
+from crypto_analyzer.eval.threshold_sweep import SweepParams, sweep_threshold_grid
 from crypto_analyzer.utils.config import CONFIG
 
 
@@ -125,6 +126,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional identifier used when storing reports. Defaults to a UTC timestamp.",
     )
+    parser.add_argument(
+        "--optimize-thresholds",
+        action="store_true",
+        help="Run a quick EV sweep across default threshold grids before executing the backtest.",
+    )
     return parser
 
 
@@ -150,6 +156,13 @@ def _infer_latency_steps(timestamps: pd.Series, latency_minutes: float) -> int:
     return steps
 
 
+def _find_horizon_column(df: pd.DataFrame) -> str | None:
+    for column in ("horizon", "horizon_min", "horizon_minutes"):
+        if column in df.columns:
+            return column
+    return None
+
+
 def main(argv: list[str] | None = None) -> tuple[Path, Path]:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -169,6 +182,34 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
     if prob_col is not None and prob_col == args.prediction_column:
         prob_col = "p_hat"
     p_up_col = "p_up" if "p_up" in normalised.columns else None
+
+    if args.optimize_thresholds:
+        horizon_col = _find_horizon_column(normalised)
+        touch_grid = np.round(np.arange(0.5, 0.8001, 0.05), 4)
+        up_grid = np.round(np.arange(0.5, 0.7001, 0.05), 4)
+        params = SweepParams(
+            p_touch_values=touch_grid,
+            p_up_values=up_grid,
+            fee_bps=args.fee_bps,
+            slippage_bps=args.slip_bps,
+            latency_steps=latency_steps,
+            p_touch_col="p_hat",
+            p_up_col=p_up_col,
+        )
+        frames: list[pd.DataFrame] = []
+        if horizon_col is not None:
+            values = normalised[horizon_col].dropna().unique()
+            for value in sorted(values):
+                subset = normalised[normalised[horizon_col] == value]
+                if subset.empty:
+                    continue
+                frames.append(sweep_threshold_grid(subset, params=params, horizon_label=value))
+        if not frames:
+            frames.append(sweep_threshold_grid(normalised, params=params, horizon_label=None))
+        preview = pd.concat(frames, ignore_index=True)
+        top_preview = preview.sort_values("ev", ascending=False).head(5)
+        print("Threshold sweep preview (top 5 by EV):")
+        print(top_preview[["horizon", "p_touch_thr", "p_up_thr", "ev", "pnl", "sharpe", "trades"]])
 
     result = run_backtest(
         normalised,
