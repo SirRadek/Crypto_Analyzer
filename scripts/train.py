@@ -364,28 +364,13 @@ def main(argv: list[str] | None = None) -> Path:
         raise ValueError("conformal_alpha must lie in (0, 1)")
 
     if args.cv == "purged-wf":
-        splits = purged_walkforward_splits(
-            pd.DatetimeIndex(timestamps), n_splits=CONFIG.cv.n_splits, embargo_min=args.embargo_min
+        purged_walkforward_splits(
+            pd.DatetimeIndex(timestamps),
+            n_splits=CONFIG.cv.n_splits,
+            embargo_min=args.embargo_min,
+            run_id=run_id,
+            reports_dir=reports_dir,
         )
-        cv_payload = []
-        for fold, (train_idx, test_idx) in enumerate(splits):
-            cv_payload.append(
-                {
-                    "fold": fold,
-                    "train_indices": train_idx.tolist(),
-                    "test_indices": test_idx.tolist(),
-                    "train_range": [
-                        timestamps.iloc[train_idx[0]].isoformat() if len(train_idx) else None,
-                        timestamps.iloc[train_idx[-1]].isoformat() if len(train_idx) else None,
-                    ],
-                    "test_range": [
-                        timestamps.iloc[test_idx[0]].isoformat() if len(test_idx) else None,
-                        timestamps.iloc[test_idx[-1]].isoformat() if len(test_idx) else None,
-                    ],
-                }
-            )
-        cv_path = reports_dir / f"cv_{run_id}.json"
-        cv_path.write_text(json.dumps(cv_payload, indent=2), encoding="utf-8")
 
     X_train_full, X_test, y_train_full, y_test, ts_train_full, ts_test = _chronological_split(
         X, y, timestamps, args.test_size

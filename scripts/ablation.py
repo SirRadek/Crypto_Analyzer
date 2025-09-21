@@ -133,8 +133,15 @@ def main(argv: list[str] | None = None) -> Path:
     if missing:
         raise KeyError("Missing features: " + ", ".join(sorted(missing)))
 
+    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+
     timestamps = pd.to_datetime(df["timestamp"], utc=True)
-    splits = purged_walkforward_splits(timestamps, CONFIG.cv.n_splits, CONFIG.cv.embargo_min)
+    splits = purged_walkforward_splits(
+        timestamps,
+        CONFIG.cv.n_splits,
+        CONFIG.cv.embargo_min,
+        run_id=run_id,
+    )
     if not splits:
         raise RuntimeError("No walk-forward splits generated")
     train_idx, test_idx = splits[-1]
@@ -167,7 +174,6 @@ def main(argv: list[str] | None = None) -> Path:
 
     result_df = pd.DataFrame(results).sort_values("brier")
 
-    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
     run_dir = Path("outputs") / f"run_id={run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
     reports_dir = Path("reports")

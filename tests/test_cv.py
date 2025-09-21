@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pandas as pd
 
 from crypto_analyzer.eval.cv import purged_walkforward_splits
@@ -72,3 +75,29 @@ def test_purged_walkforward_split_applies_purge_and_embargo():
             assert train_times.min() >= previous_test_end + embargo_delta
 
         previous_test_end = test_times.max()
+
+
+def test_purged_walkforward_exports_metadata(tmp_path: Path):
+    index = pd.date_range("2024-01-01", periods=24, freq="h", tz="UTC")
+    run_id = "unit"
+    embargo = 30
+
+    splits = purged_walkforward_splits(
+        index,
+        n_splits=3,
+        embargo_min=embargo,
+        run_id=run_id,
+        reports_dir=tmp_path,
+    )
+
+    cv_path = tmp_path / f"cv_{run_id}.json"
+    assert cv_path.exists(), "Expected purged walk-forward splits to be exported"
+
+    payload = json.loads(cv_path.read_text(encoding="utf-8"))
+    assert len(payload) == len(splits)
+
+    first_fold = payload[0]
+    assert first_fold["fold"] == 0
+    assert first_fold["embargo_min"] == embargo
+    assert first_fold["train_start"] <= first_fold["train_end"]
+    assert first_fold["test_start"] <= first_fold["test_end"]
