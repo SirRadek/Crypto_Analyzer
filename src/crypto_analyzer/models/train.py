@@ -379,6 +379,7 @@ def train_xgb(
     half_life_days: float = 30.0,
     calibration: str = "none",
     run_id: str | None = None,
+    horizon: int | None = None,
     conformal: dict[str, float] | None = None,
 ) -> xgb.Booster:
     """Train XGBoost model with exponential time decay weighting."""
@@ -514,6 +515,8 @@ def train_xgb(
         calibrated_probs_calibration = None
         calibration_applied = False
         cal_probs = None
+        cal_brier: float | None = None
+        cal_logloss: float | None = None
         if (calibration_possible or conformal_requested) and X_cal is not None and len(X_cal) > 0:
             cal_probs = booster.predict(xgb.DMatrix(X_cal))
         if calibration_possible and cal_probs is not None:
@@ -559,7 +562,8 @@ def train_xgb(
         final_run_id = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
         reports_dir = Path("reports")
         reports_dir.mkdir(parents=True, exist_ok=True)
-        reliability_path = reports_dir / f"reliability_{final_run_id}.png"
+        horizon_suffix = f"_{horizon}" if horizon is not None else ""
+        reliability_path = reports_dir / f"reliability_{final_run_id}{horizon_suffix}.png"
         plot_reliability(
             y_test,
             prob_series,
@@ -567,6 +571,15 @@ def train_xgb(
             title=f"Reliability ({final_run_id})",
         )
         metrics_report["reliability_plot"] = reliability_path.name
+        metrics_report["brier_raw"] = float(raw_brier)
+        metrics_report["logloss_raw"] = float(raw_logloss)
+        metrics_report["brier_cal"] = float(cal_brier) if calibration_applied else None
+        metrics_report["logloss_cal"] = float(cal_logloss) if calibration_applied else None
+        if calibration_applied and cal_brier is not None and raw_brier is not None:
+            if float(cal_brier) > float(raw_brier):
+                raise ValueError(
+                    "Calibrated Brier score is worse than raw Brier score"
+                )
         if conformal_requested:
             conformal_path = reports_dir / f"conformal_{final_run_id}.json"
             if cal_probs is not None and y_cal is not None and len(y_cal) > 0:
@@ -604,7 +617,7 @@ def train_xgb(
                         indent=2,
                     )
 
-        metrics_path = reports_dir / f"metrics_{final_run_id}.json"
+        metrics_path = reports_dir / f"metrics_{final_run_id}{horizon_suffix}.json"
         with metrics_path.open("w", encoding="utf-8") as f:
             json.dump(metrics_report, f, indent=2)
     else:
@@ -622,7 +635,8 @@ def train_xgb(
 
         final_run_id = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
         reports_dir = Path("reports")
-        metrics_path = reports_dir / f"metrics_{final_run_id}.json"
+        horizon_suffix = f"_{horizon}" if horizon is not None else ""
+        metrics_path = reports_dir / f"metrics_{final_run_id}{horizon_suffix}.json"
         reports_dir.mkdir(parents=True, exist_ok=True)
         with metrics_path.open("w", encoding="utf-8") as f:
             json.dump(metrics_report, f, indent=2)
@@ -829,6 +843,7 @@ def main_cli(args) -> Path:
         half_life_days=args.half_life,
         calibration=args.calibration,
         run_id=run_id,
+        horizon=args.horizon,
         conformal=args.conformal,
     )
     return out_dir
