@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -14,9 +13,12 @@ from crypto_analyzer.features.engineering import create_features
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
 from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.errors import DataValidationError
+from crypto_analyzer.utils.io import initialize_run, save_json
+from crypto_analyzer.utils.logging import get_logger
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+logger = get_logger(__name__)
 
 
 def _load_price_data(
@@ -107,12 +109,12 @@ def _resolve_output(
     return target_output, run_dir / output.name
 
 
-def _persist_metadata(run_dir: Path, args: dict[str, Any]) -> None:
+def _persist_metadata(run_id: str, args: dict[str, Any]) -> None:
     config_dump = {
         "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
         "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in args.items()},
     }
-    (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+    save_json(config_dump, "config_dump.json", run_id=run_id)
 
 
 def _print_outputs(primary: Path, secondary: Path | None) -> None:
@@ -156,8 +158,11 @@ def _generate_features(
     df = _load_price_data(source, path=input_path, symbol=symbol, db_path=db_path)
     feature_df = create_features(df, settings=settings)
 
-    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("outputs") / f"run_id={run_id_value}"
+    run_id_value, run_dir, _ = initialize_run(run_id, deterministic_torch=False)
+    logger.info(
+        "Prepared feature generation run",
+        extra={"event": "initialised", "run_id": run_id_value, "rows": int(len(feature_df))},
+    )
     target_output, run_output = _resolve_output(output=output, run_dir=run_dir)
 
     if dry_run:
@@ -169,7 +174,7 @@ def _generate_features(
     if target_output != run_output:
         _write_output(feature_df, target_output, fmt)
 
-    _persist_metadata(run_dir, {
+    _persist_metadata(run_id_value, {
         "source": source,
         "input": input_path,
         "output": output,
@@ -187,8 +192,10 @@ def _generate_features(
         "dry_run": dry_run,
     })
 
-    reports_dir = Path("reports")
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Persisted engineered features",
+        extra={"event": "artefacts", "run_id": run_id_value, "path": str(run_output)},
+    )
 
     _print_outputs(run_output, target_output if target_output != run_output else None)
     return run_output

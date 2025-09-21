@@ -6,7 +6,6 @@ from __future__ import annotations
 """Training entry-point with optional calibration and conformal outputs."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,9 +37,17 @@ from crypto_analyzer.models.conformal import conformal_interval
 from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
 from crypto_analyzer.utils.errors import DataValidationError, ModelError
+from crypto_analyzer.utils.io import (
+    build_path,
+    initialize_run,
+    save_json,
+    save_model,
+)
+from crypto_analyzer.utils.logging import get_logger
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+logger = get_logger(__name__)
 
 
 def _read_table(path: Path) -> pd.DataFrame:
@@ -420,13 +427,19 @@ def _run_training(
     timestamps = pd.to_datetime(df["timestamp"], utc=True)
     realized_volatility = _compute_realized_volatility(df)
 
-    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("outputs") / f"run_id={run_id_value}"
-    reports_dir = Path("reports")
-
-    if not dry_run:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        reports_dir.mkdir(parents=True, exist_ok=True)
+    run_id_value, run_dir, reports_dir = initialize_run(
+        run_id,
+        deterministic_torch=True,
+    )
+    logger.info(
+        "Prepared training artefact directories",
+        extra={
+            "event": "initialised",
+            "run_id": run_id_value,
+            "horizon": horizon,
+            "rows": int(len(df)),
+        },
+    )
 
     if cv_strategy == "purged-wf" and not dry_run:
         purged_walkforward_splits(
@@ -444,9 +457,8 @@ def _run_training(
         X_train_full, y_train_full, ts_train_full
     )
 
-    model_output = model_path if model_path != DEFAULT_MODEL_PATH else run_dir / "model.joblib"
-    if not dry_run:
-        model_output.parent.mkdir(parents=True, exist_ok=True)
+    default_model_target = run_dir / "model.joblib"
+    model_output = model_path if model_path != DEFAULT_MODEL_PATH else default_model_target
 
     try:
         model = _fit_model(X_train, y_train, use_gpu=use_gpu, random_state=random_state)
@@ -454,7 +466,13 @@ def _run_training(
         raise ModelError(f"Training failed: {exc}") from exc
 
     if not dry_run:
-        joblib.dump(model, model_output)
+        run_model_path = save_model(model, run_id=run_id_value)
+        if model_path != DEFAULT_MODEL_PATH:
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump(model, model_path)
+            model_output = model_path
+        else:
+            model_output = run_model_path
 
     proba_test = model.predict_proba(X_test)[:, 1]
     labels_test = (proba_test >= 0.5).astype(int)
@@ -497,12 +515,21 @@ def _run_training(
         }
         reliability_data[f"calibrated_{calibration_method}"] = calibrated_metrics
 
+    coverage_value: float | None = None
+    ev_value: float | None = None
+
     if not dry_run:
-        reliability_path = reports_dir / f"reliability_{run_id_value}.png"
+        reliability_path = build_path(
+            f"reliability_{run_id_value}.png", run_id=run_id_value, location="reports"
+        )
         plot_reliability(y_test, prob_series, reliability_path)
 
-        metrics_by_vol_path = reports_dir / f"metrics_by_vol_{run_id_value}.csv"
-        reliability_by_vol_path = reports_dir / f"reliability_by_vol_{run_id_value}.png"
+        metrics_by_vol_path = build_path(
+            f"metrics_by_vol_{run_id_value}.csv", run_id=run_id_value, location="reports"
+        )
+        reliability_by_vol_path = build_path(
+            f"reliability_by_vol_{run_id_value}.png", run_id=run_id_value, location="reports"
+        )
 
         _export_metrics_by_volatility(
             y_test,
@@ -517,22 +544,6 @@ def _run_training(
             n_quantiles=int(by_vol_bins),
         )
 
-        metrics_report = {
-            "run_id": run_id_value,
-            "raw": metrics_raw,
-            "calibration": calibration_method,
-            "calibrated": calibrated_metrics,
-        }
-
-        metrics_path = reports_dir / f"metrics_{run_id_value}.json"
-        metrics_payload = json.dumps(metrics_report, indent=2)
-        metrics_path.write_text(metrics_payload, encoding="utf-8")
-        (run_dir / "metrics.json").write_text(metrics_payload, encoding="utf-8")
-
-        reliability_copy = run_dir / "reliability.png"
-        if not reliability_copy.exists():
-            reliability_copy.write_bytes(reliability_path.read_bytes())
-
         if conformal_alpha is not None and X_cal is not None and len(X_cal) > 0:
             cal_probs = model.predict_proba(X_cal)[:, 1]
             conformal = conformal_interval(
@@ -541,10 +552,49 @@ def _run_training(
                 (y_test, proba_test),
                 float(conformal_alpha),
             )
-            conformal_path = reports_dir / f"conformal_{run_id_value}.json"
-            conformal_json = json.dumps(conformal, indent=2)
-            conformal_path.write_text(conformal_json, encoding="utf-8")
-            (run_dir / "conformal.json").write_text(conformal_json, encoding="utf-8")
+            coverage_raw = conformal.get("test_coverage")
+            if coverage_raw is not None:
+                coverage_value = float(coverage_raw)
+            conformal_path = save_json(
+                conformal,
+                f"conformal_{run_id_value}.json",
+                run_id=run_id_value,
+                location="reports",
+            )
+            save_json(conformal, "conformal.json", run_id=run_id_value)
+            logger.info(
+                "Stored conformal diagnostics",
+                extra={"event": "conformal", "run_id": run_id_value, "path": str(conformal_path)},
+            )
+
+        metrics_payload = {
+            "horizon": int(horizon),
+            "brier_raw": float(metrics_raw["brier"]),
+            "brier_cal": float(calibrated_metrics["brier"]) if calibrated_metrics else None,
+            "auc": float(
+                calibrated_metrics["roc_auc"]
+                if calibrated_metrics and calibrated_metrics.get("roc_auc") is not None
+                else metrics_raw["roc_auc"]
+            ),
+            "logloss": float(
+                calibrated_metrics["log_loss"]
+                if calibrated_metrics and calibrated_metrics.get("log_loss") is not None
+                else metrics_raw["log_loss"]
+            ),
+            "coverage": coverage_value,
+            "ev": ev_value,
+        }
+        metrics_report_path = save_json(
+            metrics_payload,
+            f"metrics_{run_id_value}.json",
+            run_id=run_id_value,
+            location="reports",
+        )
+        save_json(metrics_payload, "metrics.json", run_id=run_id_value)
+
+        reliability_copy = build_path("reliability.png", run_id=run_id_value)
+        if not reliability_copy.exists():
+            reliability_copy.write_bytes(Path(reliability_path).read_bytes())
 
         args_snapshot = {
             "features": features,
@@ -575,7 +625,16 @@ def _run_training(
             "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in args_snapshot.items()},
             "features": feature_cols,
         }
-        (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+        save_json(config_dump, "config_dump.json", run_id=run_id_value)
+
+        logger.info(
+            "Saved training artefacts",
+            extra={
+                "event": "artefacts",
+                "run_id": run_id_value,
+                "metrics": str(metrics_report_path),
+            },
+        )
     else:
         typer.echo("Dry run requested; metrics and artefacts will not be written.")
 

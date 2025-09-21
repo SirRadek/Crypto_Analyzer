@@ -28,8 +28,11 @@ from crypto_analyzer.models.calibration import brier_score
 from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
 from crypto_analyzer.utils.errors import DataValidationError
+from crypto_analyzer.utils.io import build_path, initialize_run, save_csv, save_json, save_png
+from crypto_analyzer.utils.logging import get_logger
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+logger = get_logger(__name__)
 
 GROUPS = ["price", "volatility", "multi_tf", "derivatives", "orderbook"]
 PATTERNS = {
@@ -152,9 +155,11 @@ def _execute_ablation(
     if missing:
         raise DataValidationError("Missing features: " + ", ".join(sorted(missing)))
 
-    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    reports_dir = Path("reports")
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    run_id_value, run_dir, reports_dir = initialize_run(run_id, deterministic_torch=False)
+    logger.info(
+        "Prepared ablation run",
+        extra={"event": "initialised", "run_id": run_id_value, "rows": int(len(df))},
+    )
 
     timestamps = pd.to_datetime(df["timestamp"], utc=True)
     splits = purged_walkforward_splits(
@@ -162,6 +167,7 @@ def _execute_ablation(
         CONFIG.cv.n_splits,
         CONFIG.cv.embargo_min,
         run_id=run_id_value,
+        reports_dir=reports_dir,
     )
     if not splits:
         raise DataValidationError("No walk-forward splits generated")
@@ -206,31 +212,73 @@ def _execute_ablation(
 
     result_df = pd.DataFrame(results).sort_values("brier")
 
-    csv_path = reports_dir / f"ablation_{run_id_value}.csv"
-    png_path = reports_dir / f"ablation_{run_id_value}.png"
+    csv_path = build_path(
+        f"ablation_{run_id_value}.csv", run_id=run_id_value, location="reports"
+    )
+    png_path = build_path(
+        f"ablation_{run_id_value}.png", run_id=run_id_value, location="reports"
+    )
 
     if dry_run:
         typer.echo("Dry run requested; skipping report generation.")
         typer.echo(f"Results would be stored at {csv_path} and {png_path}")
         return csv_path
 
-    result_df.to_csv(csv_path, index=False)
+    csv_report_path = save_csv(
+        result_df,
+        f"ablation_{run_id_value}.csv",
+        run_id=run_id_value,
+        location="reports",
+        index=False,
+    )
+    save_csv(result_df, "ablation.csv", run_id=run_id_value, index=False)
 
     import matplotlib.pyplot as plt  # local import for hygiene tests
 
-    plt.figure(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(8, 4))
     width = 0.25
     x = np.arange(len(result_df))
-    plt.bar(x - width, result_df["brier"], width=width, label="Brier")
-    plt.bar(x, result_df["log_loss"], width=width, label="LogLoss")
-    plt.bar(x + width, result_df["auc"], width=width, label="AUC")
-    plt.xticks(x, result_df["group"], rotation=45)
-    plt.tight_layout()
-    plt.legend()
-    plt.savefig(png_path)
-    plt.close()
-    typer.echo(f"Ablation results stored at {csv_path} and {png_path}")
-    return csv_path
+    ax.bar(x - width, result_df["brier"], width=width, label="Brier")
+    ax.bar(x, result_df["log_loss"], width=width, label="LogLoss")
+    ax.bar(x + width, result_df["auc"], width=width, label="AUC")
+    ax.set_xticks(x)
+    ax.set_xticklabels(result_df["group"], rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    png_report_path = save_png(
+        fig,
+        f"ablation_{run_id_value}.png",
+        run_id=run_id_value,
+        location="reports",
+    )
+    save_png(fig, "ablation.png", run_id=run_id_value)
+    plt.close(fig)
+
+    metadata = {
+        "run_id": run_id_value,
+        "horizon": horizon,
+        "include_onchain": include_onchain,
+        "include_orderbook": include_orderbook,
+        "include_derivatives": include_derivatives,
+        "label": label,
+        "features_path": str(features) if features else None,
+        "symbol": symbol,
+        "db_path": str(db_path),
+    }
+    save_json(metadata, "config_dump.json", run_id=run_id_value)
+
+    logger.info(
+        "Generated ablation reports",
+        extra={
+            "event": "artefacts",
+            "run_id": run_id_value,
+            "csv": str(csv_report_path),
+            "png": str(png_report_path),
+        },
+    )
+
+    typer.echo(f"Ablation results stored at {csv_report_path} and {png_report_path}")
+    return csv_report_path
 
 
 @app.command()
