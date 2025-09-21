@@ -1,18 +1,9 @@
 from __future__ import annotations
 
-import logging
 from contextlib import suppress
 from pathlib import Path
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-
-
-def get_logger(name: str | None = None) -> logging.Logger:
-    """Return a module-level logger configured for the project."""
-    return logging.getLogger(name if name else __name__)
+from .logging import get_logger
 
 
 def ensure_dir_exists(path: str | Path) -> Path:

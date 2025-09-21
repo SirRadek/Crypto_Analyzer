@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -15,8 +14,11 @@ from crypto_analyzer.eval.threshold_sweep import SweepParams, sweep_threshold_gr
 from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.errors import DataValidationError
+from crypto_analyzer.utils.io import build_path, initialize_run, save_csv, save_json
+from crypto_analyzer.utils.logging import get_logger
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+logger = get_logger(__name__)
 
 
 def _read_predictions(path: Path) -> pd.DataFrame:
@@ -155,9 +157,11 @@ def _run_backtest(
         p_up_threshold=p_up_thr,
     )
 
-    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("outputs") / f"run_id={run_id_value}"
-    reports_dir = Path("reports")
+    run_id_value, run_dir, reports_dir = initialize_run(run_id, deterministic_torch=False)
+    logger.info(
+        "Prepared backtest run",
+        extra={"event": "initialised", "run_id": run_id_value, "rows": int(len(normalised))},
+    )
 
     equity = result["equity"].assign(run_id=run_id_value)
     metrics = result["metrics"]
@@ -184,8 +188,12 @@ def _run_backtest(
                     display = f"{numeric_value:.6f}"
         typer.echo(f"{key}: {display}")
 
-    equity_output = reports_dir / f"equity_{run_id_value}.csv"
-    summary_output = reports_dir / f"summary_{run_id_value}.json"
+    equity_output = build_path(
+        f"equity_{run_id_value}.csv", run_id=run_id_value, location="reports"
+    )
+    summary_output = build_path(
+        f"summary_{run_id_value}.json", run_id=run_id_value, location="reports"
+    )
 
     if dry_run:
         typer.echo("Dry run requested; skipping file writes.")
@@ -193,11 +201,14 @@ def _run_backtest(
         typer.echo(f"Summary would be written to {summary_output}")
         return summary_output, equity_output
 
-    run_dir.mkdir(parents=True, exist_ok=True)
-    reports_dir.mkdir(parents=True, exist_ok=True)
-
-    equity.to_csv(equity_output, index=False)
-    equity.to_csv(run_dir / "equity.csv", index=False)
+    equity_report_path = save_csv(
+        equity,
+        f"equity_{run_id_value}.csv",
+        run_id=run_id_value,
+        location="reports",
+        index=False,
+    )
+    save_csv(equity, "equity.csv", run_id=run_id_value, index=False)
 
     summary = {
         "run_id": run_id_value,
@@ -212,8 +223,16 @@ def _run_backtest(
         },
         "metrics": summary_metrics,
     }
-    summary_output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary_report_path = save_json(
+        summary,
+        f"summary_{run_id_value}.json",
+        run_id=run_id_value,
+        location="reports",
+    )
+    save_json(summary, "summary.json", run_id=run_id_value)
+
+    equity_output = equity_report_path
+    summary_output = summary_report_path
 
     config_dump = {
         "args": {
@@ -221,7 +240,7 @@ def _run_backtest(
             "prediction_column": prediction_column,
             "target_column": target_column,
             "price_column": price_column,
-            "prob_column": prob_column,
+            "prob_column": prob_col,
             "fee_bps": fee_bps,
             "slip_bps": slip_bps,
             "latency_min": latency_min,
@@ -231,7 +250,17 @@ def _run_backtest(
         },
         "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
     }
-    (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+    save_json(config_dump, "config_dump.json", run_id=run_id_value)
+
+    logger.info(
+        "Saved backtest artefacts",
+        extra={
+            "event": "artefacts",
+            "run_id": run_id_value,
+            "equity_report": str(equity_report_path),
+            "summary_report": str(summary_report_path),
+        },
+    )
 
     typer.echo(
         "Backtest complete. Final equity: "

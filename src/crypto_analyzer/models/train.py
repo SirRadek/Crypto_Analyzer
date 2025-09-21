@@ -510,6 +510,7 @@ def train_xgb(
         prob_series = {"Raw": preds}
         metrics_report["raw"] = metrics_raw
         metrics_report["class_threshold"] = class_threshold
+        coverage_value: float | None = None
 
         calibrated_probs = None
         calibrated_probs_calibration = None
@@ -600,6 +601,9 @@ def train_xgb(
                         alpha=conformal_alpha,
                     )
                     conformal_payload["calibrated"] = calibrated_report
+                split_report = raw_report.get("methods", {}).get("split")
+                if split_report and "label_coverage" in split_report:
+                    coverage_value = float(split_report["label_coverage"])
                 with conformal_path.open("w", encoding="utf-8") as f:
                     json.dump(conformal_payload, f, indent=2)
                 metrics_report.setdefault("conformal", {})
@@ -618,7 +622,18 @@ def train_xgb(
                     )
 
         metrics_path = reports_dir / f"metrics_{final_run_id}{horizon_suffix}.json"
+        metrics_payload = {
+            "horizon": int(horizon) if horizon is not None else None,
+            "brier_raw": float(raw_brier),
+            "brier_cal": float(cal_brier) if calibration_applied and cal_brier is not None else None,
+            "auc": float(metrics_raw["roc_auc"]),
+            "logloss": float(cal_logloss) if calibration_applied and cal_logloss is not None else float(raw_logloss),
+            "coverage": coverage_value,
+            "ev": None,
+        }
         with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(metrics_payload, f, indent=2)
+        with (output_dir / "metrics_full.json").open("w", encoding="utf-8") as f:
             json.dump(metrics_report, f, indent=2)
     else:
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -638,7 +653,18 @@ def train_xgb(
         horizon_suffix = f"_{horizon}" if horizon is not None else ""
         metrics_path = reports_dir / f"metrics_{final_run_id}{horizon_suffix}.json"
         reports_dir.mkdir(parents=True, exist_ok=True)
+        metrics_payload = {
+            "horizon": int(horizon) if horizon is not None else None,
+            "brier_raw": None,
+            "brier_cal": None,
+            "auc": None,
+            "logloss": None,
+            "coverage": None,
+            "ev": None,
+        }
         with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(metrics_payload, f, indent=2)
+        with (output_dir / "metrics_full.json").open("w", encoding="utf-8") as f:
             json.dump(metrics_report, f, indent=2)
 
     # SHAP feature importance

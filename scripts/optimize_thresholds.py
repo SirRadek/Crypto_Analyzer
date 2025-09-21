@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Optional
 
+from pathlib import Path
+from typing import Iterable, Optional
+
 import numpy as np
 import pandas as pd
 import typer
@@ -13,8 +16,11 @@ from crypto_analyzer.eval.threshold_sweep import SweepParams, sweep_threshold_gr
 from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.errors import DataValidationError
+from crypto_analyzer.utils.io import build_path, initialize_run, save_csv, save_json, save_png
+from crypto_analyzer.utils.logging import get_logger
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+logger = get_logger(__name__)
 
 
 def _read_predictions(path: Path) -> pd.DataFrame:
@@ -169,19 +175,32 @@ def _run_sweep(
 
     result = pd.concat(frames, ignore_index=True)
 
-    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    reports_dir = Path("reports")
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    run_id_value, run_dir, reports_dir = initialize_run(run_id, deterministic_torch=False)
+    logger.info(
+        "Prepared threshold sweep run",
+        extra={"event": "initialised", "run_id": run_id_value, "rows": int(len(result))},
+    )
 
-    csv_path = reports_dir / f"threshold_sweep_{run_id_value}.csv"
-    png_path = reports_dir / f"threshold_sweep_{run_id_value}.png"
+    csv_path = build_path(
+        f"threshold_sweep_{run_id_value}.csv", run_id=run_id_value, location="reports"
+    )
+    png_path = build_path(
+        f"threshold_sweep_{run_id_value}.png", run_id=run_id_value, location="reports"
+    )
 
     if dry_run:
         typer.echo("Dry run requested; skipping report generation.")
         typer.echo(f"Sweep results would be stored at {csv_path} and {png_path}")
         return csv_path, png_path
 
-    result.to_csv(csv_path, index=False)
+    csv_report_path = save_csv(
+        result,
+        f"threshold_sweep_{run_id_value}.csv",
+        run_id=run_id_value,
+        location="reports",
+        index=False,
+    )
+    save_csv(result, "threshold_sweep.csv", run_id=run_id_value, index=False)
 
     pivot_groups = []
     for horizon, subset in _iter_groups(result, "horizon"):
@@ -218,16 +237,53 @@ def _run_sweep(
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="EV")
 
     plt.tight_layout()
-    plt.savefig(png_path)
+    png_report_path = save_png(
+        fig,
+        f"threshold_sweep_{run_id_value}.png",
+        run_id=run_id_value,
+        location="reports",
+    )
+    save_png(fig, "threshold_sweep.png", run_id=run_id_value)
     plt.close(fig)
+
+    metadata = {
+        "run_id": run_id_value,
+        "fee_bps": fee_bps,
+        "slip_bps": slip_bps,
+        "latency_min": latency_min,
+        "group_column": group_column,
+        "p_touch_grid": {
+            "min": p_touch_min,
+            "max": p_touch_max,
+            "step": p_touch_step,
+        },
+        "p_up_grid": {
+            "min": p_up_min,
+            "max": p_up_max,
+            "step": p_up_step,
+        },
+        "probability_column": prediction_column,
+        "p_up_column": p_up_column,
+    }
+    save_json(metadata, "config_dump.json", run_id=run_id_value)
+
+    logger.info(
+        "Generated threshold sweep artefacts",
+        extra={
+            "event": "artefacts",
+            "run_id": run_id_value,
+            "csv": str(csv_report_path),
+            "png": str(png_report_path),
+        },
+    )
 
     top = result.sort_values("ev", ascending=False).head(10)
     typer.echo("Top threshold combinations by expected value:")
     typer.echo(top[["horizon", "p_touch_thr", "p_up_thr", "ev", "pnl", "sharpe", "trades"]])
-    typer.echo(f"Sweep results saved to {csv_path}")
-    typer.echo(f"Heatmap saved to {png_path}")
+    typer.echo(f"Sweep results saved to {csv_report_path}")
+    typer.echo(f"Heatmap saved to {png_report_path}")
 
-    return csv_path, png_path
+    return csv_report_path, png_report_path
 
 
 @app.command()
