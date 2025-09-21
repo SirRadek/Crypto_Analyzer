@@ -31,6 +31,7 @@ dependencies = [
     "structlog==24.4.0",
     "python-dotenv==1.0.1",
     "psutil==6.0.0",
+    "pandera==0.20.3",
 ]
 
 [project.optional-dependencies]

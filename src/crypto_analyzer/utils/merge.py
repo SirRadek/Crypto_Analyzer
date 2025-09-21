@@ -6,6 +6,8 @@ from typing import Sequence
 
 import pandas as pd
 
+from crypto_analyzer.utils.time import assert_no_future_leak, ensure_utc_series
+
 __all__ = ["merge_left_labeled", "validate_left_label_alignment"]
 
 
@@ -22,24 +24,9 @@ def validate_left_label_alignment(
     if feature_ts_col not in df.columns:
         raise KeyError(f"Column '{feature_ts_col}' missing from dataframe")
 
-    target_ts = pd.to_datetime(df[target_ts_col], utc=True, errors="coerce")
-    if target_ts.isna().any():
-        raise ValueError(f"Column '{target_ts_col}' contains non-parsable timestamps")
-
-    feature_ts = pd.to_datetime(df[feature_ts_col], utc=True, errors="coerce")
-
-    valid = feature_ts.notna()
-    if not valid.any():
-        return
-
-    violations = valid & (feature_ts > target_ts)
-    if violations.any():
-        offending = df.loc[violations, [target_ts_col, feature_ts_col]].head()
-        raise AssertionError(
-            "Left-label merge invariant violated: feature timestamps must not "
-            "exceed target open times. Offending rows:\n"
-            + offending.to_string(index=False)
-        )
+    assert_no_future_leak(
+        df, target_time_col=target_ts_col, feature_time_col=feature_ts_col
+    )
 
 
 def merge_left_labeled(
@@ -60,13 +47,13 @@ def merge_left_labeled(
 
     left = targets.copy()
     left["__orig_order"] = range(len(left))
-    left[target_ts_col] = pd.to_datetime(left[target_ts_col], utc=True, errors="coerce")
-    if left[target_ts_col].isna().any():
-        raise ValueError(f"Column '{target_ts_col}' contains non-parsable timestamps")
+    left[target_ts_col] = ensure_utc_series(left[target_ts_col], column_name=target_ts_col)
     left = left.sort_values(target_ts_col).reset_index(drop=True)
 
     right = features.copy()
-    right[feature_ts_col] = pd.to_datetime(right[feature_ts_col], utc=True, errors="coerce")
+    right[feature_ts_col] = ensure_utc_series(
+        right[feature_ts_col], column_name=feature_ts_col, allow_na=True
+    )
     right = right.dropna(subset=[feature_ts_col]).sort_values(feature_ts_col).reset_index(drop=True)
 
     if feature_columns is None:
