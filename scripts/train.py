@@ -31,6 +31,7 @@ from crypto_analyzer.models.calibration import (
     fit_platt,
     log_loss as log_loss_metric,
     plot_reliability,
+    reliability_curve,
 )
 from crypto_analyzer.models.conformal import conformal_interval
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
@@ -96,6 +97,23 @@ def _ensure_label(df: pd.DataFrame, horizon: int, label: str) -> tuple[pd.DataFr
     return labeled, target_col
 
 
+def _compute_realized_volatility(df: pd.DataFrame) -> pd.Series:
+    """Estimate realized volatility using available price features."""
+
+    if "vol_realized_1h" in df.columns:
+        realized = pd.to_numeric(df["vol_realized_1h"], errors="coerce")
+    else:
+        if "close" not in df.columns:
+            raise KeyError(
+                "close price column missing; unable to compute realized volatility"
+            )
+        close_prices = pd.to_numeric(df["close"], errors="coerce")
+        log_returns = np.log(close_prices).diff()
+        realized = log_returns.pow(2).rolling(window=60, min_periods=10).sum().pow(0.5)
+
+    return realized.astype(float)
+
+
 def _chronological_split(
     X: pd.DataFrame, y: pd.Series, timestamps: pd.Series, test_size: float
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
@@ -128,6 +146,156 @@ def _split_calibration(
     y_train = y.iloc[:-cal_size]
     ts_train = timestamps.iloc[:-cal_size]
     return X_train, X_cal, y_train, y_cal, ts_train, ts_cal
+
+
+def _export_metrics_by_volatility(
+    y_true: pd.Series,
+    probs_raw: np.ndarray,
+    realized_vol: pd.Series,
+    metrics_path: Path,
+    reliability_path: Path,
+    *,
+    calibrated_probs: np.ndarray | None = None,
+    calibration_label: str | None = None,
+    n_quantiles: int = 5,
+) -> None:
+    """Persist evaluation metrics grouped by realized volatility regimes."""
+
+    columns = [
+        "vol_quantile",
+        "count",
+        "vol_min",
+        "vol_max",
+        "brier_raw",
+        "auc_raw",
+        "hit_rate_raw",
+        "brier_calibrated",
+        "auc_calibrated",
+        "hit_rate_calibrated",
+    ]
+
+    data = pd.DataFrame(
+        {
+            "target": y_true.to_numpy(dtype=int),
+            "prob_raw": np.asarray(probs_raw, dtype=float),
+            "volatility": realized_vol.reindex(y_true.index).astype(float),
+        },
+        index=y_true.index,
+    )
+
+    if calibrated_probs is not None:
+        data["prob_calibrated"] = np.asarray(calibrated_probs, dtype=float)
+
+    data = data.dropna(subset=["volatility"])
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if data.empty:
+        pd.DataFrame(columns=columns).to_csv(metrics_path, index=False)
+        reliability_path.parent.mkdir(parents=True, exist_ok=True)
+        import matplotlib.pyplot as plt  # deferred import for hygiene tests
+
+        plt.figure(figsize=(6, 6))
+        plt.text(0.5, 0.5, "No volatility data", ha="center", va="center")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(reliability_path)
+        plt.close()
+        return
+
+    quantiles = pd.qcut(
+        data["volatility"],
+        q=n_quantiles,
+        labels=False,
+        retbins=False,
+        duplicates="drop",
+    )
+    data = data.assign(vol_bin=quantiles)
+
+    metrics_rows: list[dict[str, Any]] = []
+    reliability_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    for bin_id in sorted(data["vol_bin"].dropna().unique()):
+        subset = data[data["vol_bin"] == bin_id]
+        if subset.empty:
+            continue
+
+        y_bin = subset["target"].to_numpy(dtype=int)
+        proba_raw = subset["prob_raw"].to_numpy(dtype=float)
+        labels_raw = (proba_raw >= 0.5).astype(int)
+
+        hit_rate_raw = float(np.mean(labels_raw == y_bin)) if len(y_bin) else float("nan")
+        brier_raw = brier_score(y_bin, proba_raw)
+        try:
+            auc_raw = float(metrics.roc_auc_score(y_bin, proba_raw))
+        except ValueError:
+            auc_raw = float("nan")
+
+        row: dict[str, Any] = {
+            "vol_quantile": int(bin_id) + 1,
+            "count": int(len(subset)),
+            "vol_min": float(subset["volatility"].min()),
+            "vol_max": float(subset["volatility"].max()),
+            "brier_raw": float(brier_raw),
+            "auc_raw": auc_raw,
+            "hit_rate_raw": hit_rate_raw,
+            "brier_calibrated": float("nan"),
+            "auc_calibrated": float("nan"),
+            "hit_rate_calibrated": float("nan"),
+        }
+
+        if calibrated_probs is not None and calibration_label:
+            proba_cal = subset["prob_calibrated"].to_numpy(dtype=float)
+            labels_cal = (proba_cal >= 0.5).astype(int)
+            row["brier_calibrated"] = float(brier_score(y_bin, proba_cal))
+            try:
+                row["auc_calibrated"] = float(metrics.roc_auc_score(y_bin, proba_cal))
+            except ValueError:
+                row["auc_calibrated"] = float("nan")
+            row["hit_rate_calibrated"] = (
+                float(np.mean(labels_cal == y_bin)) if len(y_bin) else float("nan")
+            )
+
+        _, obs, exp, _, _ = reliability_curve(y_bin, proba_raw, n_bins=10)
+        reliability_series[f"Q{int(bin_id) + 1}"] = (exp, obs)
+
+        metrics_rows.append(row)
+
+    if not metrics_rows:
+        pd.DataFrame(columns=columns).to_csv(metrics_path, index=False)
+        reliability_path.parent.mkdir(parents=True, exist_ok=True)
+        import matplotlib.pyplot as plt  # deferred import for hygiene tests
+
+        plt.figure(figsize=(6, 6))
+        plt.plot([0, 1], [0, 1], "--", color="gray", label="Perfect calibration")
+        plt.title("Reliability by realized volatility quantile")
+        plt.tight_layout()
+        plt.savefig(reliability_path)
+        plt.close()
+        return
+
+    metrics_df = pd.DataFrame(metrics_rows).sort_values("vol_quantile")
+    metrics_df.to_csv(metrics_path, index=False)
+
+    reliability_path.parent.mkdir(parents=True, exist_ok=True)
+    import matplotlib.pyplot as plt  # deferred import for hygiene tests
+
+    plt.figure(figsize=(6, 6))
+    plt.plot([0, 1], [0, 1], "--", color="gray", label="Perfect calibration")
+    for label, (exp, obs) in reliability_series.items():
+        mask = ~np.isnan(exp) & ~np.isnan(obs)
+        if not np.any(mask):
+            continue
+        plt.plot(exp[mask], obs[mask], marker="o", label=label)
+
+    plt.xlabel("Mean predicted value")
+    plt.ylabel("Fraction of positives")
+    plt.title("Reliability by realized volatility quantile")
+    plt.legend()
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(reliability_path)
+    plt.close()
 
 
 def _fit_model(
@@ -353,6 +521,7 @@ def main(argv: list[str] | None = None) -> Path:
     X = df[feature_cols].astype(np.float32)
     y = df[label_col].astype(int)
     timestamps = pd.to_datetime(df["timestamp"], utc=True)
+    realized_volatility = _compute_realized_volatility(df)
 
     run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
     run_dir = Path("outputs") / f"run_id={run_id}"
@@ -427,6 +596,20 @@ def main(argv: list[str] | None = None) -> Path:
 
     reliability_path = reports_dir / f"reliability_{run_id}.png"
     plot_reliability(y_test, prob_series, reliability_path)
+
+    metrics_by_vol_path = reports_dir / f"metrics_by_vol_{run_id}.csv"
+    reliability_by_vol_path = reports_dir / f"reliability_by_vol_{run_id}.png"
+    _export_metrics_by_volatility(
+        y_test,
+        proba_test,
+        realized_volatility.reindex(y_test.index),
+        metrics_by_vol_path,
+        reliability_by_vol_path,
+        calibrated_probs=calibrated_probs,
+        calibration_label=(
+            f"Calibrated ({calibration_method})" if calibrated_probs is not None else None
+        ),
+    )
 
     metrics_report = {
         "run_id": run_id,
