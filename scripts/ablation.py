@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -28,7 +27,7 @@ from crypto_analyzer.features.engineering import make_targets as make_default_ta
 from crypto_analyzer.models.calibration import brier_score
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
 
-GROUPS = ["all", "price", "volatility", "multi_tf", "derivatives", "orderbook"]
+GROUPS = ["price", "volatility", "multi_tf", "derivatives", "orderbook"]
 PATTERNS = {
     "price": [r"^ret", r"^rel_", r"^mom_", r"taker", r"close", r"volume", r"price"],
     "volatility": [r"^vol", r"atr", r"^rv_", r"^bv_"],
@@ -153,10 +152,21 @@ def main(argv: list[str] | None = None) -> Path:
 
     results: list[dict[str, Any]] = []
 
+    baseline_pipeline = _build_pipeline(feature_cols)
+    baseline_pipeline.fit(X_train, y_train)
+    baseline_probs = baseline_pipeline.predict_proba(X_test)[:, 1]
+    results.append(
+        {
+            "group": "baseline",
+            "brier": brier_score(y_test, baseline_probs),
+            "log_loss": log_loss(y_test, baseline_probs, labels=[0, 1]),
+            "auc": roc_auc_score(y_test, baseline_probs),
+            "features": len(feature_cols),
+        }
+    )
+
     for group in GROUPS:
-        drop_cols: list[str] = []
-        if group != "all":
-            drop_cols = _match_columns(feature_cols, PATTERNS.get(group, []))
+        drop_cols = _match_columns(feature_cols, PATTERNS.get(group, []))
         active_cols = [col for col in feature_cols if col not in drop_cols]
         if not active_cols:
             continue
@@ -174,15 +184,12 @@ def main(argv: list[str] | None = None) -> Path:
 
     result_df = pd.DataFrame(results).sort_values("brier")
 
-    run_dir = Path("outputs") / f"run_id={run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
     reports_dir = Path("reports")
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     csv_path = reports_dir / f"ablation_{run_id}.csv"
     png_path = reports_dir / f"ablation_{run_id}.png"
     result_df.to_csv(csv_path, index=False)
-    result_df.to_csv(run_dir / "ablation.csv", index=False)
 
     import matplotlib.pyplot as plt  # local import to avoid polluting module import state
 
@@ -197,18 +204,7 @@ def main(argv: list[str] | None = None) -> Path:
     plt.legend()
     plt.savefig(png_path)
     plt.close()
-    if not (run_dir / "ablation.png").exists():
-        (run_dir / "ablation.png").write_bytes(png_path.read_bytes())
-
-    config_dump = {
-        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
-        "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
-        "features": feature_cols,
-        "fold_indices": {"train": train_idx.tolist(), "test": test_idx.tolist()},
-    }
-    (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
-
-    print(f"Ablation results stored at {csv_path}")
+    print(f"Ablation results stored at {csv_path} and {png_path}")
     return csv_path
 
 
