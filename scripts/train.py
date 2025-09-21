@@ -490,6 +490,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional run identifier used when storing artefacts.",
     )
+    parser.add_argument(
+        "--dump-cv",
+        action="store_true",
+        help="Export purged walk-forward CV splits to reports/cv_<run_id>.json.",
+    )
+    parser.add_argument(
+        "--by_vol_bins",
+        type=int,
+        default=5,
+        help="Number of realised volatility quantiles used for metrics by regime.",
+    )
     parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
     return parser
 
@@ -537,7 +548,7 @@ def main(argv: list[str] | None = None) -> Path:
             pd.DatetimeIndex(timestamps),
             n_splits=CONFIG.cv.n_splits,
             embargo_min=args.embargo_min,
-            run_id=run_id,
+            run_id=run_id if args.dump_cv else None,
             reports_dir=reports_dir,
         )
 
@@ -599,6 +610,9 @@ def main(argv: list[str] | None = None) -> Path:
 
     metrics_by_vol_path = reports_dir / f"metrics_by_vol_{run_id}.csv"
     reliability_by_vol_path = reports_dir / f"reliability_by_vol_{run_id}.png"
+    if args.by_vol_bins <= 0:
+        raise ValueError("by_vol_bins must be a positive integer")
+
     _export_metrics_by_volatility(
         y_test,
         proba_test,
@@ -609,6 +623,7 @@ def main(argv: list[str] | None = None) -> Path:
         calibration_label=(
             f"Calibrated ({calibration_method})" if calibrated_probs is not None else None
         ),
+        n_quantiles=int(args.by_vol_bins),
     )
 
     metrics_report = {
