@@ -315,6 +315,28 @@ python scripts/train.py --features data/features.parquet --cv purged-wf --embarg
 * Python 3.13
 * [See `requirements.txt`](./requirements.txt) – all runtime dependencies are
   version pinned for reproducibility.
+* Regenerate dependency pins with `tools/update_dependencies.sh` when bumping
+  packages.
+
+## Environment configuration
+
+Runtime secrets and optional overrides are loaded from a `.env` file using
+[`python-dotenv`](https://saurabh-kumar.com/python-dotenv/).  Copy
+[`/.env.example`](./.env.example) to `.env` and adjust the values to match your
+infrastructure.  Secrets such as API keys are never logged and can always be
+left blank when a data source is unused.
+
+Common management tasks are available via `make`:
+
+```bash
+make setup     # install project + dev dependencies
+make format    # run code formatters
+make lint      # static analysis (ruff check + formatting verification)
+make type      # mypy type checking
+make test      # pytest suite
+make audit     # dependency hygiene via deptry
+make deadcode  # detect unused code with vulture
+```
 
 ## Determinism & Repro
 

@@ -22,7 +22,7 @@ gradient boosting helper and return easy to inspect diagnostics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Literal
 
 import numpy as np
 import torch
@@ -153,7 +153,9 @@ class TrainingConfig:
 
 
 class _CausalBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int, dropout: float):
+    def __init__(
+        self, in_channels: int, out_channels: int, kernel_size: int, dilation: int, dropout: float
+    ):
         super().__init__()
         padding = (kernel_size - 1) * dilation
         self.conv = nn.Conv1d(
@@ -272,7 +274,9 @@ def train_sequence_classifier(
     split_idx = int(len(dataset) * 0.8)
     if split_idx == 0 or split_idx == len(dataset):
         split_idx = max(len(dataset) - 1, 1)
-    train_subset, val_subset = torch.utils.data.random_split(dataset, [split_idx, len(dataset) - split_idx])
+    train_subset, val_subset = torch.utils.data.random_split(
+        dataset, [split_idx, len(dataset) - split_idx]
+    )
 
     train_loader = DataLoader(train_subset, batch_size=training.batch_size, shuffle=True)
     val_loader = DataLoader(val_subset, batch_size=training.batch_size)
@@ -328,4 +332,3 @@ def train_sequence_classifier(
         metrics[f"epoch_{epoch+1}_val_accuracy"] = correct / max(total, 1)
 
     return net, metrics
-

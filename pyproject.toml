@@ -37,19 +37,21 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "black==24.4.2",
-    "ruff>=0.6.8",
+    "isort==5.13.2",
+    "ruff==0.6.8",
     "mypy==1.11.1",
-    "pre-commit",
-    "vulture",
-    "deptry",
-    "tuna",
-    "threadpoolctl",
-    "pandas-stubs",
-    "types-requests",
-    "joblib-stubs",
-    "scikit-learn-stubs",
-    "types-tqdm",
-    "types-PyYAML",
+    "pre-commit==4.3.0",
+    "vulture==2.11",
+    "deptry==0.23.1",
+    "tuna==0.5.11",
+    "threadpoolctl==3.6.0",
+    "pandas-stubs==2.2.2.240807",
+    "types-requests==2.32.0.20240712",
+    "joblib-stubs==1.4.2.2",
+    "scikit-learn-stubs==1.5.0.5",
+    "types-tqdm==4.66.0.20240417",
+    "types-PyYAML==6.0.12.20240808",
+    "pip-tools==7.5.0",
     "pytest==8.4.1",
     "pytest-cov==7.0.0",
 ]
@@ -64,11 +66,13 @@ include = ["crypto_analyzer*"]
 DEP001 = ["cupy", "psutil"]
 DEP002 = [
     "black",
+    "isort",
     "ruff",
     "mypy",
     "pre-commit",
     "vulture",
     "deptry",
+    "pip-tools",
     "tuna",
     "threadpoolctl",
     "pandas-stubs",
@@ -77,17 +81,21 @@ DEP002 = [
     "scikit-learn-stubs",
     "types-tqdm",
     "types-PyYAML",
+    "pytest",
+    "pytest-cov",
 ]
 
 [tool.ruff]
-select = ["E", "F", "I", "UP", "PL", "NPY", "SIM", "PERF"]
-ignore = []
 line-length = 100
 target-version = "py313"
 extend-exclude = ["archive/**/*", "src/crypto_analyzer/legacy/**/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "PL", "NPY", "SIM", "PERF"]
+ignore = []
 extend-ignore = ["D1", "D2", "D4"]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "tests/**/*" = ["D1", "I"]
 
 [tool.ruff.lint.pydocstyle]

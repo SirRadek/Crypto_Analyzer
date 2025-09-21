@@ -1,9 +1,11 @@
+"""Small helper utilities that are widely reused across the project."""
+
 from __future__ import annotations
 
 from contextlib import suppress
 from pathlib import Path
 
-from .logging import get_logger
+__all__ = ["ensure_dir_exists", "set_cpu_limit"]
 
 
 def ensure_dir_exists(path: str | Path) -> Path:

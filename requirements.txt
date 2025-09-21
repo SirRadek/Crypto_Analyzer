@@ -23,8 +23,24 @@ torch==2.4.1
 psutil==6.0.0
 pandera==0.20.3
 
+# Formatting & linting
+black==24.4.2
+ruff==0.6.8
+isort==5.13.2
+
 # Tooling
+deptry==0.23.1
+pip-tools==7.5.0
+pre-commit==4.3.0
 vulture==2.11
+
+# Profiling & performance analysis
+tuna==0.5.11
+threadpoolctl==3.6.0
+
+# Testing
+pytest==8.4.1
+pytest-cov==7.0.0
 
 # Type stubs for static analysis
 pandas-stubs==2.2.2.240807
