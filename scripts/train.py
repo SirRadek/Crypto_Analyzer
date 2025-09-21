@@ -6,16 +6,17 @@ from __future__ import annotations
 """Training entry-point with optional calibration and conformal outputs."""
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn import metrics
+
+import typer
 
 from crypto_analyzer.data.db_connector import get_price_data
 from crypto_analyzer.features.engineering import (
@@ -34,52 +35,72 @@ from crypto_analyzer.models.calibration import (
     reliability_curve,
 )
 from crypto_analyzer.models.conformal import conformal_interval
+from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
+from crypto_analyzer.utils.errors import DataValidationError, ModelError
+
+
+app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
 def _read_table(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise DataValidationError(f"Feature file '{path}' does not exist")
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path)
     return pd.read_csv(path)
 
 
-def _prepare_settings(args: argparse.Namespace) -> FeatureSettings:
+def _prepare_settings(
+    *,
+    include_onchain: Optional[bool],
+    include_orderbook: Optional[bool],
+    include_derivatives: Optional[bool],
+    forward_fill_limit: Optional[int],
+    fillna_value: Optional[float],
+) -> FeatureSettings:
     settings = CONFIG.features
     overrides: dict[str, Any] = {}
-    if args.include_onchain is not None:
-        overrides["include_onchain"] = args.include_onchain
-    if args.include_orderbook is not None:
-        overrides["include_orderbook"] = args.include_orderbook
-    if args.include_derivatives is not None:
-        overrides["include_derivatives"] = args.include_derivatives
+    if include_onchain is not None:
+        overrides["include_onchain"] = include_onchain
+    if include_orderbook is not None:
+        overrides["include_orderbook"] = include_orderbook
+    if include_derivatives is not None:
+        overrides["include_derivatives"] = include_derivatives
     if overrides:
         settings = override_feature_settings(settings, **overrides)
 
-    if args.forward_fill_limit is not None or args.fillna_value is not None:
+    if forward_fill_limit is not None or fillna_value is not None:
         settings = FeatureSettings(
             include_onchain=settings.include_onchain,
             include_orderbook=settings.include_orderbook,
             include_derivatives=settings.include_derivatives,
             forward_fill_limit=(
-                args.forward_fill_limit
-                if args.forward_fill_limit is not None
+                forward_fill_limit
+                if forward_fill_limit is not None
                 else settings.forward_fill_limit
             ),
             fillna_value=(
-                args.fillna_value if args.fillna_value is not None else settings.fillna_value
+                fillna_value if fillna_value is not None else settings.fillna_value
             ),
         )
     return settings
 
 
-def _load_features(args: argparse.Namespace, settings: FeatureSettings) -> pd.DataFrame:
-    if args.features is not None:
-        df = _read_table(args.features)
+def _load_features(
+    *,
+    features: Optional[Path],
+    symbol: str,
+    db_path: Path,
+    settings: FeatureSettings,
+) -> pd.DataFrame:
+    if features is not None:
+        df = _read_table(features)
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         return df
 
-    raw = get_price_data(args.symbol, db_path=args.db_path)
+    raw = get_price_data(symbol, db_path=db_path)
     return create_features(raw, settings=settings)
 
 
@@ -90,7 +111,7 @@ def _ensure_label(df: pd.DataFrame, horizon: int, label: str) -> tuple[pd.DataFr
     labeled = make_default_targets(df, horizon=horizon)
     target_col = f"cls_sign_{horizon}m"
     if target_col not in labeled.columns:
-        raise ValueError(
+        raise DataValidationError(
             "Unable to infer training targets. Provide a --label column or ensure the input data "
             "contains OHLC prices so targets can be generated."
         )
@@ -118,7 +139,7 @@ def _chronological_split(
     X: pd.DataFrame, y: pd.Series, timestamps: pd.Series, test_size: float
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
     if not 0.0 < test_size < 1.0:
-        raise ValueError("test_size must lie in (0, 1)")
+        raise DataValidationError("--test-size must lie in (0, 1)")
     split_idx = max(1, int(round(len(X) * (1 - test_size))))
     X_train = X.iloc[:split_idx]
     X_test = X.iloc[split_idx:]
@@ -330,241 +351,110 @@ def _fit_model(
     return model
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train the Crypto Analyzer meta-model")
-    parser.add_argument(
-        "--features",
-        type=Path,
-        help="Optional engineered feature table (CSV/Parquet). If omitted data is pulled from the DB.",
-    )
-    parser.add_argument(
-        "--symbol",
-        default=CONFIG.symbol,
-        help="Trading symbol used when sourcing data from the database.",
-    )
-    parser.add_argument(
-        "--db-path",
-        default=CONFIG.db_path,
-        help="SQLite database file to read raw price data from.",
-    )
-    parser.add_argument(
-        "--horizon",
-        type=int,
-        default=120,
-        help="Target horizon in minutes for label generation when not provided in the dataset.",
-    )
-    parser.add_argument(
-        "--label",
-        help="Existing label column to use. Defaults to cls_sign_<horizon>m.",
-    )
-    parser.add_argument(
-        "--model-path",
-        type=Path,
-        default=Path("artifacts/meta_model.joblib"),
-        help="Output path for the trained model.",
-    )
-    parser.add_argument(
-        "--log-path",
-        type=Path,
-        default=Path("artifacts/oob_metrics.json"),
-        help="Where to store evaluation metrics gathered during training.",
-    )
-    parser.add_argument(
-        "--split",
-        choices=("holdout", "walkforward"),
-        default="holdout",
-        help="Evaluation split used during training.",
-    )
-    parser.add_argument(
-        "--test-size",
-        type=float,
-        default=0.2,
-        help="Hold-out fraction used for the validation split.",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=42,
-        help="Random seed used for model training.",
-    )
-    parser.add_argument(
-        "--no-gpu",
-        action="store_true",
-        help="Disable GPU acceleration even when available.",
-    )
-    parser.add_argument(
-        "--include-onchain",
-        dest="include_onchain",
-        action="store_true",
-        help="Force-enable on-chain features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--exclude-onchain",
-        dest="include_onchain",
-        action="store_false",
-        help="Force-disable on-chain features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--include-orderbook",
-        dest="include_orderbook",
-        action="store_true",
-        help="Force-enable orderbook features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--exclude-orderbook",
-        dest="include_orderbook",
-        action="store_false",
-        help="Force-disable orderbook features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--include-derivatives",
-        dest="include_derivatives",
-        action="store_true",
-        help="Force-enable derivative features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--exclude-derivatives",
-        dest="include_derivatives",
-        action="store_false",
-        help="Force-disable derivative features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--forward-fill-limit",
-        type=int,
-        help="Override forward-fill window for NaN handling.",
-    )
-    parser.add_argument(
-        "--fillna-value",
-        type=float,
-        help="Override fallback value used when forward fill runs out.",
-    )
-    parser.add_argument(
-        "--wfs-train-days",
-        type=int,
-        help="Training window size in days for walk-forward evaluation.",
-    )
-    parser.add_argument(
-        "--wfs-test-days",
-        type=int,
-        help="Test window size in days for walk-forward evaluation.",
-    )
-    parser.add_argument(
-        "--wfs-step-days",
-        type=int,
-        help="Step size in days when rolling the walk-forward window.",
-    )
-    parser.add_argument(
-        "--wfs-min-train-days",
-        type=int,
-        help="Minimal amount of training data required for walk-forward evaluation.",
-    )
-    parser.add_argument(
-        "--cv",
-        choices=("purged-wf",),
-        help="Optional cross-validation strategy to evaluate during training.",
-    )
-    parser.add_argument(
-        "--embargo_min",
-        type=int,
-        default=CONFIG.cv.embargo_min,
-        help=(
-            "Embargo window in minutes used for purged walk-forward cross-validation."
-            " Defaults to 360 minutes."
-        ),
-    )
-    parser.add_argument(
-        "--calibration",
-        choices=("none", "isotonic", "platt"),
-        default=CONFIG.calibration.method,
-        help="Probability calibration method applied on the validation split.",
-    )
-    parser.add_argument(
-        "--conformal_alpha",
-        type=float,
-        default=0.1,
-        help="Enable conformal prediction intervals at the specified miscoverage level.",
-    )
-    parser.add_argument(
-        "--run-id",
-        type=str,
-        default=None,
-        help="Optional run identifier used when storing artefacts.",
-    )
-    parser.add_argument(
-        "--dump-cv",
-        action="store_true",
-        help="Export purged walk-forward CV splits to reports/cv_<run_id>.json.",
-    )
-    parser.add_argument(
-        "--by_vol_bins",
-        type=int,
-        default=5,
-        help="Number of realised volatility quantiles used for metrics by regime.",
-    )
-    parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
-    return parser
+DEFAULT_MODEL_PATH = Path("artifacts/meta_model.joblib")
 
 
-def main(argv: list[str] | None = None) -> Path:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+def _run_training(
+    *,
+    features: Optional[Path],
+    symbol: str,
+    db_path: Path,
+    horizon: int,
+    label: Optional[str],
+    model_path: Path,
+    split: str,
+    test_size: float,
+    random_state: int,
+    use_gpu: bool,
+    include_onchain: Optional[bool],
+    include_orderbook: Optional[bool],
+    include_derivatives: Optional[bool],
+    forward_fill_limit: Optional[int],
+    fillna_value: Optional[float],
+    cv_strategy: Optional[str],
+    embargo_min: int,
+    calibration: str,
+    conformal_alpha: Optional[float],
+    run_id: Optional[str],
+    dump_cv: bool,
+    by_vol_bins: int,
+    dry_run: bool,
+) -> Path:
+    if horizon <= 0:
+        raise DataValidationError("--horizon must be positive")
+    if split.lower() != "holdout":
+        raise DataValidationError("Only holdout split is supported in the CLI")
+    if cv_strategy not in (None, "purged-wf"):
+        raise DataValidationError("Only 'purged-wf' cross-validation is supported")
+    if conformal_alpha is not None and not (0.0 < float(conformal_alpha) < 1.0):
+        raise DataValidationError("--conformal-alpha must lie in (0, 1)")
+    if by_vol_bins <= 0:
+        raise DataValidationError("--by-vol-bins must be a positive integer")
 
-    if args.split != "holdout":
-        raise NotImplementedError("Only holdout split is supported in the CLI")
+    settings = _prepare_settings(
+        include_onchain=include_onchain,
+        include_orderbook=include_orderbook,
+        include_derivatives=include_derivatives,
+        forward_fill_limit=forward_fill_limit,
+        fillna_value=fillna_value,
+    )
+    df = _load_features(
+        features=features,
+        symbol=symbol,
+        db_path=db_path,
+        settings=settings,
+    )
 
-    settings = _prepare_settings(args)
-    df = _load_features(args, settings)
-
-    label = args.label or f"cls_sign_{args.horizon}m"
-    df, label_col = _ensure_label(df, args.horizon, label)
+    label_name = label or f"cls_sign_{horizon}m"
+    df, label_col = _ensure_label(df, horizon, label_name)
     df = df.dropna(subset=[label_col]).sort_values("timestamp")
 
-    feature_cols = get_feature_columns(settings)
-    if not feature_cols:
-        feature_cols = FEATURE_COLUMNS
-
+    feature_cols = get_feature_columns(settings) or FEATURE_COLUMNS
     missing = [col for col in feature_cols if col not in df.columns]
     if missing:
-        raise KeyError(
-            "Feature columns missing from dataset: " + ", ".join(sorted(missing))
-        )
+        joined = ", ".join(sorted(missing))
+        raise DataValidationError(f"Feature columns missing from dataset: {joined}")
 
     X = df[feature_cols].astype(np.float32)
     y = df[label_col].astype(int)
     timestamps = pd.to_datetime(df["timestamp"], utc=True)
     realized_volatility = _compute_realized_volatility(df)
 
-    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("outputs") / f"run_id={run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("outputs") / f"run_id={run_id_value}"
     reports_dir = Path("reports")
-    reports_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.conformal_alpha is not None and not (0.0 < float(args.conformal_alpha) < 1.0):
-        raise ValueError("conformal_alpha must lie in (0, 1)")
+    if not dry_run:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.cv == "purged-wf":
+    if cv_strategy == "purged-wf" and not dry_run:
         purged_walkforward_splits(
             pd.DatetimeIndex(timestamps),
             n_splits=CONFIG.cv.n_splits,
-            embargo_min=args.embargo_min,
-            run_id=run_id if args.dump_cv else None,
+            embargo_min=embargo_min,
+            run_id=run_id_value if dump_cv else None,
             reports_dir=reports_dir,
         )
 
     X_train_full, X_test, y_train_full, y_test, ts_train_full, ts_test = _chronological_split(
-        X, y, timestamps, args.test_size
+        X, y, timestamps, test_size
     )
     X_train, X_cal, y_train, y_cal, ts_train, ts_cal = _split_calibration(
         X_train_full, y_train_full, ts_train_full
     )
 
-    model_path_default = parser.get_default("model_path")
-    model_output = args.model_path if args.model_path != model_path_default else run_dir / "model.joblib"
-    model_output.parent.mkdir(parents=True, exist_ok=True)
+    model_output = model_path if model_path != DEFAULT_MODEL_PATH else run_dir / "model.joblib"
+    if not dry_run:
+        model_output.parent.mkdir(parents=True, exist_ok=True)
 
-    model = _fit_model(X_train, y_train, use_gpu=not args.no_gpu, random_state=args.random_state)
-    joblib.dump(model, model_output)
+    try:
+        model = _fit_model(X_train, y_train, use_gpu=use_gpu, random_state=random_state)
+    except xgb.core.XGBoostError as exc:  # pragma: no cover - defensive
+        raise ModelError(f"Training failed: {exc}") from exc
+
+    if not dry_run:
+        joblib.dump(model, model_output)
 
     proba_test = model.predict_proba(X_test)[:, 1]
     labels_test = (proba_test >= 0.5).astype(int)
@@ -584,7 +474,9 @@ def main(argv: list[str] | None = None) -> Path:
 
     calibrated_metrics = None
     calibrated_probs = None
-    calibration_method = args.calibration
+    calibration_method = (calibration or "none").lower()
+    if calibration_method not in {"none", "isotonic", "platt"}:
+        raise DataValidationError("Unsupported calibration method")
     if calibration_method != "none" and X_cal is not None and len(X_cal) > 0:
         cal_probs = model.predict_proba(X_cal)[:, 1]
         if calibration_method == "isotonic":
@@ -605,66 +497,199 @@ def main(argv: list[str] | None = None) -> Path:
         }
         reliability_data[f"calibrated_{calibration_method}"] = calibrated_metrics
 
-    reliability_path = reports_dir / f"reliability_{run_id}.png"
-    plot_reliability(y_test, prob_series, reliability_path)
+    if not dry_run:
+        reliability_path = reports_dir / f"reliability_{run_id_value}.png"
+        plot_reliability(y_test, prob_series, reliability_path)
 
-    metrics_by_vol_path = reports_dir / f"metrics_by_vol_{run_id}.csv"
-    reliability_by_vol_path = reports_dir / f"reliability_by_vol_{run_id}.png"
-    if args.by_vol_bins <= 0:
-        raise ValueError("by_vol_bins must be a positive integer")
+        metrics_by_vol_path = reports_dir / f"metrics_by_vol_{run_id_value}.csv"
+        reliability_by_vol_path = reports_dir / f"reliability_by_vol_{run_id_value}.png"
 
-    _export_metrics_by_volatility(
-        y_test,
-        proba_test,
-        realized_volatility.reindex(y_test.index),
-        metrics_by_vol_path,
-        reliability_by_vol_path,
-        calibrated_probs=calibrated_probs,
-        calibration_label=(
-            f"Calibrated ({calibration_method})" if calibrated_probs is not None else None
-        ),
-        n_quantiles=int(args.by_vol_bins),
-    )
-
-    metrics_report = {
-        "run_id": run_id,
-        "raw": metrics_raw,
-        "calibration": calibration_method,
-        "calibrated": calibrated_metrics,
-    }
-
-    metrics_path = reports_dir / f"metrics_{run_id}.json"
-    metrics_payload = json.dumps(metrics_report, indent=2)
-    metrics_path.write_text(metrics_payload, encoding="utf-8")
-    (run_dir / "metrics.json").write_text(metrics_payload, encoding="utf-8")
-
-    reliability_copy = run_dir / "reliability.png"
-    if not reliability_copy.exists():
-        reliability_copy.write_bytes(reliability_path.read_bytes())
-
-    if args.conformal_alpha is not None and X_cal is not None and len(X_cal) > 0:
-        cal_probs = model.predict_proba(X_cal)[:, 1]
-        conformal = conformal_interval(
-            y_cal,
-            cal_probs,
-            (y_test, proba_test),
-            float(args.conformal_alpha),
+        _export_metrics_by_volatility(
+            y_test,
+            proba_test,
+            realized_volatility.reindex(y_test.index),
+            metrics_by_vol_path,
+            reliability_by_vol_path,
+            calibrated_probs=calibrated_probs,
+            calibration_label=(
+                f"Calibrated ({calibration_method})" if calibrated_probs is not None else None
+            ),
+            n_quantiles=int(by_vol_bins),
         )
-        conformal_path = reports_dir / f"conformal_{run_id}.json"
-        conformal_json = json.dumps(conformal, indent=2)
-        conformal_path.write_text(conformal_json, encoding="utf-8")
-        (run_dir / "conformal.json").write_text(conformal_json, encoding="utf-8")
 
-    config_dump = {
-        "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
-        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
-        "features": feature_cols,
-    }
-    (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+        metrics_report = {
+            "run_id": run_id_value,
+            "raw": metrics_raw,
+            "calibration": calibration_method,
+            "calibrated": calibrated_metrics,
+        }
 
-    print(f"Model trained and stored at {model_output}")
+        metrics_path = reports_dir / f"metrics_{run_id_value}.json"
+        metrics_payload = json.dumps(metrics_report, indent=2)
+        metrics_path.write_text(metrics_payload, encoding="utf-8")
+        (run_dir / "metrics.json").write_text(metrics_payload, encoding="utf-8")
+
+        reliability_copy = run_dir / "reliability.png"
+        if not reliability_copy.exists():
+            reliability_copy.write_bytes(reliability_path.read_bytes())
+
+        if conformal_alpha is not None and X_cal is not None and len(X_cal) > 0:
+            cal_probs = model.predict_proba(X_cal)[:, 1]
+            conformal = conformal_interval(
+                y_cal,
+                cal_probs,
+                (y_test, proba_test),
+                float(conformal_alpha),
+            )
+            conformal_path = reports_dir / f"conformal_{run_id_value}.json"
+            conformal_json = json.dumps(conformal, indent=2)
+            conformal_path.write_text(conformal_json, encoding="utf-8")
+            (run_dir / "conformal.json").write_text(conformal_json, encoding="utf-8")
+
+        args_snapshot = {
+            "features": features,
+            "symbol": symbol,
+            "db_path": db_path,
+            "horizon": horizon,
+            "label": label,
+            "model_path": model_path,
+            "split": split,
+            "test_size": test_size,
+            "random_state": random_state,
+            "use_gpu": use_gpu,
+            "include_onchain": include_onchain,
+            "include_orderbook": include_orderbook,
+            "include_derivatives": include_derivatives,
+            "forward_fill_limit": forward_fill_limit,
+            "fillna_value": fillna_value,
+            "cv_strategy": cv_strategy,
+            "embargo_min": embargo_min,
+            "calibration": calibration,
+            "conformal_alpha": conformal_alpha,
+            "run_id": run_id_value,
+            "dump_cv": dump_cv,
+            "by_vol_bins": by_vol_bins,
+        }
+        config_dump = {
+            "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
+            "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in args_snapshot.items()},
+            "features": feature_cols,
+        }
+        (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+    else:
+        typer.echo("Dry run requested; metrics and artefacts will not be written.")
+
+    typer.echo(f"Model trained{' (dry run)' if dry_run else ''} and stored at {model_output}")
     return model_output
 
 
+@app.command()
+def main(
+    features: Optional[Path] = typer.Option(
+        None,
+        "--features",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+        help="Optional engineered feature table (CSV/Parquet).",
+    ),
+    symbol: str = typer.Option(CONFIG.symbol, "--symbol", help="Trading symbol used when sourcing data."),
+    db_path: Path = typer.Option(
+        CONFIG.db_path,
+        "--db-path",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+        help="SQLite database file to read raw price data from.",
+    ),
+    horizon: int = typer.Option(120, "--horizon", help="Target horizon in minutes for label generation."),
+    label: Optional[str] = typer.Option(None, "--label", help="Existing label column to use."),
+    model_path: Path = typer.Option(
+        DEFAULT_MODEL_PATH,
+        "--model-path",
+        resolve_path=True,
+        help="Output path for the trained model.",
+    ),
+    split: str = typer.Option("holdout", "--split", help="Evaluation split used during training."),
+    test_size: float = typer.Option(0.2, "--test-size", help="Hold-out fraction used for the validation split."),
+    random_state: int = typer.Option(42, "--random-state", help="Random seed used for model training."),
+    use_gpu: bool = typer.Option(True, "--use-gpu/--no-gpu", help="Toggle GPU acceleration."),
+    include_onchain: Optional[bool] = typer.Option(
+        None,
+        "--include-onchain/--exclude-onchain",
+        help="Override on-chain features regardless of config defaults.",
+    ),
+    include_orderbook: Optional[bool] = typer.Option(
+        None,
+        "--include-orderbook/--exclude-orderbook",
+        help="Override orderbook features regardless of config defaults.",
+    ),
+    include_derivatives: Optional[bool] = typer.Option(
+        None,
+        "--include-derivatives/--exclude-derivatives",
+        help="Override derivative features regardless of config defaults.",
+    ),
+    forward_fill_limit: Optional[int] = typer.Option(
+        None, "--forward-fill-limit", help="Override forward-fill window for NaN handling."
+    ),
+    fillna_value: Optional[float] = typer.Option(
+        None, "--fillna-value", help="Override fallback value used when forward fill runs out."
+    ),
+    cv_strategy: Optional[str] = typer.Option(
+        None, "--cv", help="Optional cross-validation strategy to evaluate during training."
+    ),
+    embargo_min: int = typer.Option(
+        CONFIG.cv.embargo_min,
+        "--embargo-min",
+        help="Embargo window in minutes used for purged walk-forward cross-validation.",
+    ),
+    calibration: str = typer.Option(
+        CONFIG.calibration.method,
+        "--calibration",
+        help="Probability calibration method applied on the validation split.",
+    ),
+    conformal_alpha: Optional[float] = typer.Option(
+        0.1, "--conformal-alpha", help="Enable conformal prediction intervals at the specified miscoverage level."
+    ),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Optional run identifier."),
+    dump_cv: bool = typer.Option(
+        False, "--dump-cv", help="Export purged walk-forward CV splits to reports/cv_<run_id>.json."
+    ),
+    by_vol_bins: int = typer.Option(
+        5, "--by-vol-bins", help="Number of realised volatility quantiles used for metrics by regime."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
+) -> None:
+    cv_normalised = cv_strategy.lower() if cv_strategy else None
+    calibration_normalised = calibration.lower()
+    _run_training(
+        features=features,
+        symbol=symbol,
+        db_path=db_path,
+        horizon=horizon,
+        label=label,
+        model_path=model_path,
+        split=split,
+        test_size=test_size,
+        random_state=random_state,
+        use_gpu=use_gpu,
+        include_onchain=include_onchain,
+        include_orderbook=include_orderbook,
+        include_derivatives=include_derivatives,
+        forward_fill_limit=forward_fill_limit,
+        fillna_value=fillna_value,
+        cv_strategy=cv_normalised,
+        embargo_min=embargo_min,
+        calibration=calibration_normalised,
+        conformal_alpha=conformal_alpha,
+        run_id=run_id,
+        dump_cv=dump_cv,
+        by_vol_bins=by_vol_bins,
+        dry_run=dry_run,
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour
-    main()
+    run_cli(app)

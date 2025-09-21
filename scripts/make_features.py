@@ -1,17 +1,22 @@
-#!/usr/bin/env python
-"""Command-line entry point for feature engineering."""
+"""Generate engineered features using a Typer based CLI."""
+
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Optional
 
 import pandas as pd
+import typer
 
 from crypto_analyzer.data.db_connector import get_price_data
 from crypto_analyzer.features.engineering import create_features
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
+from crypto_analyzer.utils.cli import run_cli
+from crypto_analyzer.utils.errors import DataValidationError
+
+
+app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
 def _load_price_data(
@@ -19,12 +24,14 @@ def _load_price_data(
     *,
     path: Path | None,
     symbol: str,
-    db_path: str,
+    db_path: Path,
 ) -> pd.DataFrame:
     if source == "db":
         return get_price_data(symbol, db_path=db_path)
     if path is None:
-        raise ValueError("Path must be provided when source='file'")
+        raise DataValidationError("--input must be provided when --source=file")
+    if not path.exists():
+        raise DataValidationError(f"Input file '{path}' does not exist")
     if path.suffix.lower() in {".parquet", ".pq"}:
         df = pd.read_parquet(path)
     else:
@@ -61,168 +68,221 @@ def _write_output(df: pd.DataFrame, path: Path, fmt: Literal["parquet", "csv"]) 
         df.to_csv(path, index=False)
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate engineered features")
-    parser.add_argument(
-        "--source",
-        choices=("db", "file"),
-        default="db",
-        help="Where to load raw price data from.",
-    )
-    parser.add_argument(
-        "--input",
-        type=Path,
-        help="Optional CSV/Parquet file with raw OHLCV data when source=file.",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("features.parquet"),
-        help="Destination file where engineered features will be stored.",
-    )
-    parser.add_argument(
-        "--format",
-        choices=("parquet", "csv"),
-        default="parquet",
-        help="Output file format.",
-    )
-    parser.add_argument(
-        "--symbol",
-        default=CONFIG.symbol,
-        help="Trading symbol to load when pulling data from the configured database.",
-    )
-    parser.add_argument(
-        "--db-path",
-        default=CONFIG.db_path,
-        help="SQLite database file used when source=db.",
-    )
-    parser.add_argument(
-        "--include-onchain",
-        dest="include_onchain",
-        action="store_true",
-        help="Force-enable on-chain features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--exclude-onchain",
-        dest="include_onchain",
-        action="store_false",
-        help="Force-disable on-chain features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--include-orderbook",
-        dest="include_orderbook",
-        action="store_true",
-        help="Force-enable orderbook features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--exclude-orderbook",
-        dest="include_orderbook",
-        action="store_false",
-        help="Force-disable orderbook features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--include-derivatives",
-        dest="include_derivatives",
-        action="store_true",
-        help="Force-enable derivative features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--exclude-derivatives",
-        dest="include_derivatives",
-        action="store_false",
-        help="Force-disable derivative features regardless of config defaults.",
-    )
-    parser.add_argument(
-        "--use_derivatives",
-        action="store_true",
-        help="Convenience flag to enable derivative features from auxiliary loaders.",
-    )
-    parser.add_argument(
-        "--use_orderbook",
-        action="store_true",
-        help="Convenience flag to enable order book feature engineering.",
-    )
-    parser.add_argument(
-        "--forward-fill-limit",
-        type=int,
-        help="Override forward-fill window for NaN handling.",
-    )
-    parser.add_argument(
-        "--fillna-value",
-        type=float,
-        help="Override fallback value used when forward fill runs out.",
-    )
-    parser.add_argument("--run-id", type=str, default=None, help="Optional run identifier.")
-    parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> Path:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
+def _prepare_settings(
+    *,
+    forward_fill_limit: Optional[int],
+    fillna_value: Optional[float],
+    include_onchain: Optional[bool],
+    include_orderbook: Optional[bool],
+    include_derivatives: Optional[bool],
+) -> FeatureSettings:
     settings = CONFIG.features
-    if args.forward_fill_limit is not None or args.fillna_value is not None:
+    if forward_fill_limit is not None or fillna_value is not None:
         settings = FeatureSettings(
             include_onchain=settings.include_onchain,
             include_orderbook=settings.include_orderbook,
             include_derivatives=settings.include_derivatives,
-            forward_fill_limit=args.forward_fill_limit
-            if args.forward_fill_limit is not None
-            else settings.forward_fill_limit,
-            fillna_value=args.fillna_value if args.fillna_value is not None else settings.fillna_value,
+            forward_fill_limit=
+            forward_fill_limit if forward_fill_limit is not None else settings.forward_fill_limit,
+            fillna_value=fillna_value if fillna_value is not None else settings.fillna_value,
         )
-
-    if args.use_derivatives:
-        args.include_derivatives = True
-    if args.use_orderbook:
-        args.include_orderbook = True
-
-    settings = _configure_features(
+    return _configure_features(
         settings=settings,
-        include_onchain=args.include_onchain,
-        include_orderbook=args.include_orderbook,
-        include_derivatives=args.include_derivatives,
+        include_onchain=include_onchain,
+        include_orderbook=include_orderbook,
+        include_derivatives=include_derivatives,
     )
 
-    df = _load_price_data(
-        args.source,
-        path=args.input,
-        symbol=args.symbol,
-        db_path=args.db_path,
-    )
-    feature_df = create_features(df, settings=settings)
 
-    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("outputs") / f"run_id={run_id}"
+def _resolve_output(
+    *,
+    output: Path,
+    run_dir: Path,
+) -> tuple[Path, Path]:
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    default_output = parser.get_default("output")
-    if args.output == default_output:
-        target_output = run_dir / args.output.name
+    if not output.is_absolute():
+        target_output = run_dir / output.name
     else:
-        target_output = args.output
+        target_output = output
+    return target_output, run_dir / output.name
 
-    run_output = run_dir / target_output.name
-    _write_output(feature_df, run_output, args.format)
-    if target_output != run_output:
-        _write_output(feature_df, target_output, args.format)
 
+def _persist_metadata(run_dir: Path, args: dict[str, Any]) -> None:
     config_dump = {
         "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
-        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in args.items()},
     }
-    config_path = run_dir / "config_dump.json"
-    config_path.write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+    (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+
+
+def _print_outputs(primary: Path, secondary: Path | None) -> None:
+    typer.echo(f"Features written to {primary}")
+    if secondary and secondary != primary:
+        typer.echo(f"Features copied to {secondary}")
+
+
+def _generate_features(
+    *,
+    source: Literal["db", "file"],
+    input_path: Path | None,
+    output: Path,
+    fmt: Literal["parquet", "csv"],
+    symbol: str,
+    db_path: Path,
+    forward_fill_limit: Optional[int],
+    fillna_value: Optional[float],
+    include_onchain: Optional[bool],
+    include_orderbook: Optional[bool],
+    include_derivatives: Optional[bool],
+    use_derivatives: bool,
+    use_orderbook: bool,
+    run_id: str | None,
+    dry_run: bool,
+) -> Path:
+    if forward_fill_limit is not None and forward_fill_limit < 0:
+        raise DataValidationError("--forward-fill-limit must be non-negative")
+
+    include_derivatives = True if use_derivatives else include_derivatives
+    include_orderbook = True if use_orderbook else include_orderbook
+
+    settings = _prepare_settings(
+        forward_fill_limit=forward_fill_limit,
+        fillna_value=fillna_value,
+        include_onchain=include_onchain,
+        include_orderbook=include_orderbook,
+        include_derivatives=include_derivatives,
+    )
+
+    df = _load_price_data(source, path=input_path, symbol=symbol, db_path=db_path)
+    feature_df = create_features(df, settings=settings)
+
+    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("outputs") / f"run_id={run_id_value}"
+    target_output, run_output = _resolve_output(output=output, run_dir=run_dir)
+
+    if dry_run:
+        typer.echo("Dry run requested; skipping file writes.")
+        _print_outputs(run_output, None)
+        return run_output
+
+    _write_output(feature_df, run_output, fmt)
+    if target_output != run_output:
+        _write_output(feature_df, target_output, fmt)
+
+    _persist_metadata(run_dir, {
+        "source": source,
+        "input": input_path,
+        "output": output,
+        "format": fmt,
+        "symbol": symbol,
+        "db_path": db_path,
+        "forward_fill_limit": forward_fill_limit,
+        "fillna_value": fillna_value,
+        "include_onchain": include_onchain,
+        "include_orderbook": include_orderbook,
+        "include_derivatives": include_derivatives,
+        "use_derivatives": use_derivatives,
+        "use_orderbook": use_orderbook,
+        "run_id": run_id_value,
+        "dry_run": dry_run,
+    })
 
     reports_dir = Path("reports")
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Features written to {run_output}")
-    if target_output != run_output:
-        print(f"Features copied to {target_output}")
+    _print_outputs(run_output, target_output if target_output != run_output else None)
     return run_output
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI behaviour
-    main()
+@app.command()
+def main(
+    source: Literal["db", "file"] = typer.Option(
+        "db", help="Where to load raw price data from."
+    ),
+    input_path: Path | None = typer.Option(
+        None,
+        "--input",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        writable=False,
+        readable=True,
+        resolve_path=True,
+        help="Optional CSV/Parquet file when --source=file.",
+    ),
+    output: Path = typer.Option(
+        Path("features.parquet"),
+        "--output",
+        help="Destination path for engineered features.",
+    ),
+    fmt: Literal["parquet", "csv"] = typer.Option(
+        "parquet", "--format", help="Output file format."
+    ),
+    symbol: str = typer.Option(CONFIG.symbol, "--symbol", help="Trading symbol to load."),
+    db_path: Path = typer.Option(
+        CONFIG.db_path,
+        "--db-path",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="SQLite database path when source=db.",
+    ),
+    include_onchain: Optional[bool] = typer.Option(
+        None,
+        "--include-onchain/--exclude-onchain",
+        help="Override on-chain features toggle.",
+    ),
+    include_orderbook: Optional[bool] = typer.Option(
+        None,
+        "--include-orderbook/--exclude-orderbook",
+        help="Override orderbook features toggle.",
+    ),
+    include_derivatives: Optional[bool] = typer.Option(
+        None,
+        "--include-derivatives/--exclude-derivatives",
+        help="Override derivative features toggle.",
+    ),
+    use_derivatives: bool = typer.Option(
+        False, "--use-derivatives", help="Convenience flag to enable derivative features."
+    ),
+    use_orderbook: bool = typer.Option(
+        False, "--use-orderbook", help="Convenience flag to enable orderbook features."
+    ),
+    forward_fill_limit: Optional[int] = typer.Option(
+        None, help="Override forward-fill window for NaN handling."
+    ),
+    fillna_value: Optional[float] = typer.Option(
+        None, help="Override fallback value when forward fill runs out."
+    ),
+    run_id: str | None = typer.Option(None, help="Optional run identifier."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
+) -> None:
+    if source == "file" and input_path is None:
+        raise DataValidationError("--input is required when --source=file")
+    if source == "db" and input_path is not None:
+        typer.secho("Ignoring --input because --source=db", fg=typer.colors.YELLOW)
+
+    _generate_features(
+        source=source,
+        input_path=input_path,
+        output=output,
+        fmt=fmt,
+        symbol=symbol,
+        db_path=db_path,
+        forward_fill_limit=forward_fill_limit,
+        fillna_value=fillna_value,
+        include_onchain=include_onchain,
+        include_orderbook=include_orderbook,
+        include_derivatives=include_derivatives,
+        use_derivatives=use_derivatives,
+        use_orderbook=use_orderbook,
+        run_id=run_id,
+        dry_run=dry_run,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    run_cli(app)
+

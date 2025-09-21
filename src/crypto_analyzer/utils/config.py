@@ -1,12 +1,31 @@
+"""Configuration loading helpers."""
+
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 from dotenv import load_dotenv
+from pydantic import ValidationError
+
+from crypto_analyzer.config.schema import (
+    AppConfig,
+    BacktestSettings,
+    CalibrationSettings,
+    CoreSettings,
+    CVSettings,
+    DatabaseSettings,
+    DerivativeDataSettings,
+    ExecutionSettings,
+    FeatureSettings,
+    ModelSettings,
+    OnChainSettings,
+    OrderbookSettings,
+    RuntimeSettings,
+)
+from crypto_analyzer.utils.errors import ConfigError
 
 CONFIG_FILE_ENV = "APP_CONFIG_FILE"
 
@@ -14,164 +33,6 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 load_dotenv(override=False)
-
-
-@dataclass(frozen=True)
-class CoreSettings:
-    symbol: str
-    interval: str
-    forward_steps: int
-    history_days: int
-    timezone: str
-
-
-@dataclass(frozen=True)
-class DatabaseSettings:
-    price_store: str
-    predictions_table: str
-    onchain_table: str
-    feature_store: str | None
-    read_chunksize: int
-
-
-@dataclass(frozen=True)
-class RuntimeSettings:
-    cpu_limit: int
-    repeat_count: int
-    log_level: str
-    data_dir: str
-    cache_dir: str
-    tmp_dir: str
-
-
-@dataclass(frozen=True)
-class FeatureSettings:
-    include_onchain: bool
-    include_orderbook: bool
-    include_derivatives: bool
-    forward_fill_limit: int
-    fillna_value: float
-
-
-@dataclass(frozen=True)
-class ModelSettings:
-    directory: str
-    weights_glob: str
-    use_gpu: bool
-    gpu_tree_method: str
-    max_models: int
-    random_seed: int
-
-
-@dataclass(frozen=True)
-class BacktestSettings:
-    mode: str
-    validation_fraction: float
-    walkforward_window_days: int
-    metrics: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class OnChainSettings:
-    use_mempool: bool
-    use_exchange_flows: bool
-    use_usdt_events: bool
-    cache_dir: str
-    glassnode_api_key: str | None
-    whale_api_key: str | None
-    exchange_flow_source: str
-    exchange_flow_path: str | None
-    request_timeout: int
-    request_retries: int
-
-
-@dataclass(frozen=True)
-class CVSettings:
-    """Cross-validation defaults loaded from the configuration file."""
-
-    type: str
-    embargo_min: int
-    n_splits: int
-
-
-@dataclass(frozen=True)
-class CalibrationSettings:
-    """Probability calibration defaults for training scripts."""
-
-    method: str
-
-
-@dataclass(frozen=True)
-class ExecutionSettings:
-    """Assumptions about trading frictions used across backtests."""
-
-    fees_bps: float
-    slip_bps: float
-    latency_min: float
-
-
-@dataclass(frozen=True)
-class DerivativeDataSettings:
-    """Metadata pointing to external derivative data sources."""
-
-    funding_source: str | None
-    basis_source: str | None
-    open_interest_source: str | None
-    resample_freq: str
-
-
-@dataclass(frozen=True)
-class OrderbookSettings:
-    """Configuration for optional order book feature generation."""
-
-    depth_levels: int
-
-
-@dataclass(frozen=True)
-class AppConfig:
-    core: CoreSettings
-    database: DatabaseSettings
-    runtime: RuntimeSettings
-    features: FeatureSettings
-    models: ModelSettings
-    backtest: BacktestSettings
-    onchain: OnChainSettings
-    cv: CVSettings
-    calibration: CalibrationSettings
-    execution: ExecutionSettings
-    horizons: tuple[int, ...]
-    pct_threshold: float
-    derivatives: DerivativeDataSettings
-    orderbook: OrderbookSettings
-    config_path: Path | None = None
-
-    @property
-    def symbol(self) -> str:
-        return self.core.symbol
-
-    @property
-    def interval(self) -> str:
-        return self.core.interval
-
-    @property
-    def forward_steps(self) -> int:
-        return self.core.forward_steps
-
-    @property
-    def db_path(self) -> str:
-        return self.database.price_store
-
-    @property
-    def table_pred(self) -> str:
-        return self.database.predictions_table
-
-    @property
-    def cpu_limit(self) -> int:
-        return self.runtime.cpu_limit
-
-    @property
-    def repeat_count(self) -> int:
-        return self.runtime.repeat_count
 
 
 def _read_config_file() -> tuple[dict[str, Any], Path | None]:
@@ -196,7 +57,8 @@ def _read_config_file() -> tuple[dict[str, Any], Path | None]:
 def _as_str(value: Any, default: str) -> str:
     if value is None:
         return default
-    return str(value)
+    text = str(value).strip()
+    return default if not text else text
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -204,17 +66,10 @@ def _as_int(value: Any, default: int) -> int:
         return default
     if isinstance(value, int):
         return value
-    if isinstance(value, float):
+    if isinstance(value, float) and value.is_integer():
         return int(value)
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return default
-        lowered = value.lower()
-        if lowered in {"auto", "max", "all"}:
-            return default
     try:
-        return int(value)
+        return int(str(value).strip())
     except (TypeError, ValueError):
         return default
 
@@ -224,12 +79,10 @@ def _as_float(value: Any, default: float) -> float:
         return default
     if isinstance(value, (int, float)):
         return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return default
-    return default
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -249,12 +102,12 @@ def _as_bool(value: Any, default: bool) -> bool:
         return default
 
 
-def _as_list(value: Any, default: list[str]) -> list[str]:
+def _as_list(value: Any, default: list[Any]) -> list[Any]:
     if value is None:
         return list(default)
     if isinstance(value, (list, tuple, set)):
-        return [str(item) for item in value]
-    return [str(value)]
+        return list(value)
+    return [value]
 
 
 def _resolve_cpu_limit(value: Any) -> int:
@@ -269,20 +122,21 @@ def _resolve_cpu_limit(value: Any) -> int:
         limit = int(value)
     except (TypeError, ValueError):
         return default
-    return limit if limit != 0 else default
+    return default if limit == 0 else limit
 
 
 def _build_core_settings(data: dict[str, Any]) -> CoreSettings:
-    symbol = os.getenv("SYMBOL") or _as_str(data.get("symbol"), "BTCUSDT")
-    interval = os.getenv("INTERVAL") or _as_str(data.get("interval"), "15m")
+    defaults = CoreSettings()
+    symbol = os.getenv("SYMBOL") or _as_str(data.get("symbol"), defaults.symbol)
+    interval = os.getenv("INTERVAL") or _as_str(data.get("interval"), defaults.interval)
     forward_env = os.getenv("FORWARD_STEPS")
     forward_steps = (
-        int(forward_env)
+        _as_int(forward_env, defaults.forward_steps)
         if forward_env is not None
-        else _as_int(data.get("forward_steps"), 8)
+        else _as_int(data.get("forward_steps"), defaults.forward_steps)
     )
-    history_days = _as_int(data.get("history_days"), 5 * 365)
-    timezone = _as_str(data.get("timezone"), "UTC")
+    history_days = _as_int(data.get("history_days"), defaults.history_days)
+    timezone = _as_str(data.get("timezone"), defaults.timezone)
     return CoreSettings(
         symbol=symbol,
         interval=interval,
@@ -293,38 +147,42 @@ def _build_core_settings(data: dict[str, Any]) -> CoreSettings:
 
 
 def _build_database_settings(data: dict[str, Any]) -> DatabaseSettings:
-    db_path = os.getenv("DB_PATH") or _as_str(
-        data.get("price_store"), "data/crypto_data.sqlite"
-    )
+    defaults = DatabaseSettings()
+    db_path = os.getenv("DB_PATH") or _as_str(data.get("price_store"), str(defaults.price_store))
     table_pred = os.getenv("TABLE_PRED") or _as_str(
-        data.get("predictions_table"), "predictions"
+        data.get("predictions_table"), defaults.predictions_table
     )
-    onchain_table = _as_str(data.get("onchain_table"), "onchain_15m")
-    feature_store = data.get("feature_store")
-    feature_store_str = str(feature_store) if feature_store not in (None, "") else None
-    read_chunksize = _as_int(data.get("read_chunksize"), 100_000)
+    onchain_table = _as_str(data.get("onchain_table"), defaults.onchain_table)
+    feature_store_value = data.get("feature_store")
+    feature_store = (
+        str(feature_store_value)
+        if feature_store_value not in (None, "")
+        else defaults.feature_store
+    )
+    read_chunksize = _as_int(data.get("read_chunksize"), defaults.read_chunksize)
     return DatabaseSettings(
-        price_store=db_path,
+        price_store=Path(db_path),
         predictions_table=table_pred,
         onchain_table=onchain_table,
-        feature_store=feature_store_str,
+        feature_store=Path(feature_store) if feature_store else None,
         read_chunksize=read_chunksize,
     )
 
 
 def _build_runtime_settings(data: dict[str, Any]) -> RuntimeSettings:
+    defaults = RuntimeSettings()
     cpu_env = os.getenv("CPU_LIMIT")
     cpu_limit = _resolve_cpu_limit(cpu_env if cpu_env is not None else data.get("cpu_limit"))
     repeat_env = os.getenv("REPEAT_COUNT")
     repeat_count = (
-        int(repeat_env)
+        _as_int(repeat_env, defaults.repeat_count)
         if repeat_env is not None
-        else _as_int(data.get("repeat_count"), 50)
+        else _as_int(data.get("repeat_count"), defaults.repeat_count)
     )
-    log_level = _as_str(data.get("log_level"), "INFO")
-    data_dir = _as_str(data.get("data_dir"), "data")
-    cache_dir = _as_str(data.get("cache_dir"), "data/cache")
-    tmp_dir = _as_str(data.get("tmp_dir"), "data/tmp")
+    log_level = _as_str(data.get("log_level"), defaults.log_level)
+    data_dir = Path(_as_str(data.get("data_dir"), str(defaults.data_dir)))
+    cache_dir = Path(_as_str(data.get("cache_dir"), str(defaults.cache_dir)))
+    tmp_dir = Path(_as_str(data.get("tmp_dir"), str(defaults.tmp_dir)))
     return RuntimeSettings(
         cpu_limit=cpu_limit,
         repeat_count=repeat_count,
@@ -336,11 +194,12 @@ def _build_runtime_settings(data: dict[str, Any]) -> RuntimeSettings:
 
 
 def _build_feature_settings(data: dict[str, Any]) -> FeatureSettings:
-    include_onchain = _as_bool(data.get("include_onchain"), True)
-    include_orderbook = _as_bool(data.get("include_orderbook"), True)
-    include_derivatives = _as_bool(data.get("include_derivatives"), True)
-    forward_fill_limit = _as_int(data.get("forward_fill_limit"), 12)
-    fillna_value = _as_float(data.get("fillna_value"), 0.0)
+    defaults = FeatureSettings()
+    include_onchain = _as_bool(data.get("include_onchain"), defaults.include_onchain)
+    include_orderbook = _as_bool(data.get("include_orderbook"), defaults.include_orderbook)
+    include_derivatives = _as_bool(data.get("include_derivatives"), defaults.include_derivatives)
+    forward_fill_limit = _as_int(data.get("forward_fill_limit"), defaults.forward_fill_limit)
+    fillna_value = _as_float(data.get("fillna_value"), defaults.fillna_value)
     return FeatureSettings(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
@@ -351,12 +210,13 @@ def _build_feature_settings(data: dict[str, Any]) -> FeatureSettings:
 
 
 def _build_model_settings(data: dict[str, Any]) -> ModelSettings:
-    directory = _as_str(data.get("directory"), "artifacts/models")
-    weights_glob = _as_str(data.get("weights_glob"), "artifacts/backtest_acc_*.json")
-    use_gpu = _as_bool(data.get("use_gpu"), True)
-    gpu_tree_method = _as_str(data.get("gpu_tree_method"), "gpu_hist")
-    max_models = _as_int(data.get("max_models"), 16)
-    random_seed = _as_int(data.get("random_seed"), 1337)
+    defaults = ModelSettings()
+    directory = Path(_as_str(data.get("directory"), str(defaults.directory)))
+    weights_glob = _as_str(data.get("weights_glob"), defaults.weights_glob)
+    use_gpu = _as_bool(data.get("use_gpu"), defaults.use_gpu)
+    gpu_tree_method = _as_str(data.get("gpu_tree_method"), defaults.gpu_tree_method)
+    max_models = _as_int(data.get("max_models"), defaults.max_models)
+    random_seed = _as_int(data.get("random_seed"), defaults.random_seed)
     return ModelSettings(
         directory=directory,
         weights_glob=weights_glob,
@@ -368,10 +228,13 @@ def _build_model_settings(data: dict[str, Any]) -> ModelSettings:
 
 
 def _build_backtest_settings(data: dict[str, Any]) -> BacktestSettings:
-    mode = _as_str(data.get("mode"), "holdout")
-    validation_fraction = _as_float(data.get("validation_fraction"), 0.2)
-    walkforward_window_days = _as_int(data.get("walkforward_window_days"), 30)
-    metrics = tuple(_as_list(data.get("metrics"), ["accuracy", "precision", "recall"]))
+    defaults = BacktestSettings()
+    mode = _as_str(data.get("mode"), defaults.mode)
+    validation_fraction = _as_float(data.get("validation_fraction"), defaults.validation_fraction)
+    walkforward_window_days = _as_int(
+        data.get("walkforward_window_days"), defaults.walkforward_window_days
+    )
+    metrics = tuple(str(item) for item in _as_list(data.get("metrics"), list(defaults.metrics)))
     return BacktestSettings(
         mode=mode,
         validation_fraction=validation_fraction,
@@ -383,33 +246,35 @@ def _build_backtest_settings(data: dict[str, Any]) -> BacktestSettings:
 def _build_onchain_settings(
     data: dict[str, Any], runtime: RuntimeSettings
 ) -> OnChainSettings:
-    use_mempool = _as_bool(data.get("use_mempool"), True)
-    use_exchange_flows = _as_bool(data.get("use_exchange_flows"), True)
-    use_usdt_events = _as_bool(data.get("use_usdt_events"), True)
-    cache_default = Path(runtime.cache_dir) / "onchain"
-    cache_dir = _as_str(data.get("cache_dir"), str(cache_default))
-    glassnode_api_key = data.get("glassnode_api_key")
-    if glassnode_api_key is not None:
-        glassnode_api_key = str(glassnode_api_key) or None
-    whale_api_key = data.get("whale_api_key")
-    if whale_api_key is not None:
-        whale_api_key = str(whale_api_key) or None
-    exchange_flow_source = _as_str(data.get("exchange_flow_source"), "csv")
-    exchange_flow_path_value = data.get("exchange_flow_path")
-    exchange_flow_path = (
-        str(exchange_flow_path_value)
-        if exchange_flow_path_value not in (None, "")
-        else None
+    defaults = OnChainSettings()
+    use_mempool = _as_bool(data.get("use_mempool"), defaults.use_mempool)
+    use_exchange_flows = _as_bool(
+        data.get("use_exchange_flows"), defaults.use_exchange_flows
     )
-    request_timeout = _as_int(data.get("request_timeout"), 10)
-    request_retries = _as_int(data.get("request_retries"), 5)
+    use_usdt_events = _as_bool(data.get("use_usdt_events"), defaults.use_usdt_events)
+    cache_default = runtime.cache_dir / "onchain"
+    cache_dir = Path(_as_str(data.get("cache_dir"), str(cache_default)))
+    glassnode_api_key = data.get("glassnode_api_key")
+    glassnode = str(glassnode_api_key).strip() or None if glassnode_api_key is not None else None
+    whale_api_key = data.get("whale_api_key")
+    whale = str(whale_api_key).strip() or None if whale_api_key is not None else None
+    exchange_flow_source = _as_str(
+        data.get("exchange_flow_source"), defaults.exchange_flow_source
+    )
+    exchange_flow_path_value = data.get("exchange_flow_path")
+    if exchange_flow_path_value in (None, ""):
+        exchange_flow_path = None
+    else:
+        exchange_flow_path = Path(str(exchange_flow_path_value))
+    request_timeout = _as_int(data.get("request_timeout"), defaults.request_timeout)
+    request_retries = _as_int(data.get("request_retries"), defaults.request_retries)
     return OnChainSettings(
         use_mempool=use_mempool,
         use_exchange_flows=use_exchange_flows,
         use_usdt_events=use_usdt_events,
         cache_dir=cache_dir,
-        glassnode_api_key=glassnode_api_key,
-        whale_api_key=whale_api_key,
+        glassnode_api_key=glassnode,
+        whale_api_key=whale,
         exchange_flow_source=exchange_flow_source,
         exchange_flow_path=exchange_flow_path,
         request_timeout=request_timeout,
@@ -418,82 +283,98 @@ def _build_onchain_settings(
 
 
 def _build_cv_settings(data: dict[str, Any]) -> CVSettings:
-    cv_type = _as_str(data.get("type"), "holdout")
-    embargo = _as_int(data.get("embargo_min"), 0)
-    n_splits = _as_int(data.get("n_splits"), 5)
+    defaults = CVSettings()
+    cv_type = _as_str(data.get("type"), defaults.type)
+    embargo = _as_int(data.get("embargo_min"), defaults.embargo_min)
+    n_splits = _as_int(data.get("n_splits"), defaults.n_splits)
     return CVSettings(type=cv_type, embargo_min=embargo, n_splits=n_splits)
 
 
 def _build_calibration_settings(data: dict[str, Any]) -> CalibrationSettings:
-    method = _as_str(data.get("method"), "none").lower()
+    defaults = CalibrationSettings()
+    method = _as_str(data.get("method"), defaults.method).lower()
     return CalibrationSettings(method=method)
 
 
 def _build_execution_settings(data: dict[str, Any]) -> ExecutionSettings:
-    fees_bps = _as_float(data.get("fees_bps"), 0.0)
-    slip_bps = _as_float(data.get("slip_bps"), 0.0)
-    latency = _as_float(data.get("latency_min"), 0.0)
+    defaults = ExecutionSettings()
+    fees_bps = _as_float(data.get("fees_bps"), defaults.fees_bps)
+    slip_bps = _as_float(data.get("slip_bps"), defaults.slip_bps)
+    latency = _as_float(data.get("latency_min"), defaults.latency_min)
     return ExecutionSettings(fees_bps=fees_bps, slip_bps=slip_bps, latency_min=latency)
 
 
 def _build_derivative_settings(data: dict[str, Any]) -> DerivativeDataSettings:
+    defaults = DerivativeDataSettings()
     funding_source = data.get("funding_source")
     basis_source = data.get("basis_source")
     oi_source = data.get("open_interest_source")
-    freq = _as_str(data.get("resample_freq"), "5T")
+    freq = _as_str(data.get("resample_freq"), defaults.resample_freq)
     return DerivativeDataSettings(
-        funding_source=str(funding_source) if funding_source not in (None, "") else None,
-        basis_source=str(basis_source) if basis_source not in (None, "") else None,
-        open_interest_source=str(oi_source) if oi_source not in (None, "") else None,
+        funding_source=Path(funding_source) if funding_source not in (None, "") else None,
+        basis_source=Path(basis_source) if basis_source not in (None, "") else None,
+        open_interest_source=Path(oi_source) if oi_source not in (None, "") else None,
         resample_freq=freq,
     )
 
 
 def _build_orderbook_settings(data: dict[str, Any]) -> OrderbookSettings:
-    depth_levels = _as_int(data.get("depth_levels"), 5)
+    defaults = OrderbookSettings()
+    depth_levels = _as_int(data.get("depth_levels"), defaults.depth_levels)
     if depth_levels <= 0:
-        depth_levels = 1
+        depth_levels = defaults.depth_levels
     return OrderbookSettings(depth_levels=depth_levels)
 
 
 def _build_config() -> AppConfig:
     raw_config, path = _read_config_file()
-    core = _build_core_settings(raw_config.get("core", {}))
-    database = _build_database_settings(raw_config.get("database", {}))
-    runtime = _build_runtime_settings(raw_config.get("runtime", {}))
-    features = _build_feature_settings(raw_config.get("features", {}))
-    models = _build_model_settings(raw_config.get("models", {}))
-    backtest = _build_backtest_settings(raw_config.get("backtest", {}))
-    onchain = _build_onchain_settings(raw_config.get("onchain", {}), runtime)
-    cv = _build_cv_settings(raw_config.get("cv", {}))
-    calibration = _build_calibration_settings(raw_config.get("calibration", {}))
-    execution = _build_execution_settings(raw_config.get("execution", {}))
-    derivatives = _build_derivative_settings(raw_config.get("derivatives", {}))
-    orderbook = _build_orderbook_settings(raw_config.get("orderbook", {}))
-    horizons = tuple(int(float(x)) for x in _as_list(raw_config.get("horizons"), [core.forward_steps * 15]))
-    pct_threshold = _as_float(raw_config.get("pct_threshold"), 0.0)
-    return AppConfig(
-        core=core,
-        database=database,
-        runtime=runtime,
-        features=features,
-        models=models,
-        backtest=backtest,
-        onchain=onchain,
-        cv=cv,
-        calibration=calibration,
-        execution=execution,
-        horizons=horizons,
-        pct_threshold=pct_threshold,
-        derivatives=derivatives,
-        orderbook=orderbook,
-        config_path=path,
-    )
+    try:
+        core = _build_core_settings(raw_config.get("core", {}))
+        database = _build_database_settings(raw_config.get("database", {}))
+        runtime = _build_runtime_settings(raw_config.get("runtime", {}))
+        features = _build_feature_settings(raw_config.get("features", {}))
+        models = _build_model_settings(raw_config.get("models", {}))
+        backtest = _build_backtest_settings(raw_config.get("backtest", {}))
+        onchain = _build_onchain_settings(raw_config.get("onchain", {}), runtime)
+        cv = _build_cv_settings(raw_config.get("cv", {}))
+        calibration = _build_calibration_settings(raw_config.get("calibration", {}))
+        execution = _build_execution_settings(raw_config.get("execution", {}))
+        derivatives = _build_derivative_settings(raw_config.get("derivatives", {}))
+        orderbook = _build_orderbook_settings(raw_config.get("orderbook", {}))
+        horizons = tuple(int(float(x)) for x in _as_list(raw_config.get("horizons"), []))
+        if not horizons:
+            default_horizon = core.forward_steps * 15
+            horizons = (default_horizon,)
+        pct_threshold = _as_float(raw_config.get("pct_threshold"), 0.01)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise ConfigError(f"Unable to parse configuration: {exc}") from exc
+
+    try:
+        config = AppConfig(
+            core=core,
+            database=database,
+            runtime=runtime,
+            features=features,
+            models=models,
+            backtest=backtest,
+            onchain=onchain,
+            cv=cv,
+            calibration=calibration,
+            execution=execution,
+            horizons=horizons,
+            pct_threshold=pct_threshold,
+            derivatives=derivatives,
+            orderbook=orderbook,
+            config_path=path,
+        )
+    except ValidationError as exc:  # pragma: no cover - defensive
+        raise ConfigError(f"Invalid configuration: {exc}") from exc
+    return config
 
 
 CONFIG = _build_config()
 
- 
+
 def override_feature_settings(
     settings: FeatureSettings,
     *,
@@ -518,7 +399,13 @@ def override_feature_settings(
         updates["fillna_value"] = float(fillna_value)
     if not updates:
         return settings
-    return replace(settings, **updates)
+    return settings.model_copy(update=updates)
+
+
+def config_to_dict(config: AppConfig) -> dict[str, Any]:
+    """Return a JSON/YAML serialisable representation of *config*."""
+
+    return config.model_dump(mode="json")
 
 
 __all__ = [
@@ -535,22 +422,3 @@ __all__ = [
     "config_to_dict",
 ]
 
-
-def _serialise(value: Any) -> Any:
-    if is_dataclass(value):
-        return {k: _serialise(v) for k, v in asdict(value).items()}
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, tuple):
-        return [_serialise(v) for v in value]
-    if isinstance(value, list):
-        return [_serialise(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _serialise(v) for k, v in value.items()}
-    return value
-
-
-def config_to_dict(config: AppConfig) -> dict[str, Any]:
-    """Return a JSON/YAML serialisable representation of *config*."""
-
-    return _serialise(config)
