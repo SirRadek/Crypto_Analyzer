@@ -199,26 +199,82 @@ def generate_touch_conformal_report(
     }
 
 
+def _extract_test_arrays(
+    test_data: (
+        Iterable[int]
+        | np.ndarray
+        | pd.Series
+        | tuple[Iterable[int] | np.ndarray | pd.Series, Iterable[float] | np.ndarray | pd.Series]
+        | dict[str, Iterable[int] | np.ndarray | pd.Series]
+    )
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return label/probability arrays from user provided test data."""
+
+    if isinstance(test_data, dict):
+        if {"labels", "probs"} <= set(test_data):
+            labels = test_data["labels"]
+            probs = test_data["probs"]
+        elif {"y", "p"} <= set(test_data):
+            labels = test_data["y"]
+            probs = test_data["p"]
+        else:
+            raise KeyError(
+                "Dictionary input must contain 'labels'/'probs' or 'y'/'p' keys for test data"
+            )
+        return _to_numpy(labels), np.clip(_to_numpy(probs), 1e-6, 1 - 1e-6)
+
+    if isinstance(test_data, tuple) or isinstance(test_data, list):
+        if len(test_data) != 2:
+            raise ValueError("Tuple/list input must provide (labels, probabilities)")
+        labels, probs = test_data
+        return _to_numpy(labels), np.clip(_to_numpy(probs), 1e-6, 1 - 1e-6)
+
+    raise TypeError(
+        "Test data must be provided as a tuple/list of (labels, probs) or a dictionary "
+        "with 'labels'/'probs' keys"
+    )
+
+
 def conformal_interval(
     y_val: Iterable[int] | np.ndarray | pd.Series,
     p_val: Iterable[float] | np.ndarray | pd.Series,
-    p_test: Iterable[float] | np.ndarray | pd.Series,
+    y_test: (
+        Iterable[int]
+        | np.ndarray
+        | pd.Series
+        | tuple[Iterable[int] | np.ndarray | pd.Series, Iterable[float] | np.ndarray | pd.Series]
+        | dict[str, Iterable[int] | np.ndarray | pd.Series]
+    ),
     alpha: float,
 ) -> dict[str, object]:
     """Return symmetric conformal intervals around test probabilities."""
 
     y_cal_arr = _to_numpy(y_val)
     p_cal_arr = np.clip(_to_numpy(p_val), 1e-6, 1 - 1e-6)
-    p_test_arr = np.clip(_to_numpy(p_test), 1e-6, 1 - 1e-6)
+    y_test_arr, p_test_arr = _extract_test_arrays(y_test)
     _validate_inputs(y_cal_arr, p_cal_arr, p_test_arr, alpha=alpha)
+
+    if y_test_arr.shape != p_test_arr.shape:
+        raise ValueError("`y_test` labels and probabilities must have matching shapes")
 
     residuals = np.abs(y_cal_arr - p_cal_arr)
     radius = _finite_sample_quantile(residuals, alpha)
     lower = np.clip(p_test_arr - radius, 0.0, 1.0)
     upper = np.clip(p_test_arr + radius, 0.0, 1.0)
+
+    mask = (y_test_arr >= lower) & (y_test_arr <= upper)
+    calib_cover = float(np.mean(residuals <= radius))
+    test_cover = float(np.mean(mask))
+    widths = upper - lower
+    effective_width = float(np.mean(np.where(mask, widths, 0.0)))
+
     return {
         "alpha": float(alpha),
         "radius": float(radius),
         "lower": lower.tolist(),
         "upper": upper.tolist(),
+        "calibration_coverage": calib_cover,
+        "test_coverage": test_cover,
+        "mean_width": float(np.mean(widths)),
+        "effective_width": effective_width,
     }

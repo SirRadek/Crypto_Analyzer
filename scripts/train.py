@@ -481,7 +481,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--conformal_alpha",
         type=float,
-        default=None,
+        default=0.1,
         help="Enable conformal prediction intervals at the specified miscoverage level.",
     )
     parser.add_argument(
@@ -629,7 +629,12 @@ def main(argv: list[str] | None = None) -> Path:
 
     if args.conformal_alpha is not None and X_cal is not None and len(X_cal) > 0:
         cal_probs = model.predict_proba(X_cal)[:, 1]
-        conformal = conformal_interval(y_cal, cal_probs, proba_test, float(args.conformal_alpha))
+        conformal = conformal_interval(
+            y_cal,
+            cal_probs,
+            (y_test, proba_test),
+            float(args.conformal_alpha),
+        )
         conformal_path = reports_dir / f"conformal_{run_id}.json"
         conformal_json = json.dumps(conformal, indent=2)
         conformal_path.write_text(conformal_json, encoding="utf-8")
