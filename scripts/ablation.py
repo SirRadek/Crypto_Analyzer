@@ -1,14 +1,14 @@
-#!/usr/bin/env python
-"""Feature group ablation study on the final walk-forward validation fold."""
+"""Feature ablation experiments using a Typer CLI."""
+
 from __future__ import annotations
 
-import argparse
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+import typer
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -25,7 +25,11 @@ from crypto_analyzer.features.engineering import (
 )
 from crypto_analyzer.features.engineering import make_targets as make_default_targets
 from crypto_analyzer.models.calibration import brier_score
+from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
+from crypto_analyzer.utils.errors import DataValidationError
+
+app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 GROUPS = ["price", "volatility", "multi_tf", "derivatives", "orderbook"]
 PATTERNS = {
@@ -38,32 +42,45 @@ PATTERNS = {
 
 
 def _read_table(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise DataValidationError(f"Input file '{path}' does not exist")
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path)
     return pd.read_csv(path)
 
 
-def _prepare_settings(args: argparse.Namespace) -> FeatureSettings:
+def _prepare_settings(
+    *,
+    include_onchain: bool | None,
+    include_orderbook: bool | None,
+    include_derivatives: bool | None,
+) -> FeatureSettings:
     settings = CONFIG.features
     overrides: dict[str, Any] = {}
-    if args.include_onchain is not None:
-        overrides["include_onchain"] = args.include_onchain
-    if args.include_orderbook is not None:
-        overrides["include_orderbook"] = args.include_orderbook
-    if args.include_derivatives is not None:
-        overrides["include_derivatives"] = args.include_derivatives
+    if include_onchain is not None:
+        overrides["include_onchain"] = include_onchain
+    if include_orderbook is not None:
+        overrides["include_orderbook"] = include_orderbook
+    if include_derivatives is not None:
+        overrides["include_derivatives"] = include_derivatives
     if overrides:
         settings = override_feature_settings(settings, **overrides)
     return settings
 
 
-def _load_features(args: argparse.Namespace, settings: FeatureSettings) -> pd.DataFrame:
-    if args.features is not None:
-        df = _read_table(args.features)
+def _load_features(
+    *,
+    features_path: Path | None,
+    symbol: str,
+    db_path: Path,
+    settings: FeatureSettings,
+) -> pd.DataFrame:
+    if features_path is not None:
+        df = _read_table(features_path)
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         return df
-    raw = get_price_data(args.symbol, db_path=args.db_path)
+    raw = get_price_data(symbol, db_path=db_path)
     return create_features(raw, settings=settings)
 
 
@@ -94,59 +111,64 @@ def _build_pipeline(feature_names: list[str]) -> Pipeline:
     return Pipeline([("transform", transformer), ("clf", clf)])
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run feature group ablations")
-    parser.add_argument("--features", type=Path, help="Optional feature table (CSV/Parquet).")
-    parser.add_argument("--symbol", default=CONFIG.symbol)
-    parser.add_argument("--db-path", default=CONFIG.db_path)
-    parser.add_argument("--label", help="Custom label column name.")
-    parser.add_argument("--horizon", type=int, default=CONFIG.core.forward_steps * 15)
-    parser.add_argument("--run-id", type=str, default=None)
-    parser.add_argument("--include-onchain", dest="include_onchain", action="store_true")
-    parser.add_argument("--exclude-onchain", dest="include_onchain", action="store_false")
-    parser.add_argument("--include-orderbook", dest="include_orderbook", action="store_true")
-    parser.add_argument("--exclude-orderbook", dest="include_orderbook", action="store_false")
-    parser.add_argument("--include-derivatives", dest="include_derivatives", action="store_true")
-    parser.add_argument("--exclude-derivatives", dest="include_derivatives", action="store_false")
-    parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
-    return parser
+def _execute_ablation(
+    *,
+    features: Path | None,
+    symbol: str,
+    db_path: Path,
+    label: Optional[str],
+    horizon: int,
+    run_id: str | None,
+    include_onchain: Optional[bool],
+    include_orderbook: Optional[bool],
+    include_derivatives: Optional[bool],
+    dry_run: bool,
+) -> Path:
+    if horizon <= 0:
+        raise DataValidationError("--horizon must be positive")
 
+    settings = _prepare_settings(
+        include_onchain=include_onchain,
+        include_orderbook=include_orderbook,
+        include_derivatives=include_derivatives,
+    )
+    df = _load_features(
+        features_path=features,
+        symbol=symbol,
+        db_path=db_path,
+        settings=settings,
+    )
 
-def main(argv: list[str] | None = None) -> Path:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+    label_name = label or f"cls_sign_{horizon}m"
+    if label_name not in df.columns:
+        df = make_default_targets(df, horizon=horizon)
+    if label_name not in df.columns:
+        raise DataValidationError(f"Label column '{label_name}' not found")
 
-    settings = _prepare_settings(args)
-    df = _load_features(args, settings)
-
-    label = args.label or f"cls_sign_{args.horizon}m"
-    if label not in df.columns:
-        df = make_default_targets(df, horizon=args.horizon)
-    if label not in df.columns:
-        raise KeyError(f"Label column '{label}' not found even after generation")
-
-    df = df.dropna(subset=[label]).sort_values("timestamp")
+    df = df.dropna(subset=[label_name]).sort_values("timestamp")
 
     feature_cols = get_feature_columns(settings) or FEATURE_COLUMNS
     missing = [col for col in feature_cols if col not in df.columns]
     if missing:
-        raise KeyError("Missing features: " + ", ".join(sorted(missing)))
+        raise DataValidationError("Missing features: " + ", ".join(sorted(missing)))
 
-    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    reports_dir = Path("reports")
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     timestamps = pd.to_datetime(df["timestamp"], utc=True)
     splits = purged_walkforward_splits(
         timestamps,
         CONFIG.cv.n_splits,
         CONFIG.cv.embargo_min,
-        run_id=run_id,
+        run_id=run_id_value,
     )
     if not splits:
-        raise RuntimeError("No walk-forward splits generated")
+        raise DataValidationError("No walk-forward splits generated")
     train_idx, test_idx = splits[-1]
 
     X = df[feature_cols].astype(np.float32)
-    y = df[label].astype(int)
+    y = df[label_name].astype(int)
     X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
     X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
 
@@ -184,14 +206,17 @@ def main(argv: list[str] | None = None) -> Path:
 
     result_df = pd.DataFrame(results).sort_values("brier")
 
-    reports_dir = Path("reports")
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = reports_dir / f"ablation_{run_id_value}.csv"
+    png_path = reports_dir / f"ablation_{run_id_value}.png"
 
-    csv_path = reports_dir / f"ablation_{run_id}.csv"
-    png_path = reports_dir / f"ablation_{run_id}.png"
+    if dry_run:
+        typer.echo("Dry run requested; skipping report generation.")
+        typer.echo(f"Results would be stored at {csv_path} and {png_path}")
+        return csv_path
+
     result_df.to_csv(csv_path, index=False)
 
-    import matplotlib.pyplot as plt  # local import to avoid polluting module import state
+    import matplotlib.pyplot as plt  # local import for hygiene tests
 
     plt.figure(figsize=(8, 4))
     width = 0.25
@@ -204,9 +229,65 @@ def main(argv: list[str] | None = None) -> Path:
     plt.legend()
     plt.savefig(png_path)
     plt.close()
-    print(f"Ablation results stored at {csv_path} and {png_path}")
+    typer.echo(f"Ablation results stored at {csv_path} and {png_path}")
     return csv_path
 
 
-if __name__ == "__main__":  # pragma: no cover
-    main()
+@app.command()
+def main(
+    features: Optional[Path] = typer.Option(
+        None,
+        "--features",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+        help="Optional feature table (CSV/Parquet).",
+    ),
+    symbol: str = typer.Option(CONFIG.symbol, help="Symbol used when loading price data."),
+    db_path: Path = typer.Option(
+        CONFIG.db_path,
+        "--db-path",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+        help="SQLite database used when generating features.",
+    ),
+    label: Optional[str] = typer.Option(None, help="Custom label column name."),
+    horizon: int = typer.Option(CONFIG.core.forward_steps * 15, help="Horizon in minutes."),
+    run_id: Optional[str] = typer.Option(None, help="Optional run identifier."),
+    include_onchain: Optional[bool] = typer.Option(
+        None,
+        "--include-onchain/--exclude-onchain",
+        help="Override on-chain features toggle.",
+    ),
+    include_orderbook: Optional[bool] = typer.Option(
+        None,
+        "--include-orderbook/--exclude-orderbook",
+        help="Override orderbook features toggle.",
+    ),
+    include_derivatives: Optional[bool] = typer.Option(
+        None,
+        "--include-derivatives/--exclude-derivatives",
+        help="Override derivative features toggle.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
+) -> None:
+    _execute_ablation(
+        features=features,
+        symbol=symbol,
+        db_path=db_path,
+        label=label,
+        horizon=horizon,
+        run_id=run_id,
+        include_onchain=include_onchain,
+        include_orderbook=include_orderbook,
+        include_derivatives=include_derivatives,
+        dry_run=dry_run,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI behaviour
+    run_cli(app)
+

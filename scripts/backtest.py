@@ -1,21 +1,27 @@
-#!/usr/bin/env python
-"""CLI helper for running quick equity backtests."""
+"""Backtest runner with Typer CLI integration."""
+
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+import typer
 
 from crypto_analyzer.eval.backtest import run_backtest
 from crypto_analyzer.eval.threshold_sweep import SweepParams, sweep_threshold_grid
+from crypto_analyzer.utils.cli import run_cli
 from crypto_analyzer.utils.config import CONFIG
+from crypto_analyzer.utils.errors import DataValidationError
+
+app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
 def _read_predictions(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise DataValidationError(f"Predictions file '{path}' does not exist")
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path)
     return pd.read_csv(path)
@@ -35,7 +41,7 @@ def _normalise_columns(
         if column not in df.columns
     ]
     if missing:
-        raise KeyError("Missing required columns: " + ", ".join(sorted(missing)))
+        raise DataValidationError("Missing required columns: " + ", ".join(sorted(missing)))
 
     out = df.copy()
     out = out.rename(
@@ -51,93 +57,9 @@ def _normalise_columns(
     return out
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a simple long/short backtest")
-    parser.add_argument("predictions", type=Path, help="CSV/Parquet file with model forecasts.")
-    parser.add_argument(
-        "--timestamp-column",
-        default="timestamp",
-        help="Column containing the prediction timestamp.",
-    )
-    parser.add_argument(
-        "--prediction-column",
-        default="p_hat",
-        help="Column with the model's predicted price or probability.",
-    )
-    parser.add_argument(
-        "--target-column",
-        default="target",
-        help="Column with the realised target used for P&L computation.",
-    )
-    parser.add_argument(
-        "--price-column",
-        default="last_price",
-        help="Reference price column used when computing trade returns.",
-    )
-    parser.add_argument(
-        "--prob-column",
-        default=None,
-        help="Optional probability column for EV-based backtest rules.",
-    )
-    parser.add_argument(
-        "--fee_bps",
-        "--fee-bps",
-        dest="fee_bps",
-        type=float,
-        default=4.0,
-        help="Proportional transaction cost per trade in basis points.",
-    )
-    parser.add_argument(
-        "--slip_bps",
-        "--slip-bps",
-        dest="slip_bps",
-        type=float,
-        default=0.0,
-        help="Slippage assumption in basis points added to the fee.",
-    )
-    parser.add_argument(
-        "--latency_min",
-        "--latency-min",
-        dest="latency_min",
-        type=float,
-        default=0.0,
-        help="Execution latency in minutes applied by shifting the entry candle forward.",
-    )
-    parser.add_argument(
-        "--p_touch_thr",
-        "--p-touch-thr",
-        dest="p_touch_thr",
-        type=float,
-        default=None,
-        help="Minimum probability of touching the target required to open a trade.",
-    )
-    parser.add_argument(
-        "--p_up_thr",
-        "--p-up-thr",
-        dest="p_up_thr",
-        type=float,
-        default=None,
-        help=(
-            "Directional probability threshold. Values above open longs, below (1-thr) open shorts."
-        ),
-    )
-    parser.add_argument(
-        "--run-id",
-        default=None,
-        help="Optional identifier used when storing reports. Defaults to a UTC timestamp.",
-    )
-    parser.add_argument(
-        "--optimize-thresholds",
-        action="store_true",
-        help="Run a quick EV sweep across default threshold grids before executing the backtest.",
-    )
-    return parser
-
-
 def _infer_latency_steps(timestamps: pd.Series, latency_minutes: float) -> int:
     if latency_minutes <= 0:
         return 0
-
     if timestamps.empty:
         return 0
 
@@ -149,11 +71,8 @@ def _infer_latency_steps(timestamps: pd.Series, latency_minutes: float) -> int:
     step_minutes = diffs.dt.total_seconds().median() / 60.0
     if not np.isfinite(step_minutes) or step_minutes <= 0:
         return 0
-
     steps = int(round(latency_minutes / step_minutes))
-    if steps <= 0:
-        steps = 1
-    return steps
+    return max(steps, 1)
 
 
 def _find_horizon_column(df: pd.DataFrame) -> str | None:
@@ -163,35 +82,48 @@ def _find_horizon_column(df: pd.DataFrame) -> str | None:
     return None
 
 
-def main(argv: list[str] | None = None) -> tuple[Path, Path]:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    df = _read_predictions(args.predictions)
+def _run_backtest(
+    *,
+    predictions: Path,
+    timestamp_column: str,
+    prediction_column: str,
+    target_column: str,
+    price_column: str,
+    prob_column: Optional[str],
+    fee_bps: float,
+    slip_bps: float,
+    latency_min: float,
+    p_touch_thr: Optional[float],
+    p_up_thr: Optional[float],
+    run_id: Optional[str],
+    optimize_thresholds: bool,
+    dry_run: bool,
+) -> tuple[Path, Path]:
+    df = _read_predictions(predictions)
     normalised = _normalise_columns(
         df,
-        timestamp_col=args.timestamp_column,
-        prediction_col=args.prediction_column,
-        target_col=args.target_column,
-        price_col=args.price_column,
+        timestamp_col=timestamp_column,
+        prediction_col=prediction_column,
+        target_col=target_column,
+        price_col=price_column,
     )
 
-    latency_steps = _infer_latency_steps(normalised["timestamp"], args.latency_min)
+    latency_steps = _infer_latency_steps(normalised["timestamp"], latency_min)
 
-    prob_col: Optional[str] = args.prob_column or None
-    if prob_col is not None and prob_col == args.prediction_column:
+    prob_col: Optional[str] = prob_column or None
+    if prob_col is not None and prob_col == prediction_column:
         prob_col = "p_hat"
     p_up_col = "p_up" if "p_up" in normalised.columns else None
 
-    if args.optimize_thresholds:
+    if optimize_thresholds:
         horizon_col = _find_horizon_column(normalised)
         touch_grid = np.round(np.arange(0.5, 0.8001, 0.05), 4)
         up_grid = np.round(np.arange(0.5, 0.7001, 0.05), 4)
         params = SweepParams(
             p_touch_values=touch_grid,
             p_up_values=up_grid,
-            fee_bps=args.fee_bps,
-            slippage_bps=args.slip_bps,
+            fee_bps=fee_bps,
+            slippage_bps=slip_bps,
             latency_steps=latency_steps,
             p_touch_col="p_hat",
             p_up_col=p_up_col,
@@ -208,28 +140,26 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
             frames.append(sweep_threshold_grid(normalised, params=params, horizon_label=None))
         preview = pd.concat(frames, ignore_index=True)
         top_preview = preview.sort_values("ev", ascending=False).head(5)
-        print("Threshold sweep preview (top 5 by EV):")
-        print(top_preview[["horizon", "p_touch_thr", "p_up_thr", "ev", "pnl", "sharpe", "trades"]])
+        typer.echo("Threshold sweep preview (top 5 by EV):")
+        typer.echo(top_preview[["horizon", "p_touch_thr", "p_up_thr", "ev", "pnl", "sharpe", "trades"]])
 
     result = run_backtest(
         normalised,
-        fee_bps=args.fee_bps,
-        slippage_bps=args.slip_bps,
+        fee_bps=fee_bps,
+        slippage_bps=slip_bps,
         prob_col=prob_col,
         latency_steps=latency_steps,
-        p_touch_col="p_hat" if args.p_touch_thr is not None else None,
-        p_touch_threshold=args.p_touch_thr,
+        p_touch_col="p_hat" if p_touch_thr is not None else None,
+        p_touch_threshold=p_touch_thr,
         p_up_col=p_up_col,
-        p_up_threshold=args.p_up_thr,
+        p_up_threshold=p_up_thr,
     )
 
-    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("outputs") / f"run_id={run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_id_value = run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("outputs") / f"run_id={run_id_value}"
     reports_dir = Path("reports")
-    reports_dir.mkdir(parents=True, exist_ok=True)
 
-    equity = result["equity"].assign(run_id=run_id)
+    equity = result["equity"].assign(run_id=run_id_value)
     metrics = result["metrics"]
 
     summary_metrics = {
@@ -240,7 +170,6 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
     }
 
     for key, value in summary_metrics.items():
-        display: str
         if value is None:
             display = "nan"
         else:
@@ -253,22 +182,31 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
                     display = "nan"
                 else:
                     display = f"{numeric_value:.6f}"
-        print(f"{key}: {display}")
+        typer.echo(f"{key}: {display}")
 
-    equity_output = reports_dir / f"equity_{run_id}.csv"
-    summary_output = reports_dir / f"summary_{run_id}.json"
+    equity_output = reports_dir / f"equity_{run_id_value}.csv"
+    summary_output = reports_dir / f"summary_{run_id_value}.json"
+
+    if dry_run:
+        typer.echo("Dry run requested; skipping file writes.")
+        typer.echo(f"Equity would be written to {equity_output}")
+        typer.echo(f"Summary would be written to {summary_output}")
+        return summary_output, equity_output
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     equity.to_csv(equity_output, index=False)
     equity.to_csv(run_dir / "equity.csv", index=False)
 
     summary = {
-        "run_id": run_id,
+        "run_id": run_id_value,
         "parameters": {
-            "fee_bps": args.fee_bps,
-            "slip_bps": args.slip_bps,
-            "latency_minutes": args.latency_min,
-            "p_touch_threshold": args.p_touch_thr,
-            "p_up_threshold": args.p_up_thr,
+            "fee_bps": fee_bps,
+            "slip_bps": slip_bps,
+            "latency_minutes": latency_min,
+            "p_touch_threshold": p_touch_thr,
+            "p_up_threshold": p_up_thr,
             "prob_column": prob_col,
             "latency_steps": latency_steps,
         },
@@ -278,12 +216,24 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     config_dump = {
-        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "args": {
+            "timestamp_column": timestamp_column,
+            "prediction_column": prediction_column,
+            "target_column": target_column,
+            "price_column": price_column,
+            "prob_column": prob_column,
+            "fee_bps": fee_bps,
+            "slip_bps": slip_bps,
+            "latency_min": latency_min,
+            "p_touch_thr": p_touch_thr,
+            "p_up_thr": p_up_thr,
+            "run_id": run_id_value,
+        },
         "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
     }
     (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
 
-    print(
+    typer.echo(
         "Backtest complete. Final equity: "
         f"{float(equity['equity'].iloc[-1]):.4f}, PnL: {metrics['pnl']:.4f}, "
         f"Sharpe: {metrics['sharpe']:.4f}, EV: {metrics['ev']:.6f}, "
@@ -293,5 +243,65 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
     return summary_output, equity_output
 
 
+@app.command()
+def main(
+    predictions: Path = typer.Argument(..., exists=True, resolve_path=True),
+    timestamp_column: str = typer.Option(
+        "timestamp", help="Column containing the prediction timestamp."
+    ),
+    prediction_column: str = typer.Option(
+        "p_hat", help="Column with the model's predicted price or probability."
+    ),
+    target_column: str = typer.Option(
+        "target", help="Column with the realised target used for P&L computation."
+    ),
+    price_column: str = typer.Option(
+        "last_price", help="Reference price column used when computing trade returns."
+    ),
+    prob_column: Optional[str] = typer.Option(
+        None, help="Optional probability column for EV-based backtest rules."
+    ),
+    fee_bps: float = typer.Option(4.0, help="Proportional transaction cost in basis points."),
+    slip_bps: float = typer.Option(0.0, help="Slippage assumption in basis points."),
+    latency_min: float = typer.Option(0.0, help="Execution latency in minutes."),
+    p_touch_thr: Optional[float] = typer.Option(
+        None, help="Minimum probability of touching the target required to open a trade."
+    ),
+    p_up_thr: Optional[float] = typer.Option(
+        None,
+        help="Directional probability threshold. Values above open longs, below (1-thr) open shorts.",
+    ),
+    run_id: Optional[str] = typer.Option(None, help="Optional identifier used when storing reports."),
+    optimize_thresholds: bool = typer.Option(
+        False, help="Run an EV sweep before executing the backtest."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
+) -> None:
+    if fee_bps < 0 or slip_bps < 0:
+        raise DataValidationError("--fee-bps and --slip-bps must be non-negative")
+    if p_touch_thr is not None and not (0 <= p_touch_thr <= 1):
+        raise DataValidationError("--p-touch-thr must lie in [0, 1]")
+    if p_up_thr is not None and not (0 <= p_up_thr <= 1):
+        raise DataValidationError("--p-up-thr must lie in [0, 1]")
+
+    _run_backtest(
+        predictions=predictions,
+        timestamp_column=timestamp_column,
+        prediction_column=prediction_column,
+        target_column=target_column,
+        price_column=price_column,
+        prob_column=prob_column,
+        fee_bps=fee_bps,
+        slip_bps=slip_bps,
+        latency_min=latency_min,
+        p_touch_thr=p_touch_thr,
+        p_up_thr=p_up_thr,
+        run_id=run_id,
+        optimize_thresholds=optimize_thresholds,
+        dry_run=dry_run,
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour
-    main()
+    run_cli(app)
+
