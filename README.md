@@ -104,7 +104,45 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Download OHLCV data from Binance
+### 3. Development tooling
+
+Activate the virtual environment and install the development extras to get the linting,
+typing and security tooling used in CI:
+
+```bash
+pip install -e .[dev]
+pip install pip-audit bandit detect-secrets
+```
+
+Install the Git hooks so that Ruff, Black, isort, Pyupgrade and the formatting / secret
+checks run automatically before each commit:
+
+```bash
+pre-commit install
+pre-commit run --all-files  # run the full suite manually
+```
+
+Run the same commands as the CI workflow when preparing a change set:
+
+```bash
+# Formatting & linting
+ruff check .
+black --check .
+isort . --check-only
+
+# Typing
+mypy src
+
+# Tests
+pytest -q --cov=src/crypto_analyzer --cov-report=term-missing --cov-fail-under=80
+# (Coverage excludes integration/CLI modules defined in pyproject.toml to focus on unit-tested code.)
+
+# Security
+pip-audit
+bandit -r src
+```
+
+### 4. Download OHLCV data from Binance
 
 Edit settings in `src/crypto_analyzer/data/binance_import.py` (symbol, interval, date
 range if needed), then run:
@@ -115,7 +153,7 @@ python -m crypto_analyzer.data.binance_import
 
 This creates the `data/crypto_data.sqlite` file with price data.
 
-### 4. Configure the application
+### 5. Configure the application
 
 Configuration is centralised in `config/app.yaml`. Copy
 `config/app.example.yaml`, adjust the sections to match your environment (e.g.
@@ -123,7 +161,7 @@ database paths, feature toggles, on-chain credentials) and optionally point the
 `APP_CONFIG_FILE` environment variable to your custom file. Every option has a
 documented default so the application still runs without manual changes.
 
-### 5. Optional on-chain data
+### 6. Optional on-chain data
 
 On-chain metrics can be merged from public APIs:
 
@@ -149,7 +187,7 @@ and Blockchain.com datasets as the mempool.space REST API does not expose
 historical mempool snapshots. The WebSocket logger keeps the table current and
 is intended to be scheduled via `cron`.
 
-### 6. Run analysis and prediction
+### 7. Run analysis and prediction
 
 ```bash
 python scripts/make_features.py --output data/features.parquet
@@ -187,7 +225,7 @@ probabilities that can be thresholded for position sizing.  Legacy regression or
 usage-based ensembles remain available under `src/crypto_analyzer/legacy/`, but
 are no longer wired into the default command sequence above.
 
-### 7. Legacy pipeline
+### 8. Legacy pipeline
 
 Example commands for 120‑minute horizon:
 

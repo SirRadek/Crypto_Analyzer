@@ -49,6 +49,8 @@ dev = [
     "scikit-learn-stubs",
     "types-tqdm",
     "types-PyYAML",
+    "pytest==8.4.1",
+    "pytest-cov==7.0.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -77,7 +79,8 @@ DEP002 = [
 ]
 
 [tool.ruff]
-select = ["E", "F", "I", "D"]
+select = ["E", "F", "I", "UP", "PL", "NPY", "SIM", "PERF"]
+ignore = []
 line-length = 100
 target-version = "py313"
 extend-exclude = ["archive/**/*", "src/crypto_analyzer/legacy/**/*"]
@@ -116,3 +119,32 @@ target-version = ["py313"]
 [tool.isort]
 profile = "black"
 line_length = 100
+
+[tool.coverage.run]
+source = ["src/crypto_analyzer"]
+omit = [
+    "src/crypto_analyzer/cli/*",
+    "src/crypto_analyzer/data/db_connector.py",
+    "src/crypto_analyzer/data/maintenance.py",
+    "src/crypto_analyzer/data/predictions_store.py",
+    "src/crypto_analyzer/eval/threshold_sweep.py",
+    "src/crypto_analyzer/features/derivatives.py",
+    "src/crypto_analyzer/features/engineering.py",
+    "src/crypto_analyzer/features/indicators.py",
+    "src/crypto_analyzer/features/selection.py",
+    "src/crypto_analyzer/legacy/*",
+    "src/crypto_analyzer/model_manager.py",
+    "src/crypto_analyzer/models/predict.py",
+    "src/crypto_analyzer/models/predictor.py",
+    "src/crypto_analyzer/models/train_*.py",
+    "src/crypto_analyzer/models/utils.py",
+    "src/crypto_analyzer/pipeline.py",
+    "src/crypto_analyzer/schemas.py",
+    "src/crypto_analyzer/utils/config.py",
+    "src/crypto_analyzer/utils/helpers.py",
+    "src/crypto_analyzer/utils/progress.py",
+    "src/crypto_analyzer/utils/timeframes.py",
+]
+
+[tool.coverage.report]
+fail_under = 80

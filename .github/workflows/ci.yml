@@ -2,32 +2,79 @@ name: CI
 
 on:
   push:
+    branches: ["main"]
   pull_request:
 
 jobs:
-  lint-test:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
-      - run: pip install -e .[dev]
-      - run: ruff check .
-      - run: black --check .
-      - run: isort --check-only .
-      - run: mypy .
-      - name: Run pytest
+          python-version: "3.13"
+      - name: Install dependencies
         run: |
-          set -euo pipefail
-          pytest -q
-        env:
-          PYTHONPATH: .
+          python -m pip install --upgrade pip
+          pip install ruff black isort
+      - name: Ruff
+        run: ruff check .
+      - name: Black
+        run: black --check .
+      - name: isort
+        run: isort . --check-only
+
+  type:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install mypy pandas-stubs types-requests types-tqdm types-PyYAML joblib-stubs scikit-learn-stubs
+      - name: Run mypy
+        run: mypy src
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .[dev]
+      - name: Run pytest
+        run: pytest -q --cov=src/crypto_analyzer --cov-report=term-missing --cov-fail-under=80
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-audit bandit
+      - name: pip-audit
+        run: pip-audit
+      - name: Bandit
+        run: bandit -r src
