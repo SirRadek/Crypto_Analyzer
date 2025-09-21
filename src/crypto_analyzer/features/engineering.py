@@ -548,11 +548,38 @@ def create_features(
             df["deriv_liq_total"] = fill_value
             df["deriv_liq_net"] = fill_value
             df["deriv_liq_to_oi"] = fill_value
+
+        from crypto_analyzer.features.derivatives import make_deriv_features
+
+        try:
+            deriv_subset = df[["timestamp", "basis_annualized"]].copy()
+        except KeyError:
+            deriv_subset = df[["timestamp"]].copy()
+        if "deriv_funding_rate" in df.columns:
+            deriv_subset["funding_rate"] = df["deriv_funding_rate"]
+        elif "funding_rate" in df.columns:
+            deriv_subset["funding_rate"] = df["funding_rate"]
+        if "open_interest" in df.columns:
+            deriv_subset["open_interest"] = df["open_interest"]
+
+        try:
+            freq = f"{step_minutes}T"
+            extra = make_deriv_features(deriv_subset, freq=freq)
+        except Exception:  # pragma: no cover - defensive fallback
+            extra = pd.DataFrame(columns=["timestamp", "funding_z", "basis_bp", "oi_change_rate"])
+
+        if not extra.empty:
+            df = df.merge(extra, on="timestamp", how="left")
+        else:
+            for column in ("funding_z", "basis_bp", "oi_change_rate"):
+                df[column] = np.nan
     else:
         df = df.drop(columns=list(REGISTRY.derivatives), errors="ignore")
         df = df.drop(columns=[c for c in df.columns if c.startswith("deriv_")], errors="ignore")
 
     if settings.include_orderbook:
+        from crypto_analyzer.features.orderbook import depth_imbalance, order_flow_imbalance, spread
+
         for level in range(1, 3):
             bid_col = f"lob_bid_L{level}"
             ask_col = f"lob_ask_L{level}"
@@ -617,6 +644,49 @@ def create_features(
         else:
             df["wall_ask_dist_bps"] = fill_value
             df["wall_ask_size_rel"] = fill_value
+
+        book_snapshot = pd.DataFrame(index=df.index)
+        for level in range(1, settings.forward_fill_limit + 1):  # reasonable cap from config
+            bid_sz_col = f"lob_bid_L{level}"
+            ask_sz_col = f"lob_ask_L{level}"
+            bid_px_col = f"lob_bid_price_{level}"
+            ask_px_col = f"lob_ask_price_{level}"
+            if bid_sz_col in df.columns:
+                book_snapshot[f"bid_size_L{level}"] = df[bid_sz_col]
+            if ask_sz_col in df.columns:
+                book_snapshot[f"ask_size_L{level}"] = df[ask_sz_col]
+            if bid_px_col in df.columns:
+                book_snapshot[f"bid_price_L{level}"] = df[bid_px_col]
+            if ask_px_col in df.columns:
+                book_snapshot[f"ask_price_L{level}"] = df[ask_px_col]
+
+        if not book_snapshot.empty:
+            try:
+                imbalance_series = depth_imbalance(book_snapshot)
+                spread_series = spread(book_snapshot)
+            except Exception:  # pragma: no cover - best effort for inconsistent inputs
+                imbalance_series = pd.Series(np.nan, index=df.index)
+                spread_series = pd.Series(np.nan, index=df.index)
+        else:
+            imbalance_series = pd.Series(np.nan, index=df.index)
+            spread_series = pd.Series(np.nan, index=df.index)
+
+        df["lob_depth_imbalance"] = imbalance_series.to_numpy(dtype=np.float32)
+        df["lob_spread_bps"] = spread_series.to_numpy(dtype=np.float32)
+
+        if {"ofi_base", "ofi_quote"}.issubset(df.columns):
+            events = pd.DataFrame(
+                {
+                    "timestamp": df["timestamp"],
+                    "side": np.where(df["ofi_base"] >= 0, "buy", "sell"),
+                    "size": df["ofi_base"].abs().astype(float),
+                }
+            )
+            ofi_series = order_flow_imbalance(events)
+        else:
+            ofi_series = pd.Series(np.nan, index=df.index)
+
+        df["order_flow_imbalance"] = ofi_series.to_numpy(dtype=np.float32)
 
         if bid_px_cols and ask_px_cols:
             best_bid = df[bid_px_cols[0]].astype(np.float32)

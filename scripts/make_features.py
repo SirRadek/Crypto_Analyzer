@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -132,6 +133,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force-disable derivative features regardless of config defaults.",
     )
     parser.add_argument(
+        "--use_derivatives",
+        action="store_true",
+        help="Convenience flag to enable derivative features from auxiliary loaders.",
+    )
+    parser.add_argument(
+        "--use_orderbook",
+        action="store_true",
+        help="Convenience flag to enable order book feature engineering.",
+    )
+    parser.add_argument(
         "--forward-fill-limit",
         type=int,
         help="Override forward-fill window for NaN handling.",
@@ -141,6 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Override fallback value used when forward fill runs out.",
     )
+    parser.add_argument("--run-id", type=str, default=None, help="Optional run identifier.")
     parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
     return parser
 
@@ -161,6 +173,11 @@ def main(argv: list[str] | None = None) -> Path:
             fillna_value=args.fillna_value if args.fillna_value is not None else settings.fillna_value,
         )
 
+    if args.use_derivatives:
+        args.include_derivatives = True
+    if args.use_orderbook:
+        args.include_orderbook = True
+
     settings = _configure_features(
         settings=settings,
         include_onchain=args.include_onchain,
@@ -175,9 +192,36 @@ def main(argv: list[str] | None = None) -> Path:
         db_path=args.db_path,
     )
     feature_df = create_features(df, settings=settings)
-    _write_output(feature_df, args.output, args.format)
-    print(f"Features written to {args.output}")
-    return args.output
+
+    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("outputs") / f"run_id={run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    default_output = parser.get_default("output")
+    if args.output == default_output:
+        target_output = run_dir / args.output.name
+    else:
+        target_output = args.output
+
+    run_output = run_dir / target_output.name
+    _write_output(feature_df, run_output, args.format)
+    if target_output != run_output:
+        _write_output(feature_df, target_output, args.format)
+
+    config_dump = {
+        "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
+        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+    }
+    config_path = run_dir / "config_dump.json"
+    config_path.write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+
+    reports_dir = Path("reports")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Features written to {run_output}")
+    if target_output != run_output:
+        print(f"Features copied to {target_output}")
+    return run_output
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour

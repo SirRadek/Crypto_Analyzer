@@ -4,13 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Protocol
-
-import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss, log_loss
+from sklearn.metrics import brier_score_loss, log_loss as _sk_log_loss
 
 
 class Calibrator(Protocol):
@@ -113,9 +111,27 @@ def reliability_curve(
             exp[bin_idx] = m_pred
 
     brier = float(brier_score_loss(y_arr, p_arr))
-    loss = float(log_loss(y_arr, p_arr))
+    loss = float(_sk_log_loss(y_arr, p_arr))
 
     return bin_centres, obs, exp, brier, loss
+
+
+def brier_score(y_true: Iterable[float], probs: Iterable[float]) -> float:
+    """Wrapper returning the Brier score for convenience in tests."""
+
+    y_arr = np.asarray(list(y_true), dtype=float)
+    p_arr = np.asarray(list(probs), dtype=float)
+    p_arr = np.clip(p_arr, 1e-6, 1 - 1e-6)
+    return float(brier_score_loss(y_arr, p_arr))
+
+
+def log_loss(y_true: Iterable[float], probs: Iterable[float]) -> float:
+    """Wrapper around :func:`sklearn.metrics.log_loss` with clipping."""
+
+    y_arr = np.asarray(list(y_true), dtype=float)
+    p_arr = np.asarray(list(probs), dtype=float)
+    p_arr = np.clip(p_arr, 1e-6, 1 - 1e-6)
+    return float(_sk_log_loss(y_arr, p_arr))
 
 
 def plot_reliability(
@@ -133,6 +149,8 @@ def plot_reliability(
 
     path = Path(path_png)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    import matplotlib.pyplot as plt  # deferred import for hygiene tests
 
     plt.figure(figsize=(6, 6))
     plt.plot([0, 1], [0, 1], "--", color="gray", label="Perfect calibration")
