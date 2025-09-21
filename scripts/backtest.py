@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from crypto_analyzer.eval.backtest import run_backtest
+from crypto_analyzer.utils.config import CONFIG
 
 
 def _read_predictions(path: Path) -> pd.DataFrame:
@@ -78,31 +79,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional probability column for EV-based backtest rules.",
     )
     parser.add_argument(
+        "--fee_bps",
         "--fee-bps",
+        dest="fee_bps",
         type=float,
         default=4.0,
         help="Proportional transaction cost per trade in basis points.",
     )
     parser.add_argument(
+        "--slip_bps",
         "--slip-bps",
+        dest="slip_bps",
         type=float,
         default=0.0,
         help="Slippage assumption in basis points added to the fee.",
     )
     parser.add_argument(
+        "--latency_min",
         "--latency-min",
+        dest="latency_min",
         type=float,
         default=0.0,
         help="Execution latency in minutes applied by shifting the entry candle forward.",
     )
     parser.add_argument(
+        "--p_touch_thr",
         "--p-touch-thr",
+        dest="p_touch_thr",
         type=float,
         default=None,
         help="Minimum probability of touching the target required to open a trade.",
     )
     parser.add_argument(
+        "--p_up_thr",
         "--p-up-thr",
+        dest="p_up_thr",
         type=float,
         default=None,
         help=(
@@ -171,7 +182,9 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
         p_up_threshold=args.p_up_thr,
     )
 
-    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("outputs") / f"run_id={run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
     reports_dir = Path("reports")
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -205,6 +218,7 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
     summary_output = reports_dir / f"summary_{run_id}.json"
 
     equity.to_csv(equity_output, index=False)
+    equity.to_csv(run_dir / "equity.csv", index=False)
 
     summary = {
         "run_id": run_id,
@@ -220,6 +234,13 @@ def main(argv: list[str] | None = None) -> tuple[Path, Path]:
         "metrics": summary_metrics,
     }
     summary_output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    config_dump = {
+        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
+    }
+    (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
 
     print(
         "Backtest complete. Final equity: "

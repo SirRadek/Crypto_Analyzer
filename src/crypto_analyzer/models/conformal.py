@@ -14,6 +14,7 @@ __all__ = [
     "split_conformal_interval",
     "aps_conformal_interval",
     "generate_touch_conformal_report",
+    "conformal_interval",
 ]
 
 
@@ -195,4 +196,29 @@ def generate_touch_conformal_report(
             "split": split_dict,
             "aps": aps_dict,
         },
+    }
+
+
+def conformal_interval(
+    y_val: Iterable[int] | np.ndarray | pd.Series,
+    p_val: Iterable[float] | np.ndarray | pd.Series,
+    p_test: Iterable[float] | np.ndarray | pd.Series,
+    alpha: float,
+) -> dict[str, object]:
+    """Return symmetric conformal intervals around test probabilities."""
+
+    y_cal_arr = _to_numpy(y_val)
+    p_cal_arr = np.clip(_to_numpy(p_val), 1e-6, 1 - 1e-6)
+    p_test_arr = np.clip(_to_numpy(p_test), 1e-6, 1 - 1e-6)
+    _validate_inputs(y_cal_arr, p_cal_arr, p_test_arr, alpha=alpha)
+
+    residuals = np.abs(y_cal_arr - p_cal_arr)
+    radius = _finite_sample_quantile(residuals, alpha)
+    lower = np.clip(p_test_arr - radius, 0.0, 1.0)
+    upper = np.clip(p_test_arr + radius, 0.0, 1.0)
+    return {
+        "alpha": float(alpha),
+        "radius": float(radius),
+        "lower": lower.tolist(),
+        "upper": upper.tolist(),
     }

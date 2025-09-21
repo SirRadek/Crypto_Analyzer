@@ -86,6 +86,48 @@ class OnChainSettings:
 
 
 @dataclass(frozen=True)
+class CVSettings:
+    """Cross-validation defaults loaded from the configuration file."""
+
+    type: str
+    embargo_min: int
+    n_splits: int
+
+
+@dataclass(frozen=True)
+class CalibrationSettings:
+    """Probability calibration defaults for training scripts."""
+
+    method: str
+
+
+@dataclass(frozen=True)
+class ExecutionSettings:
+    """Assumptions about trading frictions used across backtests."""
+
+    fees_bps: float
+    slip_bps: float
+    latency_min: float
+
+
+@dataclass(frozen=True)
+class DerivativeDataSettings:
+    """Metadata pointing to external derivative data sources."""
+
+    funding_source: str | None
+    basis_source: str | None
+    open_interest_source: str | None
+    resample_freq: str
+
+
+@dataclass(frozen=True)
+class OrderbookSettings:
+    """Configuration for optional order book feature generation."""
+
+    depth_levels: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     core: CoreSettings
     database: DatabaseSettings
@@ -94,6 +136,13 @@ class AppConfig:
     models: ModelSettings
     backtest: BacktestSettings
     onchain: OnChainSettings
+    cv: CVSettings
+    calibration: CalibrationSettings
+    execution: ExecutionSettings
+    horizons: tuple[int, ...]
+    pct_threshold: float
+    derivatives: DerivativeDataSettings
+    orderbook: OrderbookSettings
     config_path: Path | None = None
 
     @property
@@ -368,6 +417,45 @@ def _build_onchain_settings(
     )
 
 
+def _build_cv_settings(data: dict[str, Any]) -> CVSettings:
+    cv_type = _as_str(data.get("type"), "holdout")
+    embargo = _as_int(data.get("embargo_min"), 0)
+    n_splits = _as_int(data.get("n_splits"), 5)
+    return CVSettings(type=cv_type, embargo_min=embargo, n_splits=n_splits)
+
+
+def _build_calibration_settings(data: dict[str, Any]) -> CalibrationSettings:
+    method = _as_str(data.get("method"), "none").lower()
+    return CalibrationSettings(method=method)
+
+
+def _build_execution_settings(data: dict[str, Any]) -> ExecutionSettings:
+    fees_bps = _as_float(data.get("fees_bps"), 0.0)
+    slip_bps = _as_float(data.get("slip_bps"), 0.0)
+    latency = _as_float(data.get("latency_min"), 0.0)
+    return ExecutionSettings(fees_bps=fees_bps, slip_bps=slip_bps, latency_min=latency)
+
+
+def _build_derivative_settings(data: dict[str, Any]) -> DerivativeDataSettings:
+    funding_source = data.get("funding_source")
+    basis_source = data.get("basis_source")
+    oi_source = data.get("open_interest_source")
+    freq = _as_str(data.get("resample_freq"), "5T")
+    return DerivativeDataSettings(
+        funding_source=str(funding_source) if funding_source not in (None, "") else None,
+        basis_source=str(basis_source) if basis_source not in (None, "") else None,
+        open_interest_source=str(oi_source) if oi_source not in (None, "") else None,
+        resample_freq=freq,
+    )
+
+
+def _build_orderbook_settings(data: dict[str, Any]) -> OrderbookSettings:
+    depth_levels = _as_int(data.get("depth_levels"), 5)
+    if depth_levels <= 0:
+        depth_levels = 1
+    return OrderbookSettings(depth_levels=depth_levels)
+
+
 def _build_config() -> AppConfig:
     raw_config, path = _read_config_file()
     core = _build_core_settings(raw_config.get("core", {}))
@@ -377,6 +465,13 @@ def _build_config() -> AppConfig:
     models = _build_model_settings(raw_config.get("models", {}))
     backtest = _build_backtest_settings(raw_config.get("backtest", {}))
     onchain = _build_onchain_settings(raw_config.get("onchain", {}), runtime)
+    cv = _build_cv_settings(raw_config.get("cv", {}))
+    calibration = _build_calibration_settings(raw_config.get("calibration", {}))
+    execution = _build_execution_settings(raw_config.get("execution", {}))
+    derivatives = _build_derivative_settings(raw_config.get("derivatives", {}))
+    orderbook = _build_orderbook_settings(raw_config.get("orderbook", {}))
+    horizons = tuple(int(float(x)) for x in _as_list(raw_config.get("horizons"), [core.forward_steps * 15]))
+    pct_threshold = _as_float(raw_config.get("pct_threshold"), 0.0)
     return AppConfig(
         core=core,
         database=database,
@@ -385,6 +480,13 @@ def _build_config() -> AppConfig:
         models=models,
         backtest=backtest,
         onchain=onchain,
+        cv=cv,
+        calibration=calibration,
+        execution=execution,
+        horizons=horizons,
+        pct_threshold=pct_threshold,
+        derivatives=derivatives,
+        orderbook=orderbook,
         config_path=path,
     )
 

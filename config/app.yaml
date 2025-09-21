@@ -1,0 +1,86 @@
+core:
+  symbol: BTCUSDT
+  interval: 15m
+  forward_steps: 8
+  history_days: 1825
+  timezone: UTC
+
+database:
+  price_store: data/crypto_data.sqlite
+  predictions_table: predictions
+  onchain_table: onchain_15m
+  feature_store: null
+  read_chunksize: 100000
+
+runtime:
+  cpu_limit: auto
+  repeat_count: 50
+  log_level: INFO
+  data_dir: data
+  cache_dir: data/cache
+  tmp_dir: data/tmp
+
+features:
+  include_onchain: true
+  include_orderbook: false
+  include_derivatives: true
+  forward_fill_limit: 12
+  fillna_value: 0.0
+
+models:
+  directory: artifacts/models
+  weights_glob: artifacts/backtest_acc_*.json
+  use_gpu: true
+  gpu_tree_method: gpu_hist
+  max_models: 16
+  random_seed: 1337
+
+backtest:
+  mode: holdout
+  validation_fraction: 0.2
+  walkforward_window_days: 30
+  metrics:
+    - accuracy
+    - precision
+    - recall
+
+onchain:
+  use_mempool: true
+  use_exchange_flows: true
+  use_usdt_events: true
+  cache_dir: data/cache/onchain
+  glassnode_api_key: null
+  whale_api_key: null
+  exchange_flow_source: csv
+  exchange_flow_path: null
+  request_timeout: 10
+  request_retries: 5
+
+cv:
+  type: purged-wf
+  embargo_min: 360
+  n_splits: 5
+
+calibration:
+  method: isotonic
+
+execution:
+  fees_bps: 1.0
+  slip_bps: 1.0
+  latency_min: 1
+
+horizons:
+  - 120
+  - 240
+  - 360
+
+pct_threshold: 0.005
+
+derivatives:
+  funding_source: null
+  basis_source: null
+  open_interest_source: null
+  resample_freq: 5T
+
+orderbook:
+  depth_levels: 5

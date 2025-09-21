@@ -1,0 +1,210 @@
+#!/usr/bin/env python
+"""Feature group ablation study on the final walk-forward validation fold."""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+from crypto_analyzer.data.db_connector import get_price_data
+from crypto_analyzer.eval.cv import purged_walkforward_splits
+from crypto_analyzer.features.engineering import (
+    FEATURE_COLUMNS,
+    create_features,
+    get_feature_columns,
+)
+from crypto_analyzer.features.engineering import make_targets as make_default_targets
+from crypto_analyzer.models.calibration import brier_score
+from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
+
+GROUPS = ["all", "price", "volatility", "multi_tf", "derivatives", "orderbook"]
+PATTERNS = {
+    "price": [r"^ret", r"^rel_", r"^mom_", r"taker", r"close", r"volume", r"price"],
+    "volatility": [r"^vol", r"atr", r"^rv_", r"^bv_"],
+    "multi_tf": [r"_15m", r"_1h", r"_4h", r"_1d", r"roll_", r"ema", r"multi"],
+    "derivatives": [r"^deriv", r"funding", r"basis", r"oi_"],
+    "orderbook": [r"^lob", r"^ofi", r"^wall", r"order_flow"],
+}
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
+def _prepare_settings(args: argparse.Namespace) -> FeatureSettings:
+    settings = CONFIG.features
+    overrides: dict[str, Any] = {}
+    if args.include_onchain is not None:
+        overrides["include_onchain"] = args.include_onchain
+    if args.include_orderbook is not None:
+        overrides["include_orderbook"] = args.include_orderbook
+    if args.include_derivatives is not None:
+        overrides["include_derivatives"] = args.include_derivatives
+    if overrides:
+        settings = override_feature_settings(settings, **overrides)
+    return settings
+
+
+def _load_features(args: argparse.Namespace, settings: FeatureSettings) -> pd.DataFrame:
+    if args.features is not None:
+        df = _read_table(args.features)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        return df
+    raw = get_price_data(args.symbol, db_path=args.db_path)
+    return create_features(raw, settings=settings)
+
+
+def _match_columns(columns: list[str], patterns: list[str]) -> list[str]:
+    matched: list[str] = []
+    for pattern in patterns:
+        regex = re.compile(pattern)
+        matched.extend([col for col in columns if regex.search(col)])
+    return sorted(set(matched))
+
+
+def _build_pipeline(feature_names: list[str]) -> Pipeline:
+    transformer = ColumnTransformer(
+        [
+            (
+                "num",
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="median")),
+                        ("scaler", StandardScaler()),
+                    ]
+                ),
+                feature_names,
+            )
+        ]
+    )
+    clf = LogisticRegression(max_iter=1000)
+    return Pipeline([("transform", transformer), ("clf", clf)])
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run feature group ablations")
+    parser.add_argument("--features", type=Path, help="Optional feature table (CSV/Parquet).")
+    parser.add_argument("--symbol", default=CONFIG.symbol)
+    parser.add_argument("--db-path", default=CONFIG.db_path)
+    parser.add_argument("--label", help="Custom label column name.")
+    parser.add_argument("--horizon", type=int, default=CONFIG.core.forward_steps * 15)
+    parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--include-onchain", dest="include_onchain", action="store_true")
+    parser.add_argument("--exclude-onchain", dest="include_onchain", action="store_false")
+    parser.add_argument("--include-orderbook", dest="include_orderbook", action="store_true")
+    parser.add_argument("--exclude-orderbook", dest="include_orderbook", action="store_false")
+    parser.add_argument("--include-derivatives", dest="include_derivatives", action="store_true")
+    parser.add_argument("--exclude-derivatives", dest="include_derivatives", action="store_false")
+    parser.set_defaults(include_onchain=None, include_orderbook=None, include_derivatives=None)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> Path:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    settings = _prepare_settings(args)
+    df = _load_features(args, settings)
+
+    label = args.label or f"cls_sign_{args.horizon}m"
+    if label not in df.columns:
+        df = make_default_targets(df, horizon=args.horizon)
+    if label not in df.columns:
+        raise KeyError(f"Label column '{label}' not found even after generation")
+
+    df = df.dropna(subset=[label]).sort_values("timestamp")
+
+    feature_cols = get_feature_columns(settings) or FEATURE_COLUMNS
+    missing = [col for col in feature_cols if col not in df.columns]
+    if missing:
+        raise KeyError("Missing features: " + ", ".join(sorted(missing)))
+
+    timestamps = pd.to_datetime(df["timestamp"], utc=True)
+    splits = purged_walkforward_splits(timestamps, CONFIG.cv.n_splits, CONFIG.cv.embargo_min)
+    if not splits:
+        raise RuntimeError("No walk-forward splits generated")
+    train_idx, test_idx = splits[-1]
+
+    X = df[feature_cols].astype(np.float32)
+    y = df[label].astype(int)
+    X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+    X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
+
+    results: list[dict[str, Any]] = []
+
+    for group in GROUPS:
+        drop_cols: list[str] = []
+        if group != "all":
+            drop_cols = _match_columns(feature_cols, PATTERNS.get(group, []))
+        active_cols = [col for col in feature_cols if col not in drop_cols]
+        if not active_cols:
+            continue
+        pipeline = _build_pipeline(active_cols)
+        pipeline.fit(X_train[active_cols], y_train)
+        probs = pipeline.predict_proba(X_test[active_cols])[:, 1]
+        metrics_row = {
+            "group": group,
+            "brier": brier_score(y_test, probs),
+            "log_loss": log_loss(y_test, probs, labels=[0, 1]),
+            "auc": roc_auc_score(y_test, probs),
+            "features": len(active_cols),
+        }
+        results.append(metrics_row)
+
+    result_df = pd.DataFrame(results).sort_values("brier")
+
+    run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("outputs") / f"run_id={run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir = Path("reports")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = reports_dir / f"ablation_{run_id}.csv"
+    png_path = reports_dir / f"ablation_{run_id}.png"
+    result_df.to_csv(csv_path, index=False)
+    result_df.to_csv(run_dir / "ablation.csv", index=False)
+
+    import matplotlib.pyplot as plt  # local import to avoid polluting module import state
+
+    plt.figure(figsize=(8, 4))
+    width = 0.25
+    x = np.arange(len(result_df))
+    plt.bar(x - width, result_df["brier"], width=width, label="Brier")
+    plt.bar(x, result_df["log_loss"], width=width, label="LogLoss")
+    plt.bar(x + width, result_df["auc"], width=width, label="AUC")
+    plt.xticks(x, result_df["group"], rotation=45)
+    plt.tight_layout()
+    plt.legend()
+    plt.savefig(png_path)
+    plt.close()
+    if not (run_dir / "ablation.png").exists():
+        (run_dir / "ablation.png").write_bytes(png_path.read_bytes())
+
+    config_dump = {
+        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
+        "features": feature_cols,
+        "fold_indices": {"train": train_idx.tolist(), "test": test_idx.tolist()},
+    }
+    (run_dir / "config_dump.json").write_text(json.dumps(config_dump, indent=2), encoding="utf-8")
+
+    print(f"Ablation results stored at {csv_path}")
+    return csv_path
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

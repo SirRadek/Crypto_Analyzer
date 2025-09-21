@@ -113,6 +113,12 @@ python scripts/train.py --features data/features.parquet --model-path artifacts/
 python scripts/backtest.py data/predictions.csv --equity-output reports/equity.csv
 ```
 
+Cost-aware backtest with latency and probability gates:
+
+```bash
+python scripts/backtest.py data/predictions.csv --fee_bps 1 --slip_bps 1 --latency_min 1 --p_touch_thr 0.6 --p_up_thr 0.55
+```
+
 The CLI entry points can be combined with your own data source by pointing
 `scripts/make_features.py` to a CSV/Parquet file (`--source file --input ...`). The
 trained model stores calibrated probabilities for the default ±0.5 % "touch"
@@ -143,6 +149,13 @@ models into a timestamped directory under the requested output root.  Each run
 is stored as `outputs/run_id=.../` and contains `metadata.json`,
 `config_snapshot.yaml`, `metrics.json`, the trained model and generated
 artefacts so that the experiment can be reproduced.
+
+Reliability diagnostics and equity curves are exported to `reports/` for quick
+inspection, for example:
+
+![Reliability Curve](reports/reliability_20240101_120000.png)
+
+![Equity Curve](reports/equity_20240101_120000.png)
 
 > **Note:** When adding on-chain signals, resample them to the candle interval
 > (5 min) before merging to prevent look‑ahead leakage.
@@ -177,8 +190,14 @@ typical workflow for a 2‑hour classification horizon:
    target:
 
    ```bash
-   python scripts/train.py --features data/features.parquet --model-path artifacts/meta_model.joblib
-   ```
+python scripts/train.py --features data/features.parquet --model-path artifacts/meta_model.joblib
+```
+
+Walk-forward cross-validation with isotonic calibration:
+
+```bash
+python scripts/train.py --features data/features.parquet --cv purged-wf --embargo_min 360 --calibration isotonic
+```
 
 5. **Backtest predictions** – evaluate the resulting forecasts on a hold-out
    set or historical predictions:
