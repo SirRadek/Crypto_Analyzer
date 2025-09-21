@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 
 def purged_walkforward_splits(
-    index: pd.DatetimeIndex, n_splits: int, embargo_min: int
+    index: pd.DatetimeIndex,
+    n_splits: int,
+    embargo_min: int,
+    *,
+    run_id: str | None = None,
+    reports_dir: str | Path = "reports",
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Build purged walk-forward cross-validation splits.
 
@@ -41,6 +49,7 @@ def purged_walkforward_splits(
     segments = np.array_split(np.arange(n_samples, dtype=int), n_splits + 1)
 
     splits: list[tuple[np.ndarray, np.ndarray]] = []
+    export_records: list[dict[str, object]] = []
     embargo_windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
 
     for fold in range(n_splits):
@@ -72,6 +81,27 @@ def purged_walkforward_splits(
             continue
 
         splits.append((train_idx, test_idx))
+
+        record_fold = len(splits) - 1
+        export_records.append(
+            {
+                "fold": record_fold,
+                "train_start": index[train_idx[0]].isoformat(),
+                "train_end": index[train_idx[-1]].isoformat(),
+                "test_start": index[test_idx[0]].isoformat(),
+                "test_end": index[test_idx[-1]].isoformat(),
+                "embargo_min": embargo_minutes,
+            }
+        )
         embargo_windows.append((window_start, window_end))
+
+    if run_id is not None:
+        reports_path = Path(reports_dir)
+        reports_path.mkdir(parents=True, exist_ok=True)
+        export_path = reports_path / f"cv_{run_id}.json"
+        export_path.write_text(
+            json.dumps(export_records, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     return splits
