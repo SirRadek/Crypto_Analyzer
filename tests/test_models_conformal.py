@@ -3,6 +3,7 @@ import pytest
 
 from crypto_analyzer.models.conformal import (
     aps_conformal_interval,
+    conformal_interval,
     generate_touch_conformal_report,
     split_conformal_interval,
 )
@@ -61,3 +62,16 @@ def test_invalid_alpha_raises(alpha):
     y_cal, p_cal, _, p_test = _sample_data()
     with pytest.raises(ValueError):
         split_conformal_interval(y_cal, p_cal, p_test, alpha=alpha)
+
+
+def test_conformal_interval_returns_coverage_and_widths():
+    y_cal, p_cal, y_test, p_test = _sample_data()
+    summary = conformal_interval(y_cal, p_cal, (y_test, p_test), alpha=0.2)
+
+    assert summary["alpha"] == pytest.approx(0.2)
+    assert summary["radius"] > 0
+    assert len(summary["lower"]) == len(p_test)
+    assert len(summary["upper"]) == len(p_test)
+    assert 0 <= summary["test_coverage"] <= 1
+    assert 0 <= summary["calibration_coverage"] <= 1
+    assert summary["effective_width"] <= summary["mean_width"]
