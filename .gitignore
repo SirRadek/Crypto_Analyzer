@@ -11,6 +11,10 @@ env/
 .DS_Store
 
 data/
+!src/
+!src/crypto_analyzer/
+!src/crypto_analyzer/data/
+!src/crypto_analyzer/data/schema.py
 datasets/
 outputs/
 /models/

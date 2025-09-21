@@ -21,6 +21,7 @@ httpx==0.27.0
 ta==0.10.3
 torch==2.4.1
 psutil==6.0.0
+pandera==0.20.3
 
 # Tooling
 vulture==2.11
