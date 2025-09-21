@@ -552,9 +552,11 @@ def create_features(
         from crypto_analyzer.features.derivatives import make_deriv_features
 
         try:
-            deriv_subset = df[["timestamp", "basis_annualized"]].copy()
-        except KeyError:
             deriv_subset = df[["timestamp"]].copy()
+        except KeyError:
+            deriv_subset = pd.DataFrame({"timestamp": pd.Series(dtype="datetime64[ns, UTC]")})
+        if "basis_annualized" in df.columns:
+            deriv_subset["basis_annualized"] = df["basis_annualized"]
         if "deriv_funding_rate" in df.columns:
             deriv_subset["funding_rate"] = df["deriv_funding_rate"]
         elif "funding_rate" in df.columns:
@@ -562,9 +564,20 @@ def create_features(
         if "open_interest" in df.columns:
             deriv_subset["open_interest"] = df["open_interest"]
 
+        deriv_cfg = CONFIG.derivatives
+
         try:
             freq = f"{step_minutes}T"
-            extra = make_deriv_features(deriv_subset, freq=freq)
+            extra = make_deriv_features(
+                deriv_subset,
+                freq=freq,
+                funding_col="funding_rate",
+                basis_col="basis_annualized",
+                oi_col="open_interest",
+                funding_source=deriv_cfg.funding_source,
+                basis_source=deriv_cfg.basis_source,
+                oi_source=deriv_cfg.open_interest_source,
+            )
         except Exception:  # pragma: no cover - defensive fallback
             extra = pd.DataFrame(columns=["timestamp", "funding_z", "basis_bp", "oi_change_rate"])
 
