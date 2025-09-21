@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "crypto-analyzer"
 version = "0.1.0"
 description = "Utilities for crypto market analysis"
-requires-python = ">=3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "numpy==2.1.1",
     "pandas==2.2.2",
@@ -87,7 +87,7 @@ DEP002 = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py311"
 extend-exclude = ["archive/**/*", "src/crypto_analyzer/legacy/**/*"]
 
 [tool.ruff.lint]
@@ -102,7 +102,7 @@ extend-ignore = ["D1", "D2", "D4"]
 convention = "numpy"
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.11"
 warn_unused_ignores = true
 no_implicit_optional = true
 warn_redundant_casts = true
@@ -123,7 +123,7 @@ ignore_errors = true
 
 [tool.black]
 line-length = 100
-target-version = ["py313"]
+target-version = ["py311"]
 
 [tool.isort]
 profile = "black"

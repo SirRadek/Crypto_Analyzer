@@ -312,7 +312,7 @@ python scripts/train.py --features data/features.parquet --cv purged-wf --embarg
 
 ## Requirements
 
-* Python 3.13
+* Python 3.11 or 3.12
 * [See `requirements.txt`](./requirements.txt) – all runtime dependencies are
   version pinned for reproducibility.
 * Regenerate dependency pins with `tools/update_dependencies.sh` when bumping
