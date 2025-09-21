@@ -25,6 +25,9 @@ jobs:
       - run: black --check .
       - run: isort --check-only .
       - run: mypy .
-      - run: pytest -q
+      - name: Run pytest
+        run: |
+          set -euo pipefail
+          pytest -q
         env:
           PYTHONPATH: .
