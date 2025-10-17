@@ -38,7 +38,7 @@ GROUPS = ["price", "volatility", "multi_tf", "derivatives", "orderbook"]
 PATTERNS = {
     "price": [r"^ret", r"^rel_", r"^mom_", r"taker", r"close", r"volume", r"price"],
     "volatility": [r"^vol", r"atr", r"^rv_", r"^bv_"],
-    "multi_tf": [r"_15m", r"_1h", r"_4h", r"_1d", r"roll_", r"ema", r"multi"],
+    "multi_tf": [r"_1d", r"_7d", r"_30d", r"roll_", r"ema", r"multi"],
     "derivatives": [r"^deriv", r"funding", r"basis", r"oi_"],
     "orderbook": [r"^lob", r"^ofi", r"^wall", r"order_flow"],
 }

@@ -31,14 +31,14 @@ def _create_synth_db(db_path: Path) -> None:
         """
     )
     base_ts = pd.Timestamp("2024-01-01", tz="UTC")
-    periods = 10 * 24 * 4  # 10 days of 15m data
-    ts = base_ts + pd.to_timedelta(np.arange(periods) * 15, unit="m")
+    periods = 365  # roughly one year of daily data
+    ts = base_ts + pd.to_timedelta(np.arange(periods), unit="D")
     rng = np.random.default_rng(1234)
     df = pd.DataFrame(
         {
             "open_time": (ts.view("int64") // 1_000_000).astype(int),
             "symbol": "BTCUSDT",
-            "interval": "15m",
+            "interval": "1d",
             "open": rng.random(periods) + 10000,
             "high": rng.random(periods) + 10001,
             "low": rng.random(periods) + 9999,
@@ -74,7 +74,7 @@ def _run_pipeline(tmp_path: Path, task: str) -> None:
         "--task",
         task,
         "--horizon",
-        "120",
+        "1440",
         "--split_params",
         json.dumps({"test_size": 0.2}),
         "--out_dir",

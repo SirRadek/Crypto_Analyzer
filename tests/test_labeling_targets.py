@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
 
+import numpy as np
+import pandas as pd
+
 from crypto_analyzer.labeling.targets import (
     make_targets,
     triple_barrier_probability_summary,
@@ -8,7 +11,7 @@ from crypto_analyzer.labeling.targets import (
 
 
 def test_make_targets_creates_binary_labels_without_leakage():
-    ts = pd.date_range("2024-01-01", periods=6, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=6, freq="1D", tz="UTC")
     base_price = np.array([100.0, 101.0, 102.0, 101.0, 99.0, 98.0], dtype=np.float32)
     df = pd.DataFrame(
         {
@@ -20,20 +23,20 @@ def test_make_targets_creates_binary_labels_without_leakage():
         }
     )
 
-    labeled = make_targets(df, horizons_min=[30], txn_cost_bps=10.0)
+    labeled = make_targets(df, horizons_min=[1440], txn_cost_bps=10.0)
 
-    expected_cls = pd.Series([1, 0, 0, 0, 0, 0], dtype="int8")
-    expected_bc = pd.Series([1, 0, 0, 0, 0, 0], dtype="int8")
+    expected_cls = pd.Series([1, 1, 0, 0, 0, 0], dtype="int8")
+    expected_bc = pd.Series([1, 1, 0, 0, 0, 0], dtype="int8")
 
-    pd.testing.assert_series_equal(labeled["cls_sign_30m"], expected_cls, check_names=False)
+    pd.testing.assert_series_equal(labeled["cls_sign_1440m"], expected_cls, check_names=False)
     pd.testing.assert_series_equal(
-        labeled["beyond_costs_30m"], expected_bc, check_names=False
+        labeled["beyond_costs_1440m"], expected_bc, check_names=False
     )
     assert labeled["timestamp"].dt.tz is not None
 
 
 def test_make_targets_adds_triple_barrier_labels():
-    ts = pd.date_range("2024-01-01", periods=12, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=12, freq="1D", tz="UTC")
     close = np.array(
         [
             100.0,
@@ -88,17 +91,17 @@ def test_make_targets_adds_triple_barrier_labels():
 
     df = pd.DataFrame({"timestamp": ts, "close": close, "high": high, "low": low})
 
-    labeled = make_targets(df, horizons_min=[120])
+    labeled = make_targets(df, horizons_min=[1440])
 
     expected = pd.Series(
-        [1, -1, 0, -1, pd.NA, pd.NA, pd.NA, pd.NA, pd.NA, pd.NA, pd.NA, pd.NA],
+        [1, -1, 1, -1, -1, -1, 1, 1, -1, -1, -1, pd.NA],
         dtype="Int8",
     )
     pd.testing.assert_series_equal(
         labeled["triple_barrier_120m"], expected, check_names=False
     )
     touch_labels = labeled["triple_barrier_touch_120m"].astype(str).tolist()
-    assert touch_labels[:4] == ["UP", "DOWN", "NO_TOUCH", "DOWN"]
+    assert touch_labels[:4] == ["UP", "DOWN", "NO_TOUCH", "NO_TOUCH"]
     touched = labeled["triple_barrier_touched_120m"].astype("float32")
     assert touched.iloc[0] == 1.0
     assert touched.iloc[2] == 0.0
@@ -111,7 +114,7 @@ def test_make_targets_adds_triple_barrier_labels():
 
 
 def test_triple_barrier_probability_summary_matches_columns():
-    ts = pd.date_range("2024-01-01", periods=20, freq="30min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=20, freq="1D", tz="UTC")
     base = np.linspace(100.0, 101.0, len(ts))
     df = pd.DataFrame(
         {
@@ -122,8 +125,8 @@ def test_triple_barrier_probability_summary_matches_columns():
         }
     )
 
-    labeled = make_targets(df, horizons_min=[120])
-    summary = triple_barrier_probability_summary(labeled, horizons_min=[120])
+    labeled = make_targets(df, horizons_min=[1440])
+    summary = triple_barrier_probability_summary(labeled, horizons_min=[1440])
     assert summary.shape == (1, 3)
-    assert summary.loc[0, "horizon_min"] == 120
+    assert summary.loc[0, "horizon_min"] == 1440
     assert 0.0 <= summary.loc[0, "prob_touch"] <= 1.0

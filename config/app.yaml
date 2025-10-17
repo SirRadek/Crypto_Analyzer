@@ -1,6 +1,6 @@
 core:
   symbol: BTCUSDT
-  interval: 15m
+  interval: 1d
   forward_steps: 8
   history_days: 1825
   timezone: UTC
@@ -8,7 +8,7 @@ core:
 database:
   price_store: data/crypto_data.sqlite
   predictions_table: predictions
-  onchain_table: onchain_15m
+  onchain_table: onchain_1d
   feature_store: null
   read_chunksize: 100000
 

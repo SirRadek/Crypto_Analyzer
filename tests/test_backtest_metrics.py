@@ -1,4 +1,5 @@
 import numpy as np
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -6,7 +7,7 @@ from crypto_analyzer.eval.backtest import run_backtest
 
 
 def test_run_backtest_produces_equity_and_metrics():
-    ts = pd.date_range("2024-01-01", periods=20, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=20, freq="1D", tz="UTC")
     last_price = np.linspace(100.0, 102.0, num=len(ts), dtype=np.float32)
     target = last_price + 0.5
     preds = last_price + np.linspace(0.1, 0.6, num=len(ts), dtype=np.float32)

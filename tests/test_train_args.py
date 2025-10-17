@@ -19,9 +19,9 @@ def test_parses_args(module_name):
             "--train-end",
             "2024-01-31",
             "--horizon",
-            "15m",
+            "1d",
             "--step",
-            "1m",
+            "1d",
             "--eval-frac",
             "0.2",
         ]
@@ -32,9 +32,9 @@ def test_parses_args(module_name):
             "--train-window",
             "10 days",
             "--horizon",
-            "1h",
+            "7d",
             "--step",
-            "30m",
+            "1d",
             "--eval-split",
             "2024-02-01:2024-02-10",
         ]
@@ -51,7 +51,7 @@ def test_train_cli_conformal_parse():
             "--task",
             "clf",
             "--horizon",
-            "120",
+            "1440",
             "--conformal",
             "alpha=0.05",
         ]
@@ -62,7 +62,7 @@ def test_train_cli_conformal_parse():
         "--task",
         "clf",
         "--horizon",
-        "120",
+        "1440",
         "--conformal",
     ])
     assert args_default.conformal == {"alpha": 0.1}

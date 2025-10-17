@@ -14,7 +14,7 @@ from crypto_analyzer.utils.config import CONFIG, FeatureSettings
 
 H = 24  # 120min horizon in 5m candles
 
-MULTI_TF_MINUTES: tuple[int, ...] = (15, 60, 240, 1440)
+MULTI_TF_MINUTES: tuple[int, ...] = (1440, 10080, 43200)
 PARKINSON_CONST = 1.0 / (4.0 * np.log(2.0))
 
 CROSS_ASSET_KEYWORDS: dict[str, Sequence[str]] = {
@@ -97,30 +97,29 @@ REGISTRY = FeatureColumnRegistry(
         "z_volume",
         "rel_close_vwap",
         "ret3",
-        "ofi_base_roll_15m",
-        "ofi_base_roll_1h",
-        "ofi_quote_roll_15m",
-        "ofi_quote_roll_1h",
-        "tbr_base_roll_15m",
-        "tbr_base_roll_1h",
-        "mom_log_ret_15m",
-        "mom_log_ret_1h",
-        "mom_log_ret_4h",
+        "ofi_base_roll_1d",
+        "ofi_base_roll_7d",
+        "ofi_base_roll_30d",
+        "ofi_quote_roll_1d",
+        "ofi_quote_roll_7d",
+        "ofi_quote_roll_30d",
+        "tbr_base_roll_1d",
+        "tbr_base_roll_7d",
+        "tbr_base_roll_30d",
         "mom_log_ret_1d",
-        "volatility_60m",
+        "mom_log_ret_7d",
+        "mom_log_ret_30d",
+        "volatility_12d",
         "atr14",
-        "vol_realized_15m",
-        "vol_realized_1h",
-        "vol_realized_4h",
         "vol_realized_1d",
-        "vol_of_vol_15m",
-        "vol_of_vol_1h",
-        "vol_of_vol_4h",
+        "vol_realized_7d",
+        "vol_realized_30d",
         "vol_of_vol_1d",
-        "vol_range_parkinson_15m",
-        "vol_range_parkinson_1h",
-        "vol_range_parkinson_4h",
+        "vol_of_vol_7d",
+        "vol_of_vol_30d",
         "vol_range_parkinson_1d",
+        "vol_range_parkinson_7d",
+        "vol_range_parkinson_30d",
         "mom_microtrend_ema_ratio",
         "tod_sin",
         "tod_cos",
@@ -134,22 +133,22 @@ REGISTRY = FeatureColumnRegistry(
         "time_dow_cos",
         "cross_ethbtc_ret",
         "cross_ethbtc_divergence",
-        "cross_ethbtc_corr_4h",
+        "cross_ethbtc_corr_30d",
         "cross_btcd_ret",
         "cross_btcd_divergence",
-        "cross_btcd_corr_4h",
+        "cross_btcd_corr_30d",
         "cross_dxy_ret",
         "cross_dxy_divergence",
-        "cross_dxy_corr_4h",
+        "cross_dxy_corr_30d",
         "cross_es_ret",
         "cross_es_divergence",
-        "cross_es_corr_4h",
+        "cross_es_corr_30d",
         "cross_nq_ret",
         "cross_nq_divergence",
-        "cross_nq_corr_4h",
+        "cross_nq_corr_30d",
         "cross_gold_ret",
         "cross_gold_divergence",
-        "cross_gold_corr_4h",
+        "cross_gold_corr_30d",
     ),
     orderbook=(
         "lob_imbalance_L1",
@@ -164,7 +163,7 @@ REGISTRY = FeatureColumnRegistry(
         "lob_ask_slope_bps",
     ),
     derivatives=(
-        "oi_delta_15m",
+        "oi_delta_1d",
         "basis_annualized",
         "deriv_funding_rate",
         "deriv_funding_rate_change",
@@ -444,8 +443,8 @@ def create_features(
         pk_var = log_range.rolling(window).mean() * PARKINSON_CONST
         df[f"vol_range_parkinson_{label}"] = np.sqrt(pk_var).astype(np.float32)
 
-    fast_span = max(2, timeframe_windows.get(60, 12))
-    slow_span = max(fast_span + 1, timeframe_windows.get(240, fast_span * 4))
+    fast_span = max(2, timeframe_windows.get(1440, 2))
+    slow_span = max(fast_span + 1, timeframe_windows.get(10080, fast_span * 4))
     fast_ema = df["close"].ewm(span=fast_span, adjust=False).mean()
     slow_ema = df["close"].ewm(span=slow_span, adjust=False).mean()
     denom = df["close"].replace(0.0, np.nan)
@@ -458,7 +457,7 @@ def create_features(
     # --- end patch ---
 
     # --- volatilita -----------------------------------------------------------
-    df["volatility_60m"] = ret1.rolling(12).std().astype(np.float32)
+    df["volatility_12d"] = ret1.rolling(12).std().astype(np.float32)
 
     tr = pd.concat(
         [
@@ -481,9 +480,9 @@ def create_features(
             df["basis_annualized"] = df["basis_annualized"].astype(np.float32)
 
         if "open_interest" in df.columns:
-            df["oi_delta_15m"] = df["open_interest"].diff(3).astype(np.float32)
-        elif "oi_delta_15m" not in df.columns:
-            df["oi_delta_15m"] = fill_value
+            df["oi_delta_1d"] = df["open_interest"].diff().astype(np.float32)
+        elif "oi_delta_1d" not in df.columns:
+            df["oi_delta_1d"] = fill_value
 
         funding_col = _match_column(df, FUNDING_COLUMN_CANDIDATES)
         if funding_col is not None:
@@ -495,13 +494,13 @@ def create_features(
         df["deriv_funding_rate_change"] = (
             df["deriv_funding_rate"].diff().astype(np.float32)
         )
-        smooth_window = max(1, timeframe_windows.get(240, 12))
+        smooth_window = max(1, timeframe_windows.get(10080, 7))
         df["deriv_funding_rate_smooth"] = (
             df["deriv_funding_rate"].rolling(smooth_window).mean().astype(np.float32)
         )
 
         basis = df["basis_annualized"].astype(np.float32)
-        basis_window = max(1, timeframe_windows.get(240, 12))
+        basis_window = max(1, timeframe_windows.get(10080, 7))
         df["deriv_basis_trend"] = (
             (basis - basis.rolling(basis_window).mean()).astype(np.float32)
         )
@@ -512,7 +511,7 @@ def create_features(
             df["deriv_open_interest"] = oi
             pct = oi.pct_change().replace([np.inf, -np.inf], np.nan)
             df["deriv_oi_change_pct"] = pct.astype(np.float32)
-            vel_window = max(1, timeframe_windows.get(60, 3))
+            vel_window = max(1, timeframe_windows.get(1440, 1))
             df["deriv_oi_velocity"] = oi.diff(vel_window).astype(np.float32)
         else:
             if "deriv_open_interest" not in df.columns:
@@ -777,8 +776,10 @@ def create_features(
     df["time_dow_cos"] = np.cos(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
 
     # --- cross-asset features -------------------------------------------------
-    corr_minutes = 240
-    corr_window = timeframe_windows.get(corr_minutes, max(1, timeframe_windows.get(60, 1)))
+    corr_minutes = 43200
+    corr_window = timeframe_windows.get(
+        corr_minutes, max(1, timeframe_windows.get(1440, 1))
+    )
     corr_label = timeframe_labels.get(corr_minutes, _format_minutes_label(corr_minutes))
     for asset, keywords in CROSS_ASSET_KEYWORDS.items():
         col_name = _match_column(df, keywords)
@@ -809,11 +810,11 @@ def create_features(
     # and tests.
     copy_map = {
         "basis_annualized": "deriv_basis_annualized",
-        "oi_delta_15m": "deriv_oi_delta_15m",
+        "oi_delta_1d": "deriv_oi_delta_1d",
         "lob_imbalance_L1": "lob_imbalance_L1",
         "lob_imbalance_L2": "lob_imbalance_L2",
         "ret3": "mom_ret3",
-        "volatility_60m": "vol_volatility_60m",
+        "volatility_12d": "vol_volatility_12d",
         "atr14": "vol_atr14",
         "tod_sin": "time_tod_sin",
         "tod_cos": "time_tod_cos",
@@ -824,7 +825,7 @@ def create_features(
     }
     if not settings.include_derivatives:
         copy_map.pop("basis_annualized", None)
-        copy_map.pop("oi_delta_15m", None)
+        copy_map.pop("oi_delta_1d", None)
     if not settings.include_orderbook:
         copy_map.pop("lob_imbalance_L1", None)
         copy_map.pop("lob_imbalance_L2", None)

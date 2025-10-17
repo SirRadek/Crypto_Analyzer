@@ -16,7 +16,7 @@ class _BaseModel(BaseModel):
 
 class CoreSettings(_BaseModel):
     symbol: str = "BTCUSDT"
-    interval: str = "15m"
+    interval: str = "1d"
     forward_steps: int = Field(default=8, ge=1)
     history_days: int = Field(default=5 * 365, ge=1)
     timezone: str = "UTC"
@@ -25,7 +25,7 @@ class CoreSettings(_BaseModel):
 class DatabaseSettings(_BaseModel):
     price_store: Path = Path("data/crypto_data.sqlite")
     predictions_table: str = "predictions"
-    onchain_table: str = "onchain_15m"
+    onchain_table: str = "onchain_1d"
     feature_store: Path | None = None
     read_chunksize: int = Field(default=100_000, ge=1)
 

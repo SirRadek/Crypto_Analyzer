@@ -6,7 +6,7 @@ from crypto_analyzer.features.engineering import create_features
 
 def test_future_extreme_targets_once():
     n = 60
-    ts = pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=n, freq="1D", tz="UTC")
     close = np.linspace(100, 101, n)
     high = close + 1
     low = close - 1
