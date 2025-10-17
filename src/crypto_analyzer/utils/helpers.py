@@ -5,7 +5,9 @@ from __future__ import annotations
 from contextlib import suppress
 from pathlib import Path
 
-__all__ = ["ensure_dir_exists", "set_cpu_limit"]
+from crypto_analyzer.utils.logging import get_logger
+
+__all__ = ["ensure_dir_exists", "set_cpu_limit", "get_logger"]
 
 
 def ensure_dir_exists(path: str | Path) -> Path:
