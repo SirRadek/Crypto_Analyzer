@@ -9,6 +9,7 @@ import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings
+from crypto_analyzer.utils.validation import validate_features, validate_price_data
 
 # Lehký FE laděný pro 2h BTCUSDT. Bez těžkých závislostí, vše float32.
 
@@ -482,6 +483,7 @@ def create_features(
     """
 
     settings = _resolve_feature_settings(settings)
+    validate_price_data(df)
     df = df.copy()
     validate_feature_inputs(df, settings)
     fill_value = np.float32(settings.fillna_value)
@@ -934,6 +936,8 @@ def create_features(
     if len(numeric_cols) > 0:
         df[numeric_cols] = df[numeric_cols].astype(np.float32)
         df[numeric_cols] = df[numeric_cols].fillna(fill_value)
+
+    validate_features(df)
 
     # --- validace typů --------------------------------------------------------
     feature_only = df
