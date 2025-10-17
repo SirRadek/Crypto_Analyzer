@@ -16,6 +16,10 @@ import pandas as pd
 import requests
 
 from crypto_analyzer.data.db_connector import get_price_data
+from crypto_analyzer.data.onchain_fetcher import (
+    fetch_exchange_flows,
+    fetch_mempool_stats,
+)
 from crypto_analyzer.utils.logging import get_logger
 
 try:  # pragma: no cover - exercised indirectly in environments with config deps
@@ -285,6 +289,26 @@ def load_enriched_market_data(
         logger.warning("Failed to fetch Glassnode active addresses", exc_info=exc)
         glassnode = pd.DataFrame(columns=["timestamp", "onch_active_addresses"])
 
+    mempool = pd.DataFrame()
+    if getattr(cfg.onchain, "use_mempool", False):
+        try:
+            mempool = fetch_mempool_stats()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to fetch mempool statistics", exc_info=exc)
+            mempool = pd.DataFrame()
+
+    exchange_flows = pd.DataFrame()
+    if getattr(cfg.onchain, "use_exchange_flows", False):
+        api_key = getattr(cfg.onchain, "glassnode_api_key", None)
+        if api_key:
+            try:
+                exchange_flows = fetch_exchange_flows(api_key, start=span_start, end=span_end)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.warning("Failed to fetch Glassnode exchange flows", exc_info=exc)
+                exchange_flows = pd.DataFrame()
+        else:  # pragma: no cover - configuration guard
+            logger.warning("Exchange flow fetching enabled but Glassnode API key is missing")
+
     try:
         funding = fetch_binance_funding_rates(market_symbol, span_start, span_end)
     except Exception as exc:  # pragma: no cover - defensive logging
@@ -313,7 +337,38 @@ def load_enriched_market_data(
     if not glassnode.empty:
         glassnode = glassnode.assign(date=lambda df: pd.to_datetime(df["timestamp"], utc=True).dt.floor("D"))
 
-    enriched = _merge_daily_features(base, (glassnode, funding, open_interest))
+    if not mempool.empty:
+        mempool = (
+            mempool.reset_index()
+            .assign(
+                timestamp=lambda df: pd.to_datetime(df["timestamp"], utc=True),
+                date=lambda df: pd.to_datetime(df["timestamp"], utc=True).dt.floor("D"),
+            )
+            .sort_values("timestamp")
+            .drop_duplicates(subset="date", keep="last")
+        )
+
+    if not exchange_flows.empty:
+        exchange_flows = (
+            exchange_flows.reset_index()
+            .assign(
+                timestamp=lambda df: pd.to_datetime(df["timestamp"], utc=True),
+                date=lambda df: pd.to_datetime(df["timestamp"], utc=True).dt.floor("D"),
+            )
+            .sort_values("timestamp")
+            .drop_duplicates(subset="date", keep="last")
+        )
+
+    enriched = _merge_daily_features(
+        base,
+        (
+            glassnode,
+            funding,
+            open_interest,
+            mempool,
+            exchange_flows,
+        ),
+    )
     return enriched
 
 
@@ -321,6 +376,8 @@ __all__ = [
     "fetch_glassnode_active_addresses",
     "fetch_binance_funding_rates",
     "fetch_binance_open_interest",
+    "fetch_exchange_flows",
+    "fetch_mempool_stats",
     "load_enriched_market_data",
 ]
 
