@@ -194,7 +194,7 @@ def fetch_binance_open_interest(
     start: datetime,
     end: datetime,
     *,
-    period: str = "1d",
+    period: str = "5m",
     session: requests.Session | None = None,
     settings: _HTTPSettings | None = None,
 ) -> pd.DataFrame:

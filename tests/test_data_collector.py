@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from datetime import datetime
-
 import pandas as pd
 import pytest
 
@@ -57,38 +55,43 @@ def test_load_enriched_market_data_aligns_daily_series(monkeypatch):
     base = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
-                ["2021-01-01", "2021-01-02", "2021-01-03"], utc=True
+                [
+                    "2021-01-01T00:00:00Z",
+                    "2021-01-01T12:00:00Z",
+                    "2021-01-02T00:00:00Z",
+                    "2021-01-02T12:00:00Z",
+                ]
             ),
-            "open": [1, 2, 3],
-            "high": [2, 3, 4],
-            "low": [0.5, 1.5, 2.5],
-            "close": [1.5, 2.5, 3.5],
-            "volume": [10, 20, 30],
+            "open": [1, 2, 3, 4],
+            "high": [2, 3, 4, 5],
+            "low": [0.5, 1.5, 2.5, 3.5],
+            "close": [1.5, 2.5, 3.5, 4.5],
+            "volume": [10, 20, 30, 40],
         }
     )
 
     glassnode = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(
-                ["2021-01-01", "2021-01-02", "2021-01-03"], utc=True
-            ),
-            "onch_active_addresses": [1000, 1100, 1200],
+            "timestamp": pd.to_datetime(["2021-01-01", "2021-01-02"], utc=True),
+            "onch_active_addresses": [1000, 1100],
         }
     )
     funding = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
-                ["2021-01-01", "2021-01-02", "2021-01-03"], utc=True
+                [
+                    "2021-01-01T08:00:00Z",
+                    "2021-01-01T16:00:00Z",
+                    "2021-01-02T00:00:00Z",
+                ]
             ),
-            "funding_rate": [0.01, 0.015, 0.02],
+            "funding_rate": [0.01, 0.02, 0.03],
         }
     )
     open_interest = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(
-                ["2021-01-01", "2021-01-02", "2021-01-03"], utc=True
-            ),
-            "open_interest": [1_000_000, 1_050_000, 1_200_000],
+            "timestamp": pd.to_datetime(["2021-01-01T08:00:00Z", "2021-01-02T08:00:00Z"]),
+            "open_interest": [1_000_000, 1_200_000],
         }
     )
 
@@ -114,12 +117,12 @@ def test_load_enriched_market_data_aligns_daily_series(monkeypatch):
 
     assert {"onch_active_addresses", "funding_rate", "open_interest"}.issubset(enriched.columns)
 
-    assert enriched.shape[0] == base.shape[0]
+    first_day = enriched[enriched["timestamp"].dt.floor("D") == pd.Timestamp("2021-01-01", tz="UTC")]
+    second_day = enriched[enriched["timestamp"].dt.floor("D") == pd.Timestamp("2021-01-02", tz="UTC")]
 
-    assert enriched["onch_active_addresses"].tolist() == [1000, 1100, 1200]
-    assert pytest.approx(enriched.loc[0, "funding_rate"], rel=1e-6) == 0.01
-    assert pytest.approx(enriched.loc[1, "funding_rate"], rel=1e-6) == 0.015
-    assert pytest.approx(enriched.loc[2, "funding_rate"], rel=1e-6) == 0.02
-    assert enriched.loc[0, "open_interest"] == 1_000_000
-    assert enriched.loc[1, "open_interest"] == 1_050_000
-    assert enriched.loc[2, "open_interest"] == 1_200_000
+    assert (first_day["onch_active_addresses"] == 1000).all()
+    assert (second_day["onch_active_addresses"] == 1100).all()
+    assert pytest.approx(first_day["funding_rate"].iloc[0], rel=1e-6) == 0.015
+    assert (second_day["funding_rate"] == 0.03).all()
+    assert (first_day["open_interest"] == 1_000_000).all()
+    assert (second_day["open_interest"] == 1_200_000).all()
