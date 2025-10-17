@@ -98,14 +98,14 @@ def fetch_mempool_5m(start: datetime, end: datetime) -> pd.DataFrame:
     return df
 
 
-def load_exchange_flows_1h(
+def load_exchange_flows_1d(
     source: str = "csv",
     path: str | None = None,
     glassnode_api_key: str | None = None,
 ) -> pd.DataFrame:
-    """Load hourly exchange flow data from CSV or Glassnode API."""
+    """Load daily exchange flow data from CSV or Glassnode API."""
 
-    cache_file = _cache_path(f"exchange_flows_{source}")
+    cache_file = _cache_path(f"exchange_flows_{source}_1d")
     if cache_file.exists():
         return pd.read_parquet(cache_file)
 
@@ -120,7 +120,7 @@ def load_exchange_flows_1h(
             raise ValueError("glassnode_api_key required")
         sess = _session()
         base = "https://api.glassnode.com/v1/metrics/exchanges"
-        params = {"a": "BTC", "i": "1h", "api_key": key}
+        params = {"a": "BTC", "i": "24h", "api_key": key}
         inflow = _get_with_retry(
             sess,
             f"{base}/inflow_sum",
@@ -145,7 +145,7 @@ def load_exchange_flows_1h(
     else:
         raise ValueError("source must be 'csv' or 'glassnode'")
 
-    df = df.resample("1H", label="right", closed="right").sum(min_count=1)
+    df = df.resample("1D", label="right", closed="right").sum(min_count=1)
     df.rename(columns={c: f"onch_{c}" for c in df.columns}, inplace=True)
     df.to_parquet(cache_file)
     return df
@@ -201,6 +201,6 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
 __all__ = [
     "OnChainSettings",
     "fetch_mempool_5m",
-    "load_exchange_flows_1h",
+    "load_exchange_flows_1d",
     "fetch_usdt_events",
 ]

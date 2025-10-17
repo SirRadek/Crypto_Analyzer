@@ -6,7 +6,7 @@ from crypto_analyzer.eval.backtest import run_backtest
 def test_backtest_equity_length():
     df = pd.DataFrame(
         {
-            "timestamp": pd.date_range("2024", periods=5, freq="15min"),
+            "timestamp": pd.date_range("2024", periods=5, freq="1D"),
             "p_hat": [101, 102, 103, 104, 105],
             "target": [100, 101, 102, 103, 104],
             "last_price": [100, 101, 102, 103, 104],
@@ -17,7 +17,7 @@ def test_backtest_equity_length():
 
 
 def test_backtest_expected_value_rule_applies_fees_and_slippage():
-    ts = pd.date_range("2024", periods=6, freq="15min")
+    ts = pd.date_range("2024", periods=6, freq="1D")
     df = pd.DataFrame(
         {
             "timestamp": ts,
@@ -44,7 +44,7 @@ def test_backtest_expected_value_rule_applies_fees_and_slippage():
 def test_backtest_latency_shifts_entries():
     df = pd.DataFrame(
         {
-            "timestamp": pd.date_range("2024-01-01", periods=6, freq="5min"),
+            "timestamp": pd.date_range("2024-01-01", periods=6, freq="1D"),
             "p_hat": [101, 102, 103, 104, 105, 106],
             "target": [101.5, 102.5, 103.5, 104.5, 105.5, 106.5],
             "last_price": [101, 102, 103, 104, 105, 106],
@@ -62,7 +62,7 @@ def test_backtest_latency_shifts_entries():
 def test_backtest_prob_thresholds_gate_trades():
     df = pd.DataFrame(
         {
-            "timestamp": pd.date_range("2024-02-01", periods=4, freq="15min"),
+            "timestamp": pd.date_range("2024-02-01", periods=4, freq="1D"),
             "last_price": [100, 101, 102, 103],
             "target": [101, 102, 103, 104],
             "p_success": [0.2, 0.3, 0.4, 0.5],
@@ -85,7 +85,7 @@ def test_backtest_prob_thresholds_gate_trades():
 def test_backtest_directional_threshold_creates_shorts_and_longs():
     df = pd.DataFrame(
         {
-            "timestamp": pd.date_range("2024-03-01", periods=4, freq="15min"),
+            "timestamp": pd.date_range("2024-03-01", periods=4, freq="1D"),
             "p_hat": [100.5, 99.5, 100.2, 99.8],
             "last_price": [100, 100, 100, 100],
             "target": [100.6, 99.4, 100.3, 99.7],

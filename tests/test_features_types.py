@@ -1,4 +1,5 @@
 import numpy as np
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -14,7 +15,7 @@ from crypto_analyzer.utils.config import FeatureSettings
 def test_features_types():
     rng = np.random.default_rng(0)
     n = 100
-    ts = pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=n, freq="1D", tz="UTC")
     close = 100 + rng.normal(scale=1, size=n).cumsum()
     open_ = close - rng.random(n)
     high = close + rng.random(n)
@@ -46,7 +47,7 @@ def test_features_types():
 def test_feature_toggles_respected():
     rng = np.random.default_rng(1)
     n = 50
-    ts = pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=n, freq="1D", tz="UTC")
     close = 100 + rng.normal(scale=1, size=n).cumsum()
     base = pd.DataFrame(
         {
@@ -83,7 +84,7 @@ def test_feature_toggles_respected():
 
     assert not any(col.startswith("onch_") for col in feat_df.columns)
     assert not any(col.startswith("lob_") or col.startswith("wall_") for col in feat_df.columns)
-    assert {"basis_annualized", "oi_delta_15m"}.isdisjoint(feat_df.columns)
+    assert {"basis_annualized", "oi_delta_1d"}.isdisjoint(feat_df.columns)
 
     active_cols = get_feature_columns(settings)
     assert all(col in feat_df.columns for col in active_cols)
@@ -97,14 +98,14 @@ def test_feature_toggles_respected():
 
 
 def test_create_features_rejects_missing_columns():
-    ts = pd.date_range("2024-01-01", periods=10, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=10, freq="1D", tz="UTC")
     df = pd.DataFrame({"timestamp": ts, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0})
     with pytest.raises(KeyError):
         create_features(df)
 
 
 def test_validate_feature_inputs_checks_onchain_names():
-    ts = pd.date_range("2024-01-01", periods=2, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=2, freq="1D", tz="UTC")
     df = pd.DataFrame(
         {
             "timestamp": ts,
@@ -133,7 +134,7 @@ def test_validate_feature_inputs_checks_onchain_names():
 
 
 def test_timestamp_localized_to_utc():
-    ts = pd.date_range("2024-01-01", periods=10, freq="15min")  # naive timestamps
+    ts = pd.date_range("2024-01-01", periods=10, freq="1D")  # naive timestamps
     df = pd.DataFrame(
         {
             "timestamp": ts,

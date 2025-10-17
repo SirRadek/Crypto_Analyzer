@@ -128,8 +128,10 @@ def _ensure_label(df: pd.DataFrame, horizon: int, label: str) -> tuple[pd.DataFr
 def _compute_realized_volatility(df: pd.DataFrame) -> pd.Series:
     """Estimate realized volatility using available price features."""
 
-    if "vol_realized_1h" in df.columns:
-        realized = pd.to_numeric(df["vol_realized_1h"], errors="coerce")
+    if "vol_realized_7d" in df.columns:
+        realized = pd.to_numeric(df["vol_realized_7d"], errors="coerce")
+    elif "vol_realized_1d" in df.columns:
+        realized = pd.to_numeric(df["vol_realized_1d"], errors="coerce")
     else:
         if "close" not in df.columns:
             raise KeyError(

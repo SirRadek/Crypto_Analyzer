@@ -6,7 +6,7 @@ from crypto_analyzer.eval.regimes import assign_volatility_regimes, metric_by_re
 
 
 def test_assign_volatility_regimes_creates_labels():
-    ts = pd.date_range("2024-01-01", periods=200, freq="15min", tz="UTC")
+    ts = pd.date_range("2024-01-01", periods=200, freq="1D", tz="UTC")
     prices = np.linspace(100.0, 110.0, len(ts)) + np.sin(np.linspace(0, 6, len(ts)))
     df = pd.DataFrame({"timestamp": ts, "close": prices})
 
