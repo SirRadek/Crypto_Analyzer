@@ -139,6 +139,126 @@ def test_create_features_includes_sentiment_when_enabled(monkeypatch: pytest.Mon
     assert not feat_df["sent_score"].isna().any()
 
 
+def test_create_features_excludes_sentiment_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    ts = pd.date_range("2024-01-01", periods=5, freq="1D", tz="UTC")
+    base = pd.DataFrame(
+        {
+            "timestamp": ts,
+            "open": 1.0,
+            "high": 1.5,
+            "low": 0.5,
+            "close": 1.1,
+            "volume": 100.0,
+            "quote_asset_volume": 200.0,
+            "taker_buy_base": 50.0,
+            "taker_buy_quote": 110.0,
+            "sent_score": [0.1, 0.2, 0.3, 0.4, 0.5],
+        }
+    )
+
+    settings = FeatureSettings(
+        include_onchain=False,
+        include_orderbook=False,
+        include_derivatives=False,
+        include_sentiment=True,
+        forward_fill_limit=0,
+        fillna_value=-1.0,
+    )
+
+    sentiment_disabled = CONFIG.sentiment.model_copy(update={"use_sentiment": False})
+    config_override = CONFIG.model_copy(update={"sentiment": sentiment_disabled})
+    monkeypatch.setattr(
+        "crypto_analyzer.features.engineering.CONFIG", config_override
+    )
+
+    feat_df = create_features(base, settings=settings)
+    assert "sent_score" not in feat_df.columns
+
+
+def test_create_features_computes_expected_core_metrics() -> None:
+    n = 15
+    ts = pd.date_range("2024-01-01", periods=n, freq="1D", tz="UTC")
+    close = pd.Series(100.0 + np.arange(n), index=ts)
+    open_ = close - 1.0
+    high = close + 2.0
+    low = close - 2.0
+    volume = pd.Series(10.0 + np.arange(n), index=ts)
+    quote_volume = (volume * (close + 0.5)).astype(float)
+    taker_buy_base = (volume * 0.6).astype(float)
+    taker_buy_quote = (quote_volume * 0.55).astype(float)
+
+    base = pd.DataFrame(
+        {
+            "timestamp": ts,
+            "open": open_.to_numpy(),
+            "high": high.to_numpy(),
+            "low": low.to_numpy(),
+            "close": close.to_numpy(),
+            "volume": volume.to_numpy(),
+            "quote_asset_volume": quote_volume.to_numpy(),
+            "taker_buy_base": taker_buy_base.to_numpy(),
+            "taker_buy_quote": taker_buy_quote.to_numpy(),
+        }
+    )
+
+    settings = FeatureSettings(
+        include_onchain=False,
+        include_orderbook=False,
+        include_derivatives=False,
+        include_sentiment=False,
+        forward_fill_limit=0,
+        fillna_value=-1.0,
+    )
+
+    feat_df = create_features(base, settings=settings)
+
+    expected_tbr_base = (taker_buy_base / volume).astype(np.float32).reset_index(drop=True)
+    expected_tbr_base.name = "tbr_base"
+    pd.testing.assert_series_equal(feat_df["tbr_base"], expected_tbr_base)
+
+    expected_ofi_base = (2.0 * expected_tbr_base - 1.0).astype(np.float32)
+    expected_ofi_base.name = "ofi_base"
+    pd.testing.assert_series_equal(feat_df["ofi_base"], expected_ofi_base)
+
+    expected_tbr_quote = (taker_buy_quote / quote_volume).astype(np.float32).reset_index(drop=True)
+    expected_ofi_quote = (2.0 * expected_tbr_quote - 1.0).astype(np.float32)
+    expected_ofi_quote.name = "ofi_quote"
+    pd.testing.assert_series_equal(feat_df["ofi_quote"], expected_ofi_quote)
+
+    expected_ret1 = np.log(close).diff().astype(np.float32).reset_index(drop=True)
+    expected_ret3 = (
+        expected_ret1.rolling(3).sum().astype(np.float32).fillna(np.float32(settings.fillna_value))
+    )
+    expected_ret3.name = "ret3"
+    pd.testing.assert_series_equal(feat_df["ret3"], expected_ret3, rtol=1e-6, atol=1e-6)
+
+    expected_volatility = (
+        expected_ret1.rolling(12).std().astype(np.float32).fillna(np.float32(settings.fillna_value))
+    )
+    expected_volatility.name = "volatility_12d"
+    pd.testing.assert_series_equal(
+        feat_df["volatility_12d"], expected_volatility, rtol=1e-6, atol=1e-6
+    )
+
+    expected_roll_1d = expected_ofi_base.rolling(1).mean().astype(np.float32)
+    expected_roll_1d.name = "ofi_base_roll_1d"
+    pd.testing.assert_series_equal(feat_df["ofi_base_roll_1d"], expected_roll_1d)
+
+    expected_roll_7d = (
+        expected_ofi_base.rolling(7)
+        .mean()
+        .astype(np.float32)
+        .fillna(np.float32(settings.fillna_value))
+    )
+    expected_roll_7d.name = "ofi_base_roll_7d"
+    pd.testing.assert_series_equal(
+        feat_df["ofi_base_roll_7d"], expected_roll_7d, rtol=1e-6, atol=1e-6
+    )
+
+    expected_ratio = (taker_buy_base / (volume - taker_buy_base)).astype(np.float32).reset_index(drop=True)
+    expected_ratio.name = "taker_buy_sell_ratio"
+    pd.testing.assert_series_equal(feat_df["taker_buy_sell_ratio"], expected_ratio)
+
 def test_create_features_rejects_missing_columns():
     ts = pd.date_range("2024-01-01", periods=10, freq="1D", tz="UTC")
     df = pd.DataFrame({"timestamp": ts, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0})
