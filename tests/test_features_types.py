@@ -9,7 +9,7 @@ from crypto_analyzer.features.engineering import (
     get_feature_columns,
     validate_feature_inputs,
 )
-from crypto_analyzer.utils.config import FeatureSettings
+from crypto_analyzer.utils.config import CONFIG, FeatureSettings
 
 
 def test_features_types():
@@ -70,6 +70,7 @@ def test_feature_toggles_respected():
             "lob_ask_price_1": rng.random(n) + 101,
             "lob_ask_size_1": rng.random(n),
             "onch_fee_fast_satvb": rng.random(n),
+            "sent_score": rng.random(n),
         }
     )
 
@@ -77,6 +78,7 @@ def test_feature_toggles_respected():
         include_onchain=False,
         include_orderbook=False,
         include_derivatives=False,
+        include_sentiment=False,
         forward_fill_limit=0,
         fillna_value=-1.0,
     )
@@ -85,16 +87,56 @@ def test_feature_toggles_respected():
     assert not any(col.startswith("onch_") for col in feat_df.columns)
     assert not any(col.startswith("lob_") or col.startswith("wall_") for col in feat_df.columns)
     assert {"basis_annualized", "oi_delta_1d"}.isdisjoint(feat_df.columns)
+    assert "sent_score" not in feat_df.columns
 
     active_cols = get_feature_columns(settings)
     assert all(col in feat_df.columns for col in active_cols)
     assert "basis_annualized" not in active_cols
     assert "lob_imbalance_L1" not in active_cols
     assert all(not col.startswith("onch_") for col in active_cols)
+    assert all(not col.startswith("sent_") for col in active_cols)
 
     numeric_cols = feat_df.select_dtypes(include=[np.number]).columns
     assert not feat_df[numeric_cols].isna().any().any()
     assert np.isclose(float(feat_df["ret3"].iloc[0]), settings.fillna_value)
+
+
+def test_create_features_includes_sentiment_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    ts = pd.date_range("2024-01-01", periods=5, freq="1D", tz="UTC")
+    base = pd.DataFrame(
+        {
+            "timestamp": ts,
+            "open": 1.0,
+            "high": 1.5,
+            "low": 0.5,
+            "close": 1.1,
+            "volume": 100.0,
+            "quote_asset_volume": 200.0,
+            "taker_buy_base": 50.0,
+            "taker_buy_quote": 110.0,
+            "sent_score": [0.1, np.nan, 0.3, 0.4, 0.5],
+        }
+    )
+
+    settings = FeatureSettings(
+        include_onchain=False,
+        include_orderbook=False,
+        include_derivatives=False,
+        include_sentiment=True,
+        forward_fill_limit=0,
+        fillna_value=-1.0,
+    )
+
+    sentiment_enabled = CONFIG.sentiment.model_copy(update={"use_sentiment": True})
+    config_override = CONFIG.model_copy(update={"sentiment": sentiment_enabled})
+    monkeypatch.setattr(
+        "crypto_analyzer.features.engineering.CONFIG", config_override
+    )
+
+    feat_df = create_features(base, settings=settings)
+    assert "sent_score" in feat_df.columns
+    assert feat_df["sent_score"].dtype == np.float32
+    assert not feat_df["sent_score"].isna().any()
 
 
 def test_create_features_rejects_missing_columns():

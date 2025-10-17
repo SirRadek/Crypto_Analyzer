@@ -63,6 +63,8 @@ ONCHAIN_FEATURES = (
     "onch_diff_change_pct",
 )
 
+SENTIMENT_COLUMN_PREFIXES: tuple[str, ...] = ("sent_", "sentiment_")
+
 
 @dataclass(frozen=True)
 class FeatureColumnRegistry:
@@ -72,6 +74,7 @@ class FeatureColumnRegistry:
     orderbook: tuple[str, ...]
     derivatives: tuple[str, ...]
     onchain: tuple[str, ...]
+    sentiment: tuple[str, ...] = ()
 
     def active(self, settings: FeatureSettings) -> list[str]:
         """Return feature names enabled under *settings*."""
@@ -83,6 +86,8 @@ class FeatureColumnRegistry:
             columns.extend(self.derivatives)
         if settings.include_onchain:
             columns.extend(self.onchain)
+        if settings.include_sentiment and CONFIG.sentiment.use_sentiment:
+            columns.extend(self.sentiment)
         return columns
 
 
@@ -178,6 +183,7 @@ REGISTRY = FeatureColumnRegistry(
         "deriv_liq_to_oi",
     ),
     onchain=ONCHAIN_FEATURES,
+    sentiment=(),
 )
 
 
@@ -491,6 +497,23 @@ def create_features(
         drop_cols = [c for c in df.columns if c.startswith("onch_")]
         if drop_cols:
             df = df.drop(columns=drop_cols)
+
+    include_sentiment = bool(
+        settings.include_sentiment and CONFIG.sentiment.use_sentiment
+    )
+    sentiment_cols = [
+        c for c in df.columns if c.startswith(SENTIMENT_COLUMN_PREFIXES)
+    ]
+    if include_sentiment:
+        if sentiment_cols:
+            numeric_sentiment = df[sentiment_cols].apply(
+                pd.to_numeric, errors="coerce"
+            )
+            df[sentiment_cols] = (
+                numeric_sentiment.fillna(fill_value).astype(np.float32)
+            )
+    elif sentiment_cols:
+        df = df.drop(columns=sentiment_cols)
 
     ts = pd.to_datetime(df["timestamp"], utc=True)
     timeframe_info = _build_timeframe_info(ts, MULTI_TF_MINUTES)

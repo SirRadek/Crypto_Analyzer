@@ -49,6 +49,7 @@ def _configure_features(
     include_onchain: bool | None,
     include_orderbook: bool | None,
     include_derivatives: bool | None,
+    include_sentiment: bool | None,
 ) -> FeatureSettings:
     overrides: dict[str, bool] = {}
     if include_onchain is not None:
@@ -57,6 +58,8 @@ def _configure_features(
         overrides["include_orderbook"] = include_orderbook
     if include_derivatives is not None:
         overrides["include_derivatives"] = include_derivatives
+    if include_sentiment is not None:
+        overrides["include_sentiment"] = include_sentiment
     if overrides:
         settings = override_feature_settings(settings, **overrides)
     return settings
@@ -77,6 +80,7 @@ def _prepare_settings(
     include_onchain: Optional[bool],
     include_orderbook: Optional[bool],
     include_derivatives: Optional[bool],
+    include_sentiment: Optional[bool],
 ) -> FeatureSettings:
     settings = CONFIG.features
     if forward_fill_limit is not None or fillna_value is not None:
@@ -84,6 +88,7 @@ def _prepare_settings(
             include_onchain=settings.include_onchain,
             include_orderbook=settings.include_orderbook,
             include_derivatives=settings.include_derivatives,
+            include_sentiment=settings.include_sentiment,
             forward_fill_limit=
             forward_fill_limit if forward_fill_limit is not None else settings.forward_fill_limit,
             fillna_value=fillna_value if fillna_value is not None else settings.fillna_value,
@@ -93,6 +98,7 @@ def _prepare_settings(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
     )
 
 
@@ -136,8 +142,10 @@ def _generate_features(
     include_onchain: Optional[bool],
     include_orderbook: Optional[bool],
     include_derivatives: Optional[bool],
+    include_sentiment: Optional[bool],
     use_derivatives: bool,
     use_orderbook: bool,
+    use_sentiment: bool,
     run_id: str | None,
     dry_run: bool,
 ) -> Path:
@@ -146,6 +154,7 @@ def _generate_features(
 
     include_derivatives = True if use_derivatives else include_derivatives
     include_orderbook = True if use_orderbook else include_orderbook
+    include_sentiment = True if use_sentiment else include_sentiment
 
     settings = _prepare_settings(
         forward_fill_limit=forward_fill_limit,
@@ -153,6 +162,7 @@ def _generate_features(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
     )
 
     df = _load_price_data(source, path=input_path, symbol=symbol, db_path=db_path)
@@ -186,8 +196,10 @@ def _generate_features(
         "include_onchain": include_onchain,
         "include_orderbook": include_orderbook,
         "include_derivatives": include_derivatives,
+        "include_sentiment": include_sentiment,
         "use_derivatives": use_derivatives,
         "use_orderbook": use_orderbook,
+        "use_sentiment": use_sentiment,
         "run_id": run_id_value,
         "dry_run": dry_run,
     })
@@ -251,11 +263,19 @@ def main(
         "--include-derivatives/--exclude-derivatives",
         help="Override derivative features toggle.",
     ),
+    include_sentiment: Optional[bool] = typer.Option(
+        None,
+        "--include-sentiment/--exclude-sentiment",
+        help="Override sentiment features toggle.",
+    ),
     use_derivatives: bool = typer.Option(
         False, "--use-derivatives", help="Convenience flag to enable derivative features."
     ),
     use_orderbook: bool = typer.Option(
         False, "--use-orderbook", help="Convenience flag to enable orderbook features."
+    ),
+    use_sentiment: bool = typer.Option(
+        False, "--use-sentiment", help="Convenience flag to enable sentiment features."
     ),
     forward_fill_limit: Optional[int] = typer.Option(
         None, help="Override forward-fill window for NaN handling."
@@ -283,8 +303,10 @@ def main(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
         use_derivatives=use_derivatives,
         use_orderbook=use_orderbook,
+        use_sentiment=use_sentiment,
         run_id=run_id,
         dry_run=dry_run,
     )

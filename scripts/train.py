@@ -63,6 +63,7 @@ def _prepare_settings(
     include_onchain: Optional[bool],
     include_orderbook: Optional[bool],
     include_derivatives: Optional[bool],
+    include_sentiment: Optional[bool],
     forward_fill_limit: Optional[int],
     fillna_value: Optional[float],
 ) -> FeatureSettings:
@@ -74,6 +75,8 @@ def _prepare_settings(
         overrides["include_orderbook"] = include_orderbook
     if include_derivatives is not None:
         overrides["include_derivatives"] = include_derivatives
+    if include_sentiment is not None:
+        overrides["include_sentiment"] = include_sentiment
     if overrides:
         settings = override_feature_settings(settings, **overrides)
 
@@ -82,6 +85,7 @@ def _prepare_settings(
             include_onchain=settings.include_onchain,
             include_orderbook=settings.include_orderbook,
             include_derivatives=settings.include_derivatives,
+            include_sentiment=settings.include_sentiment,
             forward_fill_limit=(
                 forward_fill_limit
                 if forward_fill_limit is not None
@@ -378,6 +382,7 @@ def _run_training(
     include_onchain: Optional[bool],
     include_orderbook: Optional[bool],
     include_derivatives: Optional[bool],
+    include_sentiment: Optional[bool],
     forward_fill_limit: Optional[int],
     fillna_value: Optional[float],
     cv_strategy: Optional[str],
@@ -404,6 +409,7 @@ def _run_training(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
         forward_fill_limit=forward_fill_limit,
         fillna_value=fillna_value,
     )
@@ -612,6 +618,7 @@ def _run_training(
             "include_onchain": include_onchain,
             "include_orderbook": include_orderbook,
             "include_derivatives": include_derivatives,
+            "include_sentiment": include_sentiment,
             "forward_fill_limit": forward_fill_limit,
             "fillna_value": fillna_value,
             "cv_strategy": cv_strategy,
@@ -692,6 +699,11 @@ def main(
         "--include-derivatives/--exclude-derivatives",
         help="Override derivative features regardless of config defaults.",
     ),
+    include_sentiment: Optional[bool] = typer.Option(
+        None,
+        "--include-sentiment/--exclude-sentiment",
+        help="Override sentiment features regardless of config defaults.",
+    ),
     forward_fill_limit: Optional[int] = typer.Option(
         None, "--forward-fill-limit", help="Override forward-fill window for NaN handling."
     ),
@@ -739,6 +751,7 @@ def main(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
         forward_fill_limit=forward_fill_limit,
         fillna_value=fillna_value,
         cv_strategy=cv_normalised,

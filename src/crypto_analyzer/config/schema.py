@@ -43,6 +43,7 @@ class FeatureSettings(_BaseModel):
     include_onchain: bool = True
     include_orderbook: bool = True
     include_derivatives: bool = True
+    include_sentiment: bool = False
     forward_fill_limit: int = Field(default=12)
     fillna_value: float = 0.0
 
@@ -74,6 +75,12 @@ class OnChainSettings(_BaseModel):
     exchange_flow_path: Path | None = None
     request_timeout: int = Field(default=10, ge=0)
     request_retries: int = Field(default=5, ge=0)
+
+
+class SentimentSettings(_BaseModel):
+    use_sentiment: bool = False
+    sentiment_source: Literal["api", "csv"] = "api"
+    sentiment_api_key: str | None = None
 
 
 class CVSettings(_BaseModel):
@@ -115,6 +122,7 @@ class AppConfig(_BaseModel):
     database: DatabaseSettings
     runtime: RuntimeSettings
     features: FeatureSettings
+    sentiment: SentimentSettings
     models: ModelSettings
     backtest: BacktestSettings
     onchain: OnChainSettings
@@ -189,6 +197,7 @@ __all__ = [
     "FeatureSettings",
     "ModelSettings",
     "OnChainSettings",
+    "SentimentSettings",
     "OrderbookSettings",
     "RuntimeSettings",
 ]
