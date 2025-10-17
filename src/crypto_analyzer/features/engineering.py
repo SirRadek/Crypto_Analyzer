@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -317,6 +317,146 @@ def get_feature_columns(settings: FeatureSettings | None = None) -> list[str]:
     return _build_feature_columns(_resolve_feature_settings(settings))
 
 
+def add_orderflow_features(
+    df: pd.DataFrame,
+    *,
+    fill_value: np.float32,
+    timeframe_windows: Mapping[int, int],
+    timeframe_labels: Mapping[int, str],
+    supported_minutes: set[int],
+) -> pd.DataFrame:
+    """Compute order-flow and volume-derived features."""
+
+    vol = df["volume"].replace(0.0, np.nan)
+    qvol = df["quote_asset_volume"].replace(0.0, np.nan)
+
+    df["tbr_base"] = (df["taker_buy_base"] / vol).astype(np.float32)
+    tbr_quote = (df["taker_buy_quote"] / qvol).astype(np.float32)
+
+    df["ofi_base"] = (2.0 * df["tbr_base"] - 1.0).astype(np.float32)
+    df["ofi_quote"] = (2.0 * tbr_quote - 1.0).astype(np.float32)
+    df["d_tbr_base"] = df["tbr_base"].diff().astype(np.float32)
+    df["ema12_tbr_base"] = df["tbr_base"].ewm(span=12, adjust=False).mean().astype(np.float32)
+    df["z_volume"] = ((vol - vol.rolling(36).mean()) / vol.rolling(36).std()).astype(
+        np.float32
+    )
+
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"ofi_base_roll_{label}"] = np.float32(fill_value)
+            df[f"ofi_quote_roll_{label}"] = np.float32(fill_value)
+            df[f"tbr_base_roll_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        df[f"ofi_base_roll_{label}"] = (
+            df["ofi_base"].rolling(window).mean().astype(np.float32)
+        )
+        df[f"ofi_quote_roll_{label}"] = (
+            df["ofi_quote"].rolling(window).mean().astype(np.float32)
+        )
+        df[f"tbr_base_roll_{label}"] = (
+            df["tbr_base"].rolling(window).mean().astype(np.float32)
+        )
+
+    vwap = (qvol / vol).astype(np.float32)
+    df["rel_close_vwap"] = ((df["close"] - vwap).abs() / vwap).astype(np.float32)
+
+    denom = (df["volume"] - df["taker_buy_base"]).replace(0.0, np.nan)
+    df["taker_buy_sell_ratio"] = (df["taker_buy_base"] / denom).astype(np.float32)
+
+    return df
+
+
+def add_volatility_features(
+    df: pd.DataFrame,
+    *,
+    log_close: pd.Series,
+    ret1: pd.Series,
+    timeframe_windows: Mapping[int, int],
+    timeframe_labels: Mapping[int, str],
+    supported_minutes: set[int],
+    fill_value: np.float32,
+) -> pd.DataFrame:
+    """Compute momentum, volatility, and range-based features."""
+
+    df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
+
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"mom_log_ret_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        df[f"mom_log_ret_{label}"] = log_close.diff(window).astype(np.float32)
+
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"vol_realized_{label}"] = np.float32(fill_value)
+            df[f"vol_of_vol_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        realized = ret1.rolling(window).std()
+        df[f"vol_realized_{label}"] = realized.astype(np.float32)
+        vol_of_vol = realized.rolling(window).std()
+        df[f"vol_of_vol_{label}"] = vol_of_vol.astype(np.float32)
+
+    high = df["high"].replace(0.0, np.nan)
+    low = df["low"].replace(0.0, np.nan)
+    log_range = np.log(high / low).pow(2)
+    for minutes in MULTI_TF_MINUTES:
+        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
+        if minutes not in supported_minutes:
+            df[f"vol_range_parkinson_{label}"] = np.float32(fill_value)
+            continue
+        window = timeframe_windows[minutes]
+        pk_var = log_range.rolling(window).mean() * PARKINSON_CONST
+        df[f"vol_range_parkinson_{label}"] = np.sqrt(pk_var).astype(np.float32)
+
+    fast_span = max(2, timeframe_windows.get(1440, 2))
+    slow_span = max(fast_span + 1, timeframe_windows.get(10080, fast_span * 4))
+    fast_ema = df["close"].ewm(span=fast_span, adjust=False).mean()
+    slow_ema = df["close"].ewm(span=slow_span, adjust=False).mean()
+    denom = df["close"].replace(0.0, np.nan)
+    df["mom_microtrend_ema_ratio"] = ((fast_ema - slow_ema) / denom).astype(np.float32)
+
+    df["volatility_12d"] = ret1.rolling(12).std().astype(np.float32)
+
+    tr = pd.concat(
+        [
+            (df["high"] - df["low"]).astype(np.float32),
+            (df["high"] - df["close"].shift(1)).abs().astype(np.float32),
+            (df["low"] - df["close"].shift(1)).abs().astype(np.float32),
+        ],
+        axis=1,
+    ).max(axis=1)
+    df["atr14"] = tr.rolling(14).mean().astype(np.float32)
+
+    return df
+
+
+def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add cyclical time-of-day and calendar features."""
+
+    ts = df["timestamp"]
+    minute = ts.dt.hour * 60 + ts.dt.minute
+    df["tod_sin"] = np.sin(2.0 * np.pi * minute / 1440.0).astype(np.float32)
+    df["tod_cos"] = np.cos(2.0 * np.pi * minute / 1440.0).astype(np.float32)
+    is_day = ((ts.dt.hour >= 8) & (ts.dt.hour < 20)).astype(np.float32)
+    df["is_day"] = is_day
+    df["is_night"] = (1.0 - is_day).astype(np.float32)
+    is_weekend = (ts.dt.dayofweek >= 5).astype(np.float32)
+    df["is_weekend"] = is_weekend
+    df["is_weekday"] = (1.0 - is_weekend).astype(np.float32)
+    df["time_hour_sin"] = np.sin(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
+    df["time_hour_cos"] = np.cos(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
+    df["time_dow_sin"] = np.sin(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
+    df["time_dow_cos"] = np.cos(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
+
+    return df
+
+
 def create_features(
     df: pd.DataFrame, settings: FeatureSettings | None = None
 ) -> pd.DataFrame:
@@ -376,102 +516,33 @@ def create_features(
                 filled = grouped.ffill(limit=ffill_limit)
             df[onch_cols] = filled.fillna(fill_value).astype(np.float32)
 
-    # --- order-flow & volume --------------------------------------------------
-    vol = df["volume"].replace(0.0, np.nan)
-    qvol = df["quote_asset_volume"].replace(0.0, np.nan)
+    df = add_orderflow_features(
+        df,
+        fill_value=fill_value,
+        timeframe_windows=timeframe_windows,
+        timeframe_labels=timeframe_labels,
+        supported_minutes=supported_minutes,
+    )
 
-    df["tbr_base"] = (df["taker_buy_base"] / vol).astype(np.float32)
-    tbr_quote = (df["taker_buy_quote"] / qvol).astype(np.float32)
-
-    df["ofi_base"] = (2.0 * df["tbr_base"] - 1.0).astype(np.float32)
-    df["ofi_quote"] = (2.0 * tbr_quote - 1.0).astype(np.float32)
-    df["d_tbr_base"] = df["tbr_base"].diff().astype(np.float32)
-    df["ema12_tbr_base"] = df["tbr_base"].ewm(span=12, adjust=False).mean().astype(np.float32)
-    df["z_volume"] = ((vol - vol.rolling(36).mean()) / vol.rolling(36).std()).astype(np.float32)
-
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"ofi_base_roll_{label}"] = np.float32(fill_value)
-            df[f"ofi_quote_roll_{label}"] = np.float32(fill_value)
-            df[f"tbr_base_roll_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        df[f"ofi_base_roll_{label}"] = df["ofi_base"].rolling(window).mean().astype(np.float32)
-        df[f"ofi_quote_roll_{label}"] = df["ofi_quote"].rolling(window).mean().astype(np.float32)
-        df[f"tbr_base_roll_{label}"] = df["tbr_base"].rolling(window).mean().astype(np.float32)
-
-    # --- VWAP vztah ----------------------------------------------------------
-    vwap = (qvol / vol).astype(np.float32)
-    df["rel_close_vwap"] = ((df["close"] - vwap).abs() / vwap).astype(np.float32)
-
-    # --- výnosy & momentum ----------------------------------------------------
     safe_close = df["close"].replace(0.0, np.nan)
     log_close = np.log(safe_close)
     ret1 = log_close.diff().astype(np.float32)
-    df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
 
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"mom_log_ret_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        df[f"mom_log_ret_{label}"] = log_close.diff(window).astype(np.float32)
-
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"vol_realized_{label}"] = np.float32(fill_value)
-            df[f"vol_of_vol_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        realized = ret1.rolling(window).std()
-        df[f"vol_realized_{label}"] = realized.astype(np.float32)
-        vol_of_vol = realized.rolling(window).std()
-        df[f"vol_of_vol_{label}"] = vol_of_vol.astype(np.float32)
-
-    high = df["high"].replace(0.0, np.nan)
-    low = df["low"].replace(0.0, np.nan)
-    log_range = np.log(high / low).pow(2)
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"vol_range_parkinson_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        pk_var = log_range.rolling(window).mean() * PARKINSON_CONST
-        df[f"vol_range_parkinson_{label}"] = np.sqrt(pk_var).astype(np.float32)
-
-    fast_span = max(2, timeframe_windows.get(1440, 2))
-    slow_span = max(fast_span + 1, timeframe_windows.get(10080, fast_span * 4))
-    fast_ema = df["close"].ewm(span=fast_span, adjust=False).mean()
-    slow_ema = df["close"].ewm(span=slow_span, adjust=False).mean()
-    denom = df["close"].replace(0.0, np.nan)
-    df["mom_microtrend_ema_ratio"] = ((fast_ema - slow_ema) / denom).astype(np.float32)
+    df = add_volatility_features(
+        df,
+        log_close=log_close,
+        ret1=ret1,
+        timeframe_windows=timeframe_windows,
+        timeframe_labels=timeframe_labels,
+        supported_minutes=supported_minutes,
+        fill_value=fill_value,
+    )
 
     # --- begin minimal anti-fragmentation patch ---
     # původní logika přidávala rozsáhlé z-score a delta kopie téměř všech
     # sloupců. Pro novou minimalistickou sadu rysů je držíme vypnuté, aby
     # nedublovaly momentum/mean-reversion metriky.
     # --- end patch ---
-
-    # --- volatilita -----------------------------------------------------------
-    df["volatility_12d"] = ret1.rolling(12).std().astype(np.float32)
-
-    tr = pd.concat(
-        [
-            (df["high"] - df["low"]).astype(np.float32),
-            (df["high"] - df["close"].shift(1)).abs().astype(np.float32),
-            (df["low"] - df["close"].shift(1)).abs().astype(np.float32),
-        ],
-        axis=1,
-    ).max(axis=1)
-    df["atr14"] = tr.rolling(14).mean().astype(np.float32)
-
-    # --- další tržní signály --------------------------------------------------
-    denom = (df["volume"] - df["taker_buy_base"]).replace(0.0, np.nan)
-    df["taker_buy_sell_ratio"] = (df["taker_buy_base"] / denom).astype(np.float32)
 
     if settings.include_derivatives:
         if "basis_annualized" not in df.columns:
@@ -758,22 +829,7 @@ def create_features(
         if drop_lob:
             df = df.drop(columns=drop_lob, errors="ignore")
 
-    # --- časové rysy ----------------------------------------------------------
-    ts = df["timestamp"]
-    # očekává se tz-aware UTC; pokud ne, nechte jak je
-    minute = ts.dt.hour * 60 + ts.dt.minute
-    df["tod_sin"] = np.sin(2.0 * np.pi * minute / 1440.0).astype(np.float32)
-    df["tod_cos"] = np.cos(2.0 * np.pi * minute / 1440.0).astype(np.float32)
-    is_day = ((ts.dt.hour >= 8) & (ts.dt.hour < 20)).astype(np.float32)
-    df["is_day"] = is_day
-    df["is_night"] = (1.0 - is_day).astype(np.float32)
-    is_weekend = (ts.dt.dayofweek >= 5).astype(np.float32)
-    df["is_weekend"] = is_weekend
-    df["is_weekday"] = (1.0 - is_weekend).astype(np.float32)
-    df["time_hour_sin"] = np.sin(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
-    df["time_hour_cos"] = np.cos(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
-    df["time_dow_sin"] = np.sin(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
-    df["time_dow_cos"] = np.cos(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
+    df = add_time_features(df)
 
     # --- cross-asset features -------------------------------------------------
     corr_minutes = 43200
