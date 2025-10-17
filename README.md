@@ -104,6 +104,28 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+#### Windows: pandas build failure (`Could not parse vswhere.exe output`)
+
+On some Windows setups, installing the dependencies can fail while building
+`pandas` with a Meson error similar to:
+
+```
+ERROR: Could not parse vswhere.exe output
+```
+
+This means the Visual Studio build tooling that Meson relies on is missing or
+returns unexpected metadata. Resolve it by installing the "Desktop development
+with C++" workload from the
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+installer (this also installs a working `vswhere.exe`). After the build tools are
+installed, reopen your terminal so the new `%PATH%` is picked up and rerun
+`pip install -r requirements.txt`.
+
+If you prefer not to install the build toolchain, use
+`pip install pandas==2.2.2 --only-binary :all:` before installing the rest of
+the requirements to force pip to download the prebuilt wheel instead of
+compiling from source.
+
 ### 3. Development tooling
 
 Activate the virtual environment and install the development extras to get the linting,
