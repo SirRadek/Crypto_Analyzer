@@ -22,6 +22,7 @@ from crypto_analyzer.config.schema import (
     ModelSettings,
     OnChainSettings,
     OrderbookSettings,
+    SentimentSettings,
     RuntimeSettings,
 )
 from crypto_analyzer.utils.errors import ConfigError
@@ -193,17 +194,24 @@ def _build_runtime_settings(data: dict[str, Any]) -> RuntimeSettings:
     )
 
 
-def _build_feature_settings(data: dict[str, Any]) -> FeatureSettings:
+def _build_feature_settings(
+    data: dict[str, Any], sentiment: SentimentSettings | None = None
+) -> FeatureSettings:
     defaults = FeatureSettings()
+    default_sentiment = (
+        sentiment.use_sentiment if sentiment is not None else defaults.include_sentiment
+    )
     include_onchain = _as_bool(data.get("include_onchain"), defaults.include_onchain)
     include_orderbook = _as_bool(data.get("include_orderbook"), defaults.include_orderbook)
     include_derivatives = _as_bool(data.get("include_derivatives"), defaults.include_derivatives)
+    include_sentiment = _as_bool(data.get("include_sentiment"), default_sentiment)
     forward_fill_limit = _as_int(data.get("forward_fill_limit"), defaults.forward_fill_limit)
     fillna_value = _as_float(data.get("fillna_value"), defaults.fillna_value)
     return FeatureSettings(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
         forward_fill_limit=forward_fill_limit,
         fillna_value=fillna_value,
     )
@@ -331,13 +339,34 @@ def _build_orderbook_settings(data: dict[str, Any]) -> OrderbookSettings:
     return OrderbookSettings(depth_levels=depth_levels)
 
 
+def _build_sentiment_settings(data: dict[str, Any]) -> SentimentSettings:
+    defaults = SentimentSettings()
+    use_sentiment = _as_bool(data.get("use_sentiment"), defaults.use_sentiment)
+    source = _as_str(data.get("sentiment_source"), defaults.sentiment_source)
+    if source not in {"api", "csv"}:
+        source = defaults.sentiment_source
+    api_key_raw = data.get("sentiment_api_key")
+    if api_key_raw in (None, ""):
+        api_key = None
+    else:
+        api_key = str(api_key_raw)
+    return SentimentSettings(
+        use_sentiment=use_sentiment,
+        sentiment_source=source,  # type: ignore[arg-type]
+        sentiment_api_key=api_key,
+    )
+
+
 def _build_config() -> AppConfig:
     raw_config, path = _read_config_file()
     try:
         core = _build_core_settings(raw_config.get("core", {}))
         database = _build_database_settings(raw_config.get("database", {}))
         runtime = _build_runtime_settings(raw_config.get("runtime", {}))
-        features = _build_feature_settings(raw_config.get("features", {}))
+        sentiment = _build_sentiment_settings(raw_config.get("sentiment", {}))
+        features = _build_feature_settings(
+            raw_config.get("features", {}), sentiment=sentiment
+        )
         models = _build_model_settings(raw_config.get("models", {}))
         backtest = _build_backtest_settings(raw_config.get("backtest", {}))
         onchain = _build_onchain_settings(raw_config.get("onchain", {}), runtime)
@@ -360,6 +389,7 @@ def _build_config() -> AppConfig:
             database=database,
             runtime=runtime,
             features=features,
+            sentiment=sentiment,
             models=models,
             backtest=backtest,
             onchain=onchain,
@@ -386,6 +416,7 @@ def override_feature_settings(
     include_onchain: bool | None = None,
     include_orderbook: bool | None = None,
     include_derivatives: bool | None = None,
+    include_sentiment: bool | None = None,
     forward_fill_limit: int | None = None,
     fillna_value: float | None = None,
 ) -> FeatureSettings:
@@ -398,6 +429,8 @@ def override_feature_settings(
         updates["include_orderbook"] = bool(include_orderbook)
     if include_derivatives is not None:
         updates["include_derivatives"] = bool(include_derivatives)
+    if include_sentiment is not None:
+        updates["include_sentiment"] = bool(include_sentiment)
     if forward_fill_limit is not None:
         updates["forward_fill_limit"] = int(forward_fill_limit)
     if fillna_value is not None:
@@ -422,6 +455,7 @@ __all__ = [
     "FeatureSettings",
     "ModelSettings",
     "OnChainSettings",
+    "SentimentSettings",
     "RuntimeSettings",
     "override_feature_settings",
     "config_to_dict",

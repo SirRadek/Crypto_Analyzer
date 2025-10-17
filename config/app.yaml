@@ -24,8 +24,14 @@ features:
   include_onchain: true
   include_orderbook: false
   include_derivatives: true
+  include_sentiment: false
   forward_fill_limit: 12
   fillna_value: 0.0
+
+sentiment:
+  use_sentiment: false
+  sentiment_source: api
+  sentiment_api_key: ""
 
 models:
   directory: artifacts/models

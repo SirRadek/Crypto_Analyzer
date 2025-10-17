@@ -45,10 +45,17 @@ features:
   include_onchain: true
   include_orderbook: true
   include_derivatives: true
+  include_sentiment: false
   # Maximum number of forward-fill steps for sparse series
   forward_fill_limit: 12
   # Value used to replace remaining NaNs after preprocessing
   fillna_value: 0.0
+
+sentiment:
+  # Control ingestion of external sentiment data
+  use_sentiment: false
+  sentiment_source: api
+  sentiment_api_key: ""
 
 models:
   # Directory storing trained base and meta-model artefacts

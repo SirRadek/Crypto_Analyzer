@@ -57,6 +57,7 @@ def _prepare_settings(
     include_onchain: bool | None,
     include_orderbook: bool | None,
     include_derivatives: bool | None,
+    include_sentiment: bool | None,
 ) -> FeatureSettings:
     settings = CONFIG.features
     overrides: dict[str, Any] = {}
@@ -66,6 +67,8 @@ def _prepare_settings(
         overrides["include_orderbook"] = include_orderbook
     if include_derivatives is not None:
         overrides["include_derivatives"] = include_derivatives
+    if include_sentiment is not None:
+        overrides["include_sentiment"] = include_sentiment
     if overrides:
         settings = override_feature_settings(settings, **overrides)
     return settings
@@ -125,6 +128,7 @@ def _execute_ablation(
     include_onchain: Optional[bool],
     include_orderbook: Optional[bool],
     include_derivatives: Optional[bool],
+    include_sentiment: Optional[bool],
     dry_run: bool,
 ) -> Path:
     if horizon <= 0:
@@ -134,6 +138,7 @@ def _execute_ablation(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
     )
     df = _load_features(
         features_path=features,
@@ -260,6 +265,7 @@ def _execute_ablation(
         "include_onchain": include_onchain,
         "include_orderbook": include_orderbook,
         "include_derivatives": include_derivatives,
+        "include_sentiment": include_sentiment,
         "label": label,
         "features_path": str(features) if features else None,
         "symbol": symbol,
@@ -320,6 +326,11 @@ def main(
         "--include-derivatives/--exclude-derivatives",
         help="Override derivative features toggle.",
     ),
+    include_sentiment: Optional[bool] = typer.Option(
+        None,
+        "--include-sentiment/--exclude-sentiment",
+        help="Override sentiment features toggle.",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
 ) -> None:
     _execute_ablation(
@@ -332,6 +343,7 @@ def main(
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
+        include_sentiment=include_sentiment,
         dry_run=dry_run,
     )
 
