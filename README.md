@@ -24,10 +24,11 @@ forward-filled so that the feature timestamp never exceeds the candle open.
 
 ### Derivátová data
 
-Enable the derivative enrichments while generating features:
+Derivative enrichments are enabled in `config/app.yaml` and can be toggled per
+invocation via the new Typer options:
 
 ```bash
-python scripts/make_features.py --use_derivatives
+python scripts/make_features.py --include-derivatives
 ```
 
 The loader expects either the columns to be present in the raw OHLCV source or
@@ -42,10 +43,11 @@ produced after left-label alignment:
 
 ### Order book signály
 
-Depth snapshots a event stream lze zapojit přes praktický přepínač:
+Depth snapshots a event stream lze zapojit přímo přes konfiguraci a také pomocí
+CLI přepínače:
 
 ```bash
-python scripts/make_features.py --use_orderbook
+python scripts/make_features.py --include-orderbook
 ```
 
 Při zpracování se používá stejná left-label resampling logika – order book depth
@@ -212,10 +214,18 @@ is intended to be scheduled via `cron`.
 ### 7. Run analysis and prediction
 
 ```bash
-python scripts/make_features.py --output data/features.parquet
+python scripts/make_features.py --output data/features.parquet --store auto
 python scripts/train.py --features data/features.parquet --model-path artifacts/meta_model.joblib
 python scripts/backtest.py data/predictions.csv --equity-output reports/equity.csv
+python scripts/predict.py --model-path artifacts/meta_model.joblib --dry-run
 ```
+
+The CLI entry points automatically select the configured data store, but you can
+explicitně choose a backend via `--store sqlite` nebo `--store timescale` when
+working with multiple environments. The `predict.py` helper loads the most
+recent candles, engineers features and reports the probability of an upward
+move using the trained meta-model, making it convenient to embed in cron jobs
+or notebooks.
 
 Cost-aware backtest with latency and probability gates:
 

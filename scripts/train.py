@@ -7,7 +7,7 @@ from __future__ import annotations
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import joblib
 import numpy as np
@@ -17,7 +17,7 @@ from sklearn import metrics
 
 import typer
 
-from crypto_analyzer.data.db_connector import get_price_data
+from crypto_analyzer.data.store import PriceDataStore, resolve_data_store
 from crypto_analyzer.features.engineering import (
     FEATURE_COLUMNS,
     create_features,
@@ -102,7 +102,7 @@ def _load_features(
     *,
     features: Optional[Path],
     symbol: str,
-    db_path: Path,
+    data_store: PriceDataStore | None,
     settings: FeatureSettings,
 ) -> pd.DataFrame:
     if features is not None:
@@ -111,7 +111,9 @@ def _load_features(
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         return df
 
-    raw = get_price_data(symbol, db_path=db_path)
+    if data_store is None:
+        raise DataValidationError("Database store is required when --features is not provided")
+    raw = data_store.fetch_prices(symbol)
     return create_features(raw, settings=settings)
 
 
@@ -371,7 +373,7 @@ def _run_training(
     *,
     features: Optional[Path],
     symbol: str,
-    db_path: Path,
+    data_store: PriceDataStore | None,
     horizon: int,
     label: Optional[str],
     model_path: Path,
@@ -416,7 +418,7 @@ def _run_training(
     df = _load_features(
         features=features,
         symbol=symbol,
-        db_path=db_path,
+        data_store=data_store,
         settings=settings,
     )
 
@@ -604,10 +606,19 @@ def _run_training(
         if not reliability_copy.exists():
             reliability_copy.write_bytes(Path(reliability_path).read_bytes())
 
+        store_label = getattr(data_store, "label", None)
+        if store_label == "sqlite":
+            store_location = str(getattr(data_store, "path", None))
+        elif store_label == "timescale":
+            store_location = getattr(data_store, "url", None)
+        else:
+            store_location = None
+
         args_snapshot = {
             "features": features,
             "symbol": symbol,
-            "db_path": db_path,
+            "data_store": store_label,
+            "store_location": store_location,
             "horizon": horizon,
             "label": label,
             "model_path": model_path,
@@ -663,14 +674,24 @@ def main(
         help="Optional engineered feature table (CSV/Parquet).",
     ),
     symbol: str = typer.Option(CONFIG.symbol, "--symbol", help="Trading symbol used when sourcing data."),
-    db_path: Path = typer.Option(
+    store_choice: Literal["auto", "sqlite", "timescale"] = typer.Option(
+        "auto",
+        "--store",
+        help="Database backend to use when sourcing raw candles (auto follows config).",
+    ),
+    db_path: Path | None = typer.Option(
         CONFIG.db_path,
         "--db-path",
         exists=False,
         file_okay=True,
         dir_okay=False,
         resolve_path=True,
-        help="SQLite database file to read raw price data from.",
+        help="Override SQLite database path when using the local store.",
+    ),
+    db_url: str | None = typer.Option(
+        CONFIG.db_url,
+        "--db-url",
+        help="Override SQLAlchemy URL when using Timescale/PostgreSQL.",
     ),
     horizon: int = typer.Option(120, "--horizon", help="Target horizon in minutes for label generation."),
     label: Optional[str] = typer.Option(None, "--label", help="Existing label column to use."),
@@ -737,10 +758,18 @@ def main(
 ) -> None:
     cv_normalised = cv_strategy.lower() if cv_strategy else None
     calibration_normalised = calibration.lower()
+    data_store: PriceDataStore | None = None
+    if features is None:
+        data_store = resolve_data_store(
+            store_choice,
+            sqlite_path=db_path,
+            timescale_url=db_url,
+        )
+
     _run_training(
         features=features,
         symbol=symbol,
-        db_path=db_path,
+        data_store=data_store,
         horizon=horizon,
         label=label,
         model_path=model_path,

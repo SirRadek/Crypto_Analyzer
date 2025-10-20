@@ -8,7 +8,7 @@ from typing import Any, Literal, Optional
 import pandas as pd
 import typer
 
-from crypto_analyzer.data.db_connector import get_price_data
+from crypto_analyzer.data.store import PriceDataStore, resolve_data_store
 from crypto_analyzer.features.engineering import create_features
 from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
 from crypto_analyzer.utils.cli import run_cli
@@ -26,10 +26,12 @@ def _load_price_data(
     *,
     path: Path | None,
     symbol: str,
-    db_path: Path,
+    data_store: PriceDataStore | None,
 ) -> pd.DataFrame:
     if source == "db":
-        return get_price_data(symbol, db_path=db_path)
+        if data_store is None:
+            raise DataValidationError("Database source requested but no data store was configured")
+        return data_store.fetch_prices(symbol)
     if path is None:
         raise DataValidationError("--input must be provided when --source=file")
     if not path.exists():
@@ -136,25 +138,18 @@ def _generate_features(
     output: Path,
     fmt: Literal["parquet", "csv"],
     symbol: str,
-    db_path: Path,
+    data_store: PriceDataStore | None,
     forward_fill_limit: Optional[int],
     fillna_value: Optional[float],
     include_onchain: Optional[bool],
     include_orderbook: Optional[bool],
     include_derivatives: Optional[bool],
     include_sentiment: Optional[bool],
-    use_derivatives: bool,
-    use_orderbook: bool,
-    use_sentiment: bool,
     run_id: str | None,
     dry_run: bool,
 ) -> Path:
     if forward_fill_limit is not None and forward_fill_limit < 0:
         raise DataValidationError("--forward-fill-limit must be non-negative")
-
-    include_derivatives = True if use_derivatives else include_derivatives
-    include_orderbook = True if use_orderbook else include_orderbook
-    include_sentiment = True if use_sentiment else include_sentiment
 
     settings = _prepare_settings(
         forward_fill_limit=forward_fill_limit,
@@ -165,7 +160,7 @@ def _generate_features(
         include_sentiment=include_sentiment,
     )
 
-    df = _load_price_data(source, path=input_path, symbol=symbol, db_path=db_path)
+    df = _load_price_data(source, path=input_path, symbol=symbol, data_store=data_store)
     feature_df = create_features(df, settings=settings)
 
     run_id_value, run_dir, _ = initialize_run(run_id, deterministic_torch=False)
@@ -184,25 +179,34 @@ def _generate_features(
     if target_output != run_output:
         _write_output(feature_df, target_output, fmt)
 
-    _persist_metadata(run_id_value, {
-        "source": source,
-        "input": input_path,
-        "output": output,
-        "format": fmt,
-        "symbol": symbol,
-        "db_path": db_path,
-        "forward_fill_limit": forward_fill_limit,
-        "fillna_value": fillna_value,
-        "include_onchain": include_onchain,
-        "include_orderbook": include_orderbook,
-        "include_derivatives": include_derivatives,
-        "include_sentiment": include_sentiment,
-        "use_derivatives": use_derivatives,
-        "use_orderbook": use_orderbook,
-        "use_sentiment": use_sentiment,
-        "run_id": run_id_value,
-        "dry_run": dry_run,
-    })
+    store_label = getattr(data_store, "label", None)
+    if store_label == "sqlite":
+        store_location = str(getattr(data_store, "path", None))
+    elif store_label == "timescale":
+        store_location = getattr(data_store, "url", None)
+    else:
+        store_location = None
+
+    _persist_metadata(
+        run_id_value,
+        {
+            "source": source,
+            "input": input_path,
+            "output": output,
+            "format": fmt,
+            "symbol": symbol,
+            "data_store": store_label,
+            "store_location": store_location,
+            "forward_fill_limit": forward_fill_limit,
+            "fillna_value": fillna_value,
+            "include_onchain": include_onchain,
+            "include_orderbook": include_orderbook,
+            "include_derivatives": include_derivatives,
+            "include_sentiment": include_sentiment,
+            "run_id": run_id_value,
+            "dry_run": dry_run,
+        },
+    )
 
     logger.info(
         "Persisted engineered features",
@@ -238,7 +242,12 @@ def main(
         "parquet", "--format", help="Output file format."
     ),
     symbol: str = typer.Option(CONFIG.symbol, "--symbol", help="Trading symbol to load."),
-    db_path: Path = typer.Option(
+    store_choice: Literal["auto", "sqlite", "timescale"] = typer.Option(
+        "auto",
+        "--store",
+        help="Database backend to use when --source=db. 'auto' follows config defaults.",
+    ),
+    db_path: Path | None = typer.Option(
         CONFIG.db_path,
         "--db-path",
         exists=False,
@@ -246,7 +255,12 @@ def main(
         dir_okay=False,
         readable=True,
         resolve_path=True,
-        help="SQLite database path when source=db.",
+        help="Override SQLite database path when using the local store.",
+    ),
+    db_url: str | None = typer.Option(
+        CONFIG.db_url,
+        "--db-url",
+        help="Override SQLAlchemy URL for Timescale/PostgreSQL connections.",
     ),
     include_onchain: Optional[bool] = typer.Option(
         None,
@@ -268,15 +282,6 @@ def main(
         "--include-sentiment/--exclude-sentiment",
         help="Override sentiment features toggle.",
     ),
-    use_derivatives: bool = typer.Option(
-        False, "--use-derivatives", help="Convenience flag to enable derivative features."
-    ),
-    use_orderbook: bool = typer.Option(
-        False, "--use-orderbook", help="Convenience flag to enable orderbook features."
-    ),
-    use_sentiment: bool = typer.Option(
-        False, "--use-sentiment", help="Convenience flag to enable sentiment features."
-    ),
     forward_fill_limit: Optional[int] = typer.Option(
         None, help="Override forward-fill window for NaN handling."
     ),
@@ -291,22 +296,27 @@ def main(
     if source == "db" and input_path is not None:
         typer.secho("Ignoring --input because --source=db", fg=typer.colors.YELLOW)
 
+    data_store: PriceDataStore | None = None
+    if source == "db":
+        data_store = resolve_data_store(
+            store_choice,
+            sqlite_path=db_path,
+            timescale_url=db_url,
+        )
+
     _generate_features(
         source=source,
         input_path=input_path,
         output=output,
         fmt=fmt,
         symbol=symbol,
-        db_path=db_path,
+        data_store=data_store,
         forward_fill_limit=forward_fill_limit,
         fillna_value=fillna_value,
         include_onchain=include_onchain,
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
         include_sentiment=include_sentiment,
-        use_derivatives=use_derivatives,
-        use_orderbook=use_orderbook,
-        use_sentiment=use_sentiment,
         run_id=run_id,
         dry_run=dry_run,
     )
