@@ -3,11 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable
 
-import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -15,6 +13,7 @@ from sklearn.model_selection import train_test_split
 
 from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.model_manager import atomic_write
+from crypto_analyzer.models.core import XGBoostModel
 from crypto_analyzer.models.calibration import (
     fit_isotonic,
     fit_platt,
@@ -35,13 +34,6 @@ def _to_f32(X) -> pd.DataFrame | np.ndarray:
     if isinstance(X, pd.DataFrame):
         return X.astype("float32", copy=False)
     return np.asarray(X, dtype=np.float32)
-
-
-def _fit_no_es(clf: xgb.XGBClassifier, X_train, y_train, X_val, y_val) -> None:
-    """Trénink bez early stoppingu pro verze XGBoostu bez podpory ES ve sklearn wrapperu."""
-    clf.fit(X_train, y_train, eval_set=[(X_val, y_val)])
-
-
 def train_model(
     X,
     y,
@@ -70,7 +62,7 @@ def train_model(
 
     Returns
     -------
-    xgb.XGBClassifier
+    XGBoostModel
         Trained model.
     """
     if random_state is None:
@@ -163,18 +155,13 @@ def train_model(
             X_val = _to_f32(features.iloc[test_idx])
             y_val = y_series.iloc[test_idx]
 
-            clf = xgb.XGBClassifier(**base_params)
-            try:
-                _fit_no_es(clf, X_train, y_train, X_val, y_val)
-            except xgb.core.XGBoostError:
-                logger.warning("CUDA not available or failed. Falling back to CPU.")
-                clf.set_params(tree_method="hist", predictor="cpu_predictor")
-                _fit_no_es(clf, X_train, y_train, X_val, y_val)
+            model = XGBoostModel(params=dict(base_params), use_gpu=use_gpu)
+            model.train(X_train, y_train)
 
-            acc, f1 = evaluate_model(clf, X_val, y_val)
+            acc, f1 = evaluate_model(model, X_val, y_val)
             fold_metrics.append({"fold": fold, "accuracy": acc, "f1": f1})
 
-            preds = clf.predict(X_val)
+            preds = model.predict(X_val)
             preds_frames.append(
                 pd.DataFrame(
                     {"fold": fold, "y_true": y_val, "y_pred": preds},
@@ -201,19 +188,13 @@ def train_model(
 
         X_full = _to_f32(features)
         y_full = y_series
-        clf = xgb.XGBClassifier(**base_params)
-        try:
-            _fit_no_es(clf, X_full, y_full, X_full, y_full)
-        except xgb.core.XGBoostError:
-            logger.warning("CUDA not available or failed. Falling back to CPU.")
-            clf.set_params(tree_method="hist", predictor="cpu_predictor")
-            _fit_no_es(clf, X_full, y_full, X_full, y_full)
-
-        buffer = BytesIO()
-        joblib.dump(clf, buffer)
-        atomic_write(Path(model_path), buffer.getvalue())
+        final_model = XGBoostModel(
+            params=dict(base_params), use_gpu=use_gpu, model_path=model_path
+        )
+        final_model.train(X_full, y_full)
+        final_model.save(model_path)
         logger.info("Model saved to %s", model_path)
-        return clf
+        return final_model
 
     if cv is not None:
         raise ValueError(f"Unsupported CV strategy: {cv}")
@@ -242,18 +223,13 @@ def train_model(
             X_val = _to_f32(features.iloc[test_idx])
             y_val = y_series.iloc[test_idx]
 
-            clf = xgb.XGBClassifier(**base_params)
-            try:
-                _fit_no_es(clf, X_train, y_train, X_val, y_val)
-            except xgb.core.XGBoostError:
-                logger.warning("CUDA not available or failed. Falling back to CPU.")
-                clf.set_params(tree_method="hist", predictor="cpu_predictor")
-                _fit_no_es(clf, X_train, y_train, X_val, y_val)
+            model = XGBoostModel(params=dict(base_params), use_gpu=use_gpu)
+            model.train(X_train, y_train)
 
-            acc, f1 = evaluate_model(clf, X_val, y_val)
+            acc, f1 = evaluate_model(model, X_val, y_val)
             fold_metrics.append({"fold": fold, "accuracy": acc, "f1": f1})
 
-            preds = clf.predict(X_val)
+            preds = model.predict(X_val)
             preds_frames.append(
                 pd.DataFrame(
                     {"fold": fold, "y_true": y_val, "y_pred": preds},
@@ -274,19 +250,13 @@ def train_model(
         # finální model natrénujeme na všech datech
         X_full = _to_f32(features)
         y_full = y_series
-        clf = xgb.XGBClassifier(**base_params)
-        try:
-            _fit_no_es(clf, X_full, y_full, X_full, y_full)
-        except xgb.core.XGBoostError:
-            logger.warning("CUDA not available or failed. Falling back to CPU.")
-            clf.set_params(tree_method="hist", predictor="cpu_predictor")
-            _fit_no_es(clf, X_full, y_full, X_full, y_full)
-
-        buffer = BytesIO()
-        joblib.dump(clf, buffer)
-        atomic_write(Path(model_path), buffer.getvalue())
+        final_model = XGBoostModel(
+            params=dict(base_params), use_gpu=use_gpu, model_path=model_path
+        )
+        final_model.train(X_full, y_full)
+        final_model.save(model_path)
         logger.info("Model saved to %s", model_path)
-        return clf
+        return final_model
 
     # --- defaultní holdout split ---------------------------------------------
 
@@ -305,24 +275,15 @@ def train_model(
         X_train = _to_f32(X_train)
         X_val = _to_f32(X_val)
 
-    clf = xgb.XGBClassifier(**base_params)
-
-    # Primární pokus na GPU → fallback CPU při chybě
-    try:
-        _fit_no_es(clf, X_train, y_train, X_val, y_val)
-    except xgb.core.XGBoostError:
-        logger.warning("CUDA not available or failed. Falling back to CPU.")
-        clf.set_params(tree_method="hist", predictor="cpu_predictor")
-        _fit_no_es(clf, X_train, y_train, X_val, y_val)
+    model = XGBoostModel(params=dict(base_params), use_gpu=use_gpu, model_path=model_path)
+    model.train(X_train, y_train)
 
     # Vyhodnocení a uložení
-    evaluate_model(clf, X_val, y_val)
+    evaluate_model(model, X_val, y_val)
 
-    buffer = BytesIO()
-    joblib.dump(clf, buffer)
-    atomic_write(Path(model_path), buffer.getvalue())
+    model.save(model_path)
     logger.info("Model saved to %s", model_path)
-    return clf
+    return model
 
 
 def load_model(model_path: str = MODEL_PATH):
@@ -335,13 +296,13 @@ def load_model(model_path: str = MODEL_PATH):
 
     Returns
     -------
-    Any
-        Loaded object.
+    XGBoostModel
+        Loaded model instance.
     """
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No model found at {model_path}")
-    return joblib.load(model_path)
+    return XGBoostModel.load(model_path)
 
 
 # ---------------------------------------------------------------------------
