@@ -230,6 +230,12 @@ class XGBoostModel(BaseModel):
             else:
                 raise
 
+    def _predict(self, estimator: Any, X: np.ndarray) -> np.ndarray:
+        """Preserve the classifier's discrete predictions for evaluation."""
+
+        predictions = estimator.predict(X)
+        return np.asarray(predictions).ravel()
+
 
 class EnsembleModel(BaseModel):
     """Aggregate predictions of multiple :class:`BaseModel` instances."""
