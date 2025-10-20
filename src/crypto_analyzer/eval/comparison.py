@@ -1,31 +1,31 @@
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
 
+from sqlalchemy import select, text
+
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.helpers import get_logger
+from crypto_analyzer.data.db_connector import PRICES_TABLE, get_engine
 
 logger = get_logger(__name__)
 
 
-def _build_prices_query(symbol: str, target_times: Iterable[int]) -> tuple[str, list[int]]:
-    """Return SQL query and parameters for the prices lookup."""
+def _build_prices_query(symbol: str, target_times: Iterable[int]):
+    """Return a parametrised SQLAlchemy statement for the prices lookup."""
 
     unique_times = sorted({int(ts) for ts in target_times})
     if not unique_times:
-        return "SELECT NULL AS ts_ms, NULL AS close WHERE 0", []
+        return select(text("NULL AS ts_ms"), text("NULL AS close")).where(text("0=1"))
 
-    placeholders = ",".join("?" for _ in unique_times)
-    query = (
-        "SELECT open_time AS ts_ms, close FROM prices "
-        f"WHERE symbol = ? AND open_time IN ({placeholders})"
+    return (
+        select(PRICES_TABLE.c.open_time.label("ts_ms"), PRICES_TABLE.c.close)
+        .where(PRICES_TABLE.c.symbol == symbol)
+        .where(PRICES_TABLE.c.open_time.in_(unique_times))
     )
-    params = [symbol, *unique_times]
-    return query, params
 
 
 def backfill_actuals_and_errors(
@@ -39,22 +39,25 @@ def backfill_actuals_and_errors(
     memory usage small even for large tables.
     """
 
-    with sqlite3.connect(str(db_path)) as conn:
+    engine = get_engine(db_path)
+    with engine.begin() as conn:
         preds = pd.read_sql(
-            f"""
-            SELECT id, target_time_ms, p_hat
-            FROM {table_pred}
-            WHERE y_true_hat IS NULL AND symbol = ?
-            """,
+            text(
+                f"""
+                SELECT id, target_time_ms, p_hat
+                FROM {table_pred}
+                WHERE y_true_hat IS NULL AND symbol = :symbol
+                """
+            ),
             conn,
-            params=(symbol,),
+            params={"symbol": symbol},
         ).dropna(subset=["target_time_ms"])
         if preds.empty:
             logger.info("No predictions to backfill")
             return
 
-        query, params = _build_prices_query(symbol, preds["target_time_ms"].to_list())
-        actuals = pd.read_sql(query, conn, params=params)
+        query = _build_prices_query(symbol, preds["target_time_ms"].to_list())
+        actuals = pd.read_sql(query, conn)
 
         merged = preds.merge(
             actuals,
@@ -64,7 +67,11 @@ def backfill_actuals_and_errors(
         ).rename(columns={"close": "y_true_hat"})
 
         updates = [
-            (float(row.y_true_hat), float(abs(row.p_hat - row.y_true_hat)), int(row.id))
+            {
+                "y_true_hat": float(row.y_true_hat),
+                "abs_error": float(abs(row.p_hat - row.y_true_hat)),
+                "id": int(row.id),
+            }
             for row in merged.itertuples(index=False)
             if pd.notna(row.y_true_hat)
         ]
@@ -72,9 +79,14 @@ def backfill_actuals_and_errors(
             logger.info("No matching price data found for pending predictions")
             return
 
-        conn.executemany(
-            f"UPDATE {table_pred} SET y_true_hat = ?, abs_error = ? WHERE id = ?",
+        conn.execute(
+            text(
+                f"""
+                UPDATE {table_pred}
+                SET y_true_hat = :y_true_hat, abs_error = :abs_error
+                WHERE id = :id
+                """
+            ),
             updates,
         )
-        conn.commit()
         logger.info("Backfill complete")

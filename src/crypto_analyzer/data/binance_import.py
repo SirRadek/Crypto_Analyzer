@@ -1,4 +1,3 @@
-import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,11 +6,17 @@ import requests
 
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.helpers import ensure_dir_exists, get_logger
+from crypto_analyzer.data.db_connector import (
+    get_latest_open_time,
+    init_timescale,
+    save_to_db,
+)
 
 logger = get_logger(__name__)
 
 DB_PATH = Path(CONFIG.db_path)
 ensure_dir_exists(DB_PATH.parent)
+DB_TARGET = getattr(CONFIG, "db_url", None) or str(DB_PATH)
 TABLE_NAME = "prices"
 SYMBOL = CONFIG.symbol
 INTERVAL = CONFIG.interval
@@ -35,56 +40,7 @@ def get_klines(symbol, interval, start_ts, end_ts, limit=1000):
     return response.json()
 
 def create_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        f"""
-    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-        open_time INTEGER PRIMARY KEY,
-        symbol TEXT,
-        interval TEXT,
-        open REAL,
-        high REAL,
-        low REAL,
-        close REAL,
-        volume REAL,
-        close_time INTEGER,
-        quote_asset_volume REAL,
-        number_of_trades INTEGER,
-        taker_buy_base REAL,
-        taker_buy_quote REAL
-    )"""
-    )
-    conn.commit()
-    conn.close()
-
-def save_to_db(rows, symbol, interval):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    for row in rows:
-        c.execute(
-            f"""
-        INSERT OR IGNORE INTO {TABLE_NAME}
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                int(row[0]),
-                symbol,
-                interval,
-                float(row[1]),
-                float(row[2]),
-                float(row[3]),
-                float(row[4]),
-                float(row[5]),
-                int(row[6]),
-                float(row[7]),
-                int(row[8]),
-                float(row[9]),
-                float(row[10]),
-            ),
-        )
-    conn.commit()
-    conn.close()
+    init_timescale()
 
 def import_latest_data():
     create_db()
@@ -95,13 +51,7 @@ def import_latest_data():
     lookback_ts = int((now_utc - timedelta(days=LOOKBACK_DAYS)).timestamp() * 1000)
 
     # pokračuj od posledního záznamu, ale nikdy ne dřív než lookback
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(f"SELECT MAX(open_time) FROM {TABLE_NAME}")
-    row = cur.fetchone()
-    conn.close()
-
-    last_db_ts = row[0] if row and row[0] is not None else None
+    last_db_ts = get_latest_open_time(symbol=SYMBOL, interval=INTERVAL)
     if last_db_ts is None:
         start_ts = lookback_ts
     else:
@@ -130,7 +80,7 @@ def import_latest_data():
         curr_ts = klines[-1][0] + 1
         time.sleep(0.4)
 
-    logger.info("Import hotov", extra={"db_path": str(DB_PATH)})
+    logger.info("Import hotov", extra={"db_target": DB_TARGET})
 
 def main():
     import_latest_data()

@@ -150,6 +150,7 @@ def _build_core_settings(data: dict[str, Any]) -> CoreSettings:
 def _build_database_settings(data: dict[str, Any]) -> DatabaseSettings:
     defaults = DatabaseSettings()
     db_path = os.getenv("DB_PATH") or _as_str(data.get("price_store"), str(defaults.price_store))
+    db_url = os.getenv("DATABASE_URL") or _as_str(data.get("url"), defaults.url)
     table_pred = os.getenv("TABLE_PRED") or _as_str(
         data.get("predictions_table"), defaults.predictions_table
     )
@@ -161,12 +162,17 @@ def _build_database_settings(data: dict[str, Any]) -> DatabaseSettings:
         else defaults.feature_store
     )
     read_chunksize = _as_int(data.get("read_chunksize"), defaults.read_chunksize)
+    pool_size = _as_int(os.getenv("DB_POOL_SIZE"), defaults.pool_size)
+    max_overflow = _as_int(os.getenv("DB_MAX_OVERFLOW"), defaults.max_overflow)
     return DatabaseSettings(
         price_store=Path(db_path),
+        url=db_url,
         predictions_table=table_pred,
         onchain_table=onchain_table,
         feature_store=Path(feature_store) if feature_store else None,
         read_chunksize=read_chunksize,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
     )
 
 

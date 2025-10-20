@@ -17,6 +17,8 @@ core:
 database:
   # Primary SQLite database containing OHLCV candles
   price_store: data/crypto_data.sqlite
+  # Optional SQLAlchemy connection URL (e.g. postgresql+psycopg://user:pass@host/db)
+  url: null
   # Table for persisting model predictions
   predictions_table: predictions
   # Table containing on-chain metrics aligned to the candle grid
@@ -25,6 +27,9 @@ database:
   feature_store: null
   # Chunk size used when streaming large tables from disk
   read_chunksize: 100000
+  # Connection pool sizing when using SQLAlchemy engines
+  pool_size: 5
+  max_overflow: 10
 
 runtime:
   # Maximum number of CPU cores to use (integer or "auto" for all available)

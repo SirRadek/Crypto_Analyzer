@@ -24,10 +24,13 @@ class CoreSettings(_BaseModel):
 
 class DatabaseSettings(_BaseModel):
     price_store: Path = Path("data/crypto_data.sqlite")
+    url: str | None = None
     predictions_table: str = "predictions"
     onchain_table: str = "onchain_1d"
     feature_store: Path | None = None
     read_chunksize: int = Field(default=100_000, ge=1)
+    pool_size: int = Field(default=5, ge=1)
+    max_overflow: int = Field(default=10, ge=0)
 
 
 class RuntimeSettings(_BaseModel):
@@ -171,6 +174,10 @@ class AppConfig(_BaseModel):
     @property
     def db_path(self) -> Path:
         return self.database.price_store
+
+    @property
+    def db_url(self) -> str | None:
+        return self.database.url
 
     @property
     def table_pred(self) -> str:
