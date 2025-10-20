@@ -314,3 +314,44 @@ def test_timestamp_localized_to_utc():
     feat_df = create_features(df)
     assert feat_df["timestamp"].dt.tz is not None
     assert str(feat_df["timestamp"].dt.tz) == "UTC"
+
+
+def test_feature_generators_match_manual_expectations() -> None:
+    timestamps = pd.date_range("2024-01-01", periods=10, freq="1D", tz="UTC")
+    close = pd.Series(np.linspace(100.0, 109.0, num=10), index=timestamps)
+    open_ = close - 0.5
+    high = close + 1.0
+    low = close - 1.0
+    volume = pd.Series(np.linspace(10.0, 19.0, num=10), index=timestamps)
+    quote_volume = volume * (close + 0.25)
+    taker_buy_base = volume * 0.6
+    taker_buy_quote = quote_volume * 0.6
+
+    base = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": open_.to_numpy(),
+            "high": high.to_numpy(),
+            "low": low.to_numpy(),
+            "close": close.to_numpy(),
+            "volume": volume.to_numpy(),
+            "quote_asset_volume": quote_volume.to_numpy(),
+            "taker_buy_base": taker_buy_base.to_numpy(),
+            "taker_buy_quote": taker_buy_quote.to_numpy(),
+        }
+    )
+
+    feat_df = create_features(base)
+    fill_value = np.float32(CONFIG.features.fillna_value)
+
+    log_close = np.log(close.replace(0.0, np.nan))
+    expected_mom = log_close.diff(1).astype(np.float32).fillna(fill_value)
+    np.testing.assert_allclose(
+        feat_df["mom_log_ret_1d"].to_numpy(), expected_mom.to_numpy()
+    )
+
+    ret1 = log_close.diff().astype(np.float32)
+    expected_vol = ret1.rolling(7).std().astype(np.float32).fillna(fill_value)
+    np.testing.assert_allclose(
+        feat_df["vol_realized_7d"].to_numpy(), expected_vol.to_numpy()
+    )

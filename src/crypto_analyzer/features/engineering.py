@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
@@ -324,252 +325,231 @@ def get_feature_columns(settings: FeatureSettings | None = None) -> list[str]:
     return _build_feature_columns(_resolve_feature_settings(settings))
 
 
-def add_orderflow_features(
-    df: pd.DataFrame,
-    *,
-    fill_value: np.float32,
-    timeframe_windows: Mapping[int, int],
-    timeframe_labels: Mapping[int, str],
-    supported_minutes: set[int],
-) -> pd.DataFrame:
+@dataclass
+class FeatureComputationContext:
+    """Shared state passed to individual feature generators."""
+
+    settings: FeatureSettings
+    fill_value: np.float32
+    timeframe_windows: Mapping[int, int]
+    timeframe_labels: Mapping[int, str]
+    supported_minutes: set[int]
+    log_close: pd.Series | None = None
+    ret1: pd.Series | None = None
+    step_minutes: int = 1
+    forward_fill_limit: int | None = None
+
+
+class FeatureGenerator(ABC):
+    """Abstract base class for feature computation blocks."""
+
+    def __init__(self, settings: FeatureSettings) -> None:
+        self.settings = settings
+
+    @abstractmethod
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        """Mutate *df* by adding feature columns and return it."""
+
+
+class OnChainFeatureGenerator(FeatureGenerator):
+    """Handle on-chain inputs and forward-filling logic."""
+
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        fill_value = context.fill_value
+        if self.settings.include_onchain:
+            for col in ONCHAIN_FEATURES:
+                if col not in df.columns:
+                    df[col] = fill_value
+            onch_cols = [c for c in df.columns if c.startswith("onch_")]
+            if onch_cols:
+                numeric = df[onch_cols].apply(pd.to_numeric, errors="coerce")
+                df[onch_cols] = numeric.astype(np.float32)
+                hour = pd.to_datetime(df["timestamp"]).dt.floor("h")
+                grouped = df[onch_cols].groupby(hour)
+                limit = context.forward_fill_limit
+                if limit is None:
+                    filled = grouped.ffill()
+                else:
+                    filled = grouped.ffill(limit=limit)
+                df[onch_cols] = filled.fillna(fill_value).astype(np.float32)
+        else:
+            drop_cols = [c for c in df.columns if c.startswith("onch_")]
+            if drop_cols:
+                df = df.drop(columns=drop_cols)
+        return df
+
+
+class SentimentFeatureGenerator(FeatureGenerator):
+    """Normalize sentiment columns depending on configuration."""
+
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        include_sentiment = bool(
+            self.settings.include_sentiment and CONFIG.sentiment.use_sentiment
+        )
+        sentiment_cols = [
+            c for c in df.columns if c.startswith(SENTIMENT_COLUMN_PREFIXES)
+        ]
+        if include_sentiment:
+            if sentiment_cols:
+                numeric_sentiment = df[sentiment_cols].apply(
+                    pd.to_numeric, errors="coerce"
+                )
+                df[sentiment_cols] = (
+                    numeric_sentiment.fillna(context.fill_value).astype(np.float32)
+                )
+        elif sentiment_cols:
+            df = df.drop(columns=sentiment_cols)
+        return df
+
+
+class OrderflowFeatureGenerator(FeatureGenerator):
     """Compute order-flow and volume-derived features."""
 
-    vol = df["volume"].replace(0.0, np.nan)
-    qvol = df["quote_asset_volume"].replace(0.0, np.nan)
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        fill_value = context.fill_value
+        vol = df["volume"].replace(0.0, np.nan)
+        qvol = df["quote_asset_volume"].replace(0.0, np.nan)
 
-    df["tbr_base"] = (df["taker_buy_base"] / vol).astype(np.float32)
-    tbr_quote = (df["taker_buy_quote"] / qvol).astype(np.float32)
+        df["tbr_base"] = (df["taker_buy_base"] / vol).astype(np.float32)
+        tbr_quote = (df["taker_buy_quote"] / qvol).astype(np.float32)
 
-    df["ofi_base"] = (2.0 * df["tbr_base"] - 1.0).astype(np.float32)
-    df["ofi_quote"] = (2.0 * tbr_quote - 1.0).astype(np.float32)
-    df["d_tbr_base"] = df["tbr_base"].diff().astype(np.float32)
-    df["ema12_tbr_base"] = df["tbr_base"].ewm(span=12, adjust=False).mean().astype(np.float32)
-    df["z_volume"] = ((vol - vol.rolling(36).mean()) / vol.rolling(36).std()).astype(
-        np.float32
-    )
-
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"ofi_base_roll_{label}"] = np.float32(fill_value)
-            df[f"ofi_quote_roll_{label}"] = np.float32(fill_value)
-            df[f"tbr_base_roll_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        df[f"ofi_base_roll_{label}"] = (
-            df["ofi_base"].rolling(window).mean().astype(np.float32)
+        df["ofi_base"] = (2.0 * df["tbr_base"] - 1.0).astype(np.float32)
+        df["ofi_quote"] = (2.0 * tbr_quote - 1.0).astype(np.float32)
+        df["d_tbr_base"] = df["tbr_base"].diff().astype(np.float32)
+        df["ema12_tbr_base"] = (
+            df["tbr_base"].ewm(span=12, adjust=False).mean().astype(np.float32)
         )
-        df[f"ofi_quote_roll_{label}"] = (
-            df["ofi_quote"].rolling(window).mean().astype(np.float32)
-        )
-        df[f"tbr_base_roll_{label}"] = (
-            df["tbr_base"].rolling(window).mean().astype(np.float32)
-        )
+        df["z_volume"] = (
+            (vol - vol.rolling(36).mean()) / vol.rolling(36).std()
+        ).astype(np.float32)
 
-    vwap = (qvol / vol).astype(np.float32)
-    df["rel_close_vwap"] = ((df["close"] - vwap).abs() / vwap).astype(np.float32)
+        for minutes in MULTI_TF_MINUTES:
+            label = context.timeframe_labels.get(
+                minutes, _format_minutes_label(minutes)
+            )
+            if minutes not in context.supported_minutes:
+                df[f"ofi_base_roll_{label}"] = np.float32(fill_value)
+                df[f"ofi_quote_roll_{label}"] = np.float32(fill_value)
+                df[f"tbr_base_roll_{label}"] = np.float32(fill_value)
+                continue
+            window = context.timeframe_windows[minutes]
+            df[f"ofi_base_roll_{label}"] = (
+                df["ofi_base"].rolling(window).mean().astype(np.float32)
+            )
+            df[f"ofi_quote_roll_{label}"] = (
+                df["ofi_quote"].rolling(window).mean().astype(np.float32)
+            )
+            df[f"tbr_base_roll_{label}"] = (
+                df["tbr_base"].rolling(window).mean().astype(np.float32)
+            )
 
-    denom = (df["volume"] - df["taker_buy_base"]).replace(0.0, np.nan)
-    df["taker_buy_sell_ratio"] = (df["taker_buy_base"] / denom).astype(np.float32)
+        vwap = (qvol / vol).astype(np.float32)
+        df["rel_close_vwap"] = ((df["close"] - vwap).abs() / vwap).astype(np.float32)
 
-    return df
+        denom = (df["volume"] - df["taker_buy_base"]).replace(0.0, np.nan)
+        df["taker_buy_sell_ratio"] = (
+            df["taker_buy_base"] / denom
+        ).astype(np.float32)
+
+        return df
 
 
-def add_volatility_features(
-    df: pd.DataFrame,
-    *,
-    log_close: pd.Series,
-    ret1: pd.Series,
-    timeframe_windows: Mapping[int, int],
-    timeframe_labels: Mapping[int, str],
-    supported_minutes: set[int],
-    fill_value: np.float32,
-) -> pd.DataFrame:
+class TechnicalFeatureGenerator(FeatureGenerator):
     """Compute momentum, volatility, and range-based features."""
 
-    df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        if context.log_close is None or context.ret1 is None:
+            raise ValueError("Technical features require log returns in context")
+        fill_value = context.fill_value
+        log_close = context.log_close
+        ret1 = context.ret1
 
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"mom_log_ret_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        df[f"mom_log_ret_{label}"] = log_close.diff(window).astype(np.float32)
+        df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
 
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"vol_realized_{label}"] = np.float32(fill_value)
-            df[f"vol_of_vol_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        realized = ret1.rolling(window).std()
-        df[f"vol_realized_{label}"] = realized.astype(np.float32)
-        vol_of_vol = realized.rolling(window).std()
-        df[f"vol_of_vol_{label}"] = vol_of_vol.astype(np.float32)
-
-    high = df["high"].replace(0.0, np.nan)
-    low = df["low"].replace(0.0, np.nan)
-    log_range = np.log(high / low).pow(2)
-    for minutes in MULTI_TF_MINUTES:
-        label = timeframe_labels.get(minutes, _format_minutes_label(minutes))
-        if minutes not in supported_minutes:
-            df[f"vol_range_parkinson_{label}"] = np.float32(fill_value)
-            continue
-        window = timeframe_windows[minutes]
-        pk_var = log_range.rolling(window).mean() * PARKINSON_CONST
-        df[f"vol_range_parkinson_{label}"] = np.sqrt(pk_var).astype(np.float32)
-
-    fast_span = max(2, timeframe_windows.get(1440, 2))
-    slow_span = max(fast_span + 1, timeframe_windows.get(10080, fast_span * 4))
-    fast_ema = df["close"].ewm(span=fast_span, adjust=False).mean()
-    slow_ema = df["close"].ewm(span=slow_span, adjust=False).mean()
-    denom = df["close"].replace(0.0, np.nan)
-    df["mom_microtrend_ema_ratio"] = ((fast_ema - slow_ema) / denom).astype(np.float32)
-
-    df["volatility_12d"] = ret1.rolling(12).std().astype(np.float32)
-
-    tr = pd.concat(
-        [
-            (df["high"] - df["low"]).astype(np.float32),
-            (df["high"] - df["close"].shift(1)).abs().astype(np.float32),
-            (df["low"] - df["close"].shift(1)).abs().astype(np.float32),
-        ],
-        axis=1,
-    ).max(axis=1)
-    df["atr14"] = tr.rolling(14).mean().astype(np.float32)
-
-    return df
-
-
-def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add cyclical time-of-day and calendar features."""
-
-    ts = df["timestamp"]
-    minute = ts.dt.hour * 60 + ts.dt.minute
-    df["tod_sin"] = np.sin(2.0 * np.pi * minute / 1440.0).astype(np.float32)
-    df["tod_cos"] = np.cos(2.0 * np.pi * minute / 1440.0).astype(np.float32)
-    is_day = ((ts.dt.hour >= 8) & (ts.dt.hour < 20)).astype(np.float32)
-    df["is_day"] = is_day
-    df["is_night"] = (1.0 - is_day).astype(np.float32)
-    is_weekend = (ts.dt.dayofweek >= 5).astype(np.float32)
-    df["is_weekend"] = is_weekend
-    df["is_weekday"] = (1.0 - is_weekend).astype(np.float32)
-    df["time_hour_sin"] = np.sin(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
-    df["time_hour_cos"] = np.cos(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
-    df["time_dow_sin"] = np.sin(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
-    df["time_dow_cos"] = np.cos(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
-
-    return df
-
-
-def create_features(
-    df: pd.DataFrame, settings: FeatureSettings | None = None
-) -> pd.DataFrame:
-    """Add technical and time-series features to ``df``.
-
-    Parameters
-    ----------
-    df:
-        Input data frame containing OHLCV and optional ``onch_`` columns.
-    settings:
-        Optional feature settings overriding :data:`CONFIG.features`.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Data frame with additional float32 features.
-    """
-
-    settings = _resolve_feature_settings(settings)
-    validate_price_data(df)
-    df = df.copy()
-    validate_feature_inputs(df, settings)
-    fill_value = np.float32(settings.fillna_value)
-    ffill_limit = settings.forward_fill_limit
-    if ffill_limit < 0:
-        ffill_limit = None
-
-    if settings.include_onchain:
-        for col in ONCHAIN_FEATURES:
-            if col not in df.columns:
-                df[col] = fill_value
-    else:
-        drop_cols = [c for c in df.columns if c.startswith("onch_")]
-        if drop_cols:
-            df = df.drop(columns=drop_cols)
-
-    include_sentiment = bool(
-        settings.include_sentiment and CONFIG.sentiment.use_sentiment
-    )
-    sentiment_cols = [
-        c for c in df.columns if c.startswith(SENTIMENT_COLUMN_PREFIXES)
-    ]
-    if include_sentiment:
-        if sentiment_cols:
-            numeric_sentiment = df[sentiment_cols].apply(
-                pd.to_numeric, errors="coerce"
+        for minutes in MULTI_TF_MINUTES:
+            label = context.timeframe_labels.get(
+                minutes, _format_minutes_label(minutes)
             )
-            df[sentiment_cols] = (
-                numeric_sentiment.fillna(fill_value).astype(np.float32)
+            if minutes not in context.supported_minutes:
+                df[f"mom_log_ret_{label}"] = np.float32(fill_value)
+                continue
+            window = context.timeframe_windows[minutes]
+            df[f"mom_log_ret_{label}"] = log_close.diff(window).astype(np.float32)
+
+        for minutes in MULTI_TF_MINUTES:
+            label = context.timeframe_labels.get(
+                minutes, _format_minutes_label(minutes)
             )
-    elif sentiment_cols:
-        df = df.drop(columns=sentiment_cols)
+            if minutes not in context.supported_minutes:
+                df[f"vol_realized_{label}"] = np.float32(fill_value)
+                df[f"vol_of_vol_{label}"] = np.float32(fill_value)
+                continue
+            window = context.timeframe_windows[minutes]
+            realized = ret1.rolling(window).std()
+            df[f"vol_realized_{label}"] = realized.astype(np.float32)
+            vol_of_vol = realized.rolling(window).std()
+            df[f"vol_of_vol_{label}"] = vol_of_vol.astype(np.float32)
 
-    ts = pd.to_datetime(df["timestamp"], utc=True)
-    timeframe_info = _build_timeframe_info(ts, MULTI_TF_MINUTES)
-    timeframe_windows = {minutes: window for minutes, (window, _) in timeframe_info.items()}
-    timeframe_labels = {minutes: label for minutes, (_, label) in timeframe_info.items()}
-    supported_minutes = set(timeframe_windows)
+        high = df["high"].replace(0.0, np.nan)
+        low = df["low"].replace(0.0, np.nan)
+        log_range = np.log(high / low).pow(2)
+        for minutes in MULTI_TF_MINUTES:
+            label = context.timeframe_labels.get(
+                minutes, _format_minutes_label(minutes)
+            )
+            if minutes not in context.supported_minutes:
+                df[f"vol_range_parkinson_{label}"] = np.float32(fill_value)
+                continue
+            window = context.timeframe_windows[minutes]
+            pk_var = log_range.rolling(window).mean() * PARKINSON_CONST
+            df[f"vol_range_parkinson_{label}"] = np.sqrt(pk_var).astype(np.float32)
 
-    # --- základní numerika ---------------------------------------------------
-    # nech timestamp beze změny, ostatní numerické sloupce konvertuj na float32
-    numeric = df.select_dtypes(include=["number"]).columns.drop(["timestamp"], errors="ignore")
-    if len(numeric) > 0:
-        df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce").astype(np.float32)
+        fast_span = max(2, context.timeframe_windows.get(1440, 2))
+        slow_span = max(fast_span + 1, context.timeframe_windows.get(10080, fast_span * 4))
+        fast_ema = df["close"].ewm(span=fast_span, adjust=False).mean()
+        slow_ema = df["close"].ewm(span=slow_span, adjust=False).mean()
+        denom = df["close"].replace(0.0, np.nan)
+        df["mom_microtrend_ema_ratio"] = (
+            (fast_ema - slow_ema) / denom
+        ).astype(np.float32)
 
-    # forward-fill on-chain metrics only within the same hour to avoid leakage
-    if settings.include_onchain:
-        onch_cols = [c for c in df.columns if c.startswith("onch_")]
-        if onch_cols:
-            hour = pd.to_datetime(df["timestamp"]).dt.floor("h")
-            grouped = df[onch_cols].groupby(hour)
-            if ffill_limit is None:
-                filled = grouped.ffill()
-            else:
-                filled = grouped.ffill(limit=ffill_limit)
-            df[onch_cols] = filled.fillna(fill_value).astype(np.float32)
+        df["volatility_12d"] = ret1.rolling(12).std().astype(np.float32)
 
-    df = add_orderflow_features(
-        df,
-        fill_value=fill_value,
-        timeframe_windows=timeframe_windows,
-        timeframe_labels=timeframe_labels,
-        supported_minutes=supported_minutes,
-    )
+        tr = pd.concat(
+            [
+                (df["high"] - df["low"]).astype(np.float32),
+                (df["high"] - df["close"].shift(1)).abs().astype(np.float32),
+                (df["low"] - df["close"].shift(1)).abs().astype(np.float32),
+            ],
+            axis=1,
+        ).max(axis=1)
+        df["atr14"] = tr.rolling(14).mean().astype(np.float32)
 
-    safe_close = df["close"].replace(0.0, np.nan)
-    log_close = np.log(safe_close)
-    ret1 = log_close.diff().astype(np.float32)
+        return df
 
-    df = add_volatility_features(
-        df,
-        log_close=log_close,
-        ret1=ret1,
-        timeframe_windows=timeframe_windows,
-        timeframe_labels=timeframe_labels,
-        supported_minutes=supported_minutes,
-        fill_value=fill_value,
-    )
 
-    # --- begin minimal anti-fragmentation patch ---
-    # původní logika přidávala rozsáhlé z-score a delta kopie téměř všech
-    # sloupců. Pro novou minimalistickou sadu rysů je držíme vypnuté, aby
-    # nedublovaly momentum/mean-reversion metriky.
-    # --- end patch ---
+class DerivativesFeatureGenerator(FeatureGenerator):
+    """Compute derivatives-related features when enabled."""
 
-    if settings.include_derivatives:
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        fill_value = context.fill_value
+        if not self.settings.include_derivatives:
+            df = df.drop(columns=list(REGISTRY.derivatives), errors="ignore")
+            df = df.drop(columns=[c for c in df.columns if c.startswith("deriv_")], errors="ignore")
+            return df
+
         if "basis_annualized" not in df.columns:
             df["basis_annualized"] = fill_value
         else:
@@ -590,13 +570,13 @@ def create_features(
         df["deriv_funding_rate_change"] = (
             df["deriv_funding_rate"].diff().astype(np.float32)
         )
-        smooth_window = max(1, timeframe_windows.get(10080, 7))
+        smooth_window = max(1, context.timeframe_windows.get(10080, 7))
         df["deriv_funding_rate_smooth"] = (
             df["deriv_funding_rate"].rolling(smooth_window).mean().astype(np.float32)
         )
 
         basis = df["basis_annualized"].astype(np.float32)
-        basis_window = max(1, timeframe_windows.get(10080, 7))
+        basis_window = max(1, context.timeframe_windows.get(10080, 7))
         df["deriv_basis_trend"] = (
             (basis - basis.rolling(basis_window).mean()).astype(np.float32)
         )
@@ -607,7 +587,7 @@ def create_features(
             df["deriv_open_interest"] = oi
             pct = oi.pct_change().replace([np.inf, -np.inf], np.nan)
             df["deriv_oi_change_pct"] = pct.astype(np.float32)
-            vel_window = max(1, timeframe_windows.get(1440, 1))
+            vel_window = max(1, context.timeframe_windows.get(1440, 1))
             df["deriv_oi_velocity"] = oi.diff(vel_window).astype(np.float32)
         else:
             if "deriv_open_interest" not in df.columns:
@@ -646,10 +626,7 @@ def create_features(
 
         from crypto_analyzer.features.derivatives import make_deriv_features
 
-        try:
-            deriv_subset = df[["timestamp"]].copy()
-        except KeyError:
-            deriv_subset = pd.DataFrame({"timestamp": pd.Series(dtype="datetime64[ns, UTC]")})
+        deriv_subset = df[["timestamp"]].copy()
         if "basis_annualized" in df.columns:
             deriv_subset["basis_annualized"] = df["basis_annualized"]
         if "deriv_funding_rate" in df.columns:
@@ -662,7 +639,7 @@ def create_features(
         deriv_cfg = CONFIG.derivatives
 
         try:
-            freq = f"{step_minutes}T"
+            freq = f"{context.step_minutes}T"
             extra = make_deriv_features(
                 deriv_subset,
                 freq=freq,
@@ -674,19 +651,39 @@ def create_features(
                 oi_source=deriv_cfg.open_interest_source,
             )
         except Exception:  # pragma: no cover - defensive fallback
-            extra = pd.DataFrame(columns=["timestamp", "funding_z", "basis_bp", "oi_change_rate"])
+            extra = pd.DataFrame(
+                columns=["timestamp", "funding_z", "basis_bp", "oi_change_rate"]
+            )
 
         if not extra.empty:
             df = df.merge(extra, on="timestamp", how="left")
         else:
             for column in ("funding_z", "basis_bp", "oi_change_rate"):
                 df[column] = np.nan
-    else:
-        df = df.drop(columns=list(REGISTRY.derivatives), errors="ignore")
-        df = df.drop(columns=[c for c in df.columns if c.startswith("deriv_")], errors="ignore")
 
-    if settings.include_orderbook:
-        from crypto_analyzer.features.orderbook import depth_imbalance, order_flow_imbalance, spread
+        return df
+
+
+class OrderbookFeatureGenerator(FeatureGenerator):
+    """Compute order book derived features when order book data is available."""
+
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        fill_value = context.fill_value
+        if not self.settings.include_orderbook:
+            drop_lob = [
+                c for c in df.columns if c.startswith("lob_") or c.startswith("wall_")
+            ]
+            if drop_lob:
+                df = df.drop(columns=drop_lob, errors="ignore")
+            return df
+
+        from crypto_analyzer.features.orderbook import (
+            depth_imbalance,
+            order_flow_imbalance,
+            spread,
+        )
 
         for level in range(1, 3):
             bid_col = f"lob_bid_L{level}"
@@ -699,7 +696,6 @@ def create_features(
             elif imb_col not in df.columns:
                 df[imb_col] = fill_value
 
-        # --- LOB walls -------------------------------------------------------
         bid_px_cols = sorted([c for c in df.columns if c.startswith("lob_bid_price_")])
         bid_sz_cols = sorted([c for c in df.columns if c.startswith("lob_bid_size_")])
         ask_px_cols = sorted([c for c in df.columns if c.startswith("lob_ask_price_")])
@@ -754,7 +750,7 @@ def create_features(
             df["wall_ask_size_rel"] = fill_value
 
         book_snapshot = pd.DataFrame(index=df.index)
-        for level in range(1, settings.forward_fill_limit + 1):  # reasonable cap from config
+        for level in range(1, self.settings.forward_fill_limit + 1):
             bid_sz_col = f"lob_bid_L{level}"
             ask_sz_col = f"lob_ask_L{level}"
             bid_px_col = f"lob_bid_price_{level}"
@@ -772,7 +768,7 @@ def create_features(
             try:
                 imbalance_series = depth_imbalance(book_snapshot)
                 spread_series = spread(book_snapshot)
-            except Exception:  # pragma: no cover - best effort for inconsistent inputs
+            except Exception:  # pragma: no cover - best effort
                 imbalance_series = pd.Series(np.nan, index=df.index)
                 spread_series = pd.Series(np.nan, index=df.index)
         else:
@@ -800,7 +796,9 @@ def create_features(
             best_bid = df[bid_px_cols[0]].astype(np.float32)
             best_ask = df[ask_px_cols[0]].astype(np.float32)
             mid = ((best_bid + best_ask) / 2.0).replace(0.0, np.nan)
-            df["lob_spread_bps"] = ((best_ask - best_bid) / mid * 1e4).astype(np.float32)
+            df["lob_spread_bps"] = (
+                (best_ask - best_bid) / mid * 1e4
+            ).astype(np.float32)
         else:
             df["lob_spread_bps"] = fill_value
 
@@ -809,8 +807,8 @@ def create_features(
             total_ask = df[ask_sz_cols].sum(axis=1).astype(np.float32)
             depth_denom = (total_bid + total_ask).replace(0.0, np.nan)
             df["lob_depth_imbalance"] = (
-                ((total_bid - total_ask) / depth_denom).astype(np.float32)
-            )
+                (total_bid - total_ask) / depth_denom
+            ).astype(np.float32)
         else:
             df["lob_depth_imbalance"] = fill_value
 
@@ -849,87 +847,199 @@ def create_features(
             ).astype(np.float32)
         else:
             df["lob_ask_slope_bps"] = fill_value
-    else:
-        drop_lob = [c for c in df.columns if c.startswith("lob_") or c.startswith("wall_")]
-        if drop_lob:
-            df = df.drop(columns=drop_lob, errors="ignore")
 
-    df = add_time_features(df)
+        return df
 
-    # --- cross-asset features -------------------------------------------------
-    corr_minutes = 43200
-    corr_window = timeframe_windows.get(
-        corr_minutes, max(1, timeframe_windows.get(1440, 1))
+
+class TimeFeatureGenerator(FeatureGenerator):
+    """Add cyclical time-of-day and calendar features."""
+
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        ts = df["timestamp"]
+        minute = ts.dt.hour * 60 + ts.dt.minute
+        df["tod_sin"] = np.sin(2.0 * np.pi * minute / 1440.0).astype(np.float32)
+        df["tod_cos"] = np.cos(2.0 * np.pi * minute / 1440.0).astype(np.float32)
+        is_day = ((ts.dt.hour >= 8) & (ts.dt.hour < 20)).astype(np.float32)
+        df["is_day"] = is_day
+        df["is_night"] = (1.0 - is_day).astype(np.float32)
+        is_weekend = (ts.dt.dayofweek >= 5).astype(np.float32)
+        df["is_weekend"] = is_weekend
+        df["is_weekday"] = (1.0 - is_weekend).astype(np.float32)
+        df["time_hour_sin"] = np.sin(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
+        df["time_hour_cos"] = np.cos(2.0 * np.pi * ts.dt.hour / 24.0).astype(np.float32)
+        df["time_dow_sin"] = np.sin(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
+        df["time_dow_cos"] = np.cos(2.0 * np.pi * ts.dt.dayofweek / 7.0).astype(np.float32)
+        return df
+
+
+class CrossAssetFeatureGenerator(FeatureGenerator):
+    """Compute features derived from cross-asset relationships."""
+
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        if context.ret1 is None:
+            raise ValueError("Cross-asset features require log returns in context")
+        ret1 = context.ret1
+        fill_value = context.fill_value
+        corr_minutes = 43200
+        corr_window = context.timeframe_windows.get(
+            corr_minutes, max(1, context.timeframe_windows.get(1440, 1))
+        )
+        corr_label = context.timeframe_labels.get(
+            corr_minutes, _format_minutes_label(corr_minutes)
+        )
+        for asset, keywords in CROSS_ASSET_KEYWORDS.items():
+            col_name = _match_column(df, keywords)
+            ret_col = f"cross_{asset}_ret"
+            div_col = f"cross_{asset}_divergence"
+            corr_col = f"cross_{asset}_corr_{corr_label}"
+            if col_name is None:
+                df[ret_col] = np.float32(fill_value)
+                df[div_col] = np.float32(fill_value)
+                df[corr_col] = np.float32(fill_value)
+                continue
+            series = pd.to_numeric(df[col_name], errors="coerce").astype(np.float32)
+            log_series = np.log(series.replace(0.0, np.nan))
+            asset_ret = log_series.diff()
+            df[ret_col] = asset_ret.astype(np.float32)
+            df[div_col] = (ret1 - asset_ret).astype(np.float32)
+            if corr_window > 1:
+                corr = ret1.rolling(corr_window).corr(asset_ret)
+                df[corr_col] = corr.astype(np.float32)
+            else:
+                df[corr_col] = np.float32(fill_value)
+        return df
+
+
+class PrefixedFeatureGenerator(FeatureGenerator):
+    """Duplicate select features with explicit prefixes for grouping."""
+
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        copy_map = {
+            "basis_annualized": "deriv_basis_annualized",
+            "oi_delta_1d": "deriv_oi_delta_1d",
+            "lob_imbalance_L1": "lob_imbalance_L1",
+            "lob_imbalance_L2": "lob_imbalance_L2",
+            "ret3": "mom_ret3",
+            "volatility_12d": "vol_volatility_12d",
+            "atr14": "vol_atr14",
+            "tod_sin": "time_tod_sin",
+            "tod_cos": "time_tod_cos",
+            "is_day": "time_is_day",
+            "is_night": "time_is_night",
+            "is_weekend": "time_is_weekend",
+            "is_weekday": "time_is_weekday",
+        }
+        if not self.settings.include_derivatives:
+            copy_map.pop("basis_annualized", None)
+            copy_map.pop("oi_delta_1d", None)
+        if not self.settings.include_orderbook:
+            copy_map.pop("lob_imbalance_L1", None)
+            copy_map.pop("lob_imbalance_L2", None)
+        for src, dst in copy_map.items():
+            if src in df.columns and dst not in df.columns:
+                df[dst] = df[src].astype(np.float32)
+        return df
+
+
+class ZScoreFeatureGenerator(FeatureGenerator):
+    """Compute z-scores and first differences for prefixed feature groups."""
+
+    def apply(
+        self, df: pd.DataFrame, context: FeatureComputationContext
+    ) -> pd.DataFrame:
+        prefixes = ["mom_", "vol_", "time_", "cross_"]
+        if self.settings.include_onchain:
+            prefixes.insert(0, "onch_")
+        if self.settings.include_derivatives:
+            prefixes.append("deriv_")
+        if self.settings.include_orderbook:
+            prefixes.append("lob_")
+        for prefix in prefixes:
+            cols = [c for c in df.columns if c.startswith(prefix)]
+            for col in cols:
+                if f"z_{col}" not in df.columns:
+                    z = (df[col] - df[col].rolling(36).mean()) / df[col].rolling(36).std()
+                    df[f"z_{col}"] = z.astype(np.float32)
+                if f"d_{col}" not in df.columns:
+                    df[f"d_{col}"] = df[col].diff().astype(np.float32)
+        return df
+
+
+def create_features(
+    df: pd.DataFrame, settings: FeatureSettings | None = None
+) -> pd.DataFrame:
+    """Add technical and time-series features to ``df``.
+
+    Parameters
+    ----------
+    df:
+        Input data frame containing OHLCV and optional ``onch_`` columns.
+    settings:
+        Optional feature settings overriding :data:`CONFIG.features`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Data frame with additional float32 features.
+    """
+
+    settings = _resolve_feature_settings(settings)
+    validate_price_data(df)
+    df = df.copy()
+    validate_feature_inputs(df, settings)
+    fill_value = np.float32(settings.fillna_value)
+    ffill_limit = settings.forward_fill_limit
+    if ffill_limit < 0:
+        ffill_limit = None
+
+    ts = pd.to_datetime(df["timestamp"], utc=True)
+    timeframe_info = _build_timeframe_info(ts, MULTI_TF_MINUTES)
+    timeframe_windows = {minutes: window for minutes, (window, _) in timeframe_info.items()}
+    timeframe_labels = {minutes: label for minutes, (_, label) in timeframe_info.items()}
+    supported_minutes = set(timeframe_windows)
+    step_minutes = _infer_step_minutes(ts)
+
+    context = FeatureComputationContext(
+        settings=settings,
+        fill_value=fill_value,
+        timeframe_windows=timeframe_windows,
+        timeframe_labels=timeframe_labels,
+        supported_minutes=supported_minutes,
+        step_minutes=step_minutes,
+        forward_fill_limit=ffill_limit,
     )
-    corr_label = timeframe_labels.get(corr_minutes, _format_minutes_label(corr_minutes))
-    for asset, keywords in CROSS_ASSET_KEYWORDS.items():
-        col_name = _match_column(df, keywords)
-        ret_col = f"cross_{asset}_ret"
-        div_col = f"cross_{asset}_divergence"
-        corr_col = f"cross_{asset}_corr_{corr_label}"
-        if col_name is None:
-            df[ret_col] = np.float32(fill_value)
-            df[div_col] = np.float32(fill_value)
-            df[corr_col] = np.float32(fill_value)
-            continue
-        series = pd.to_numeric(df[col_name], errors="coerce")
-        series = series.astype(np.float32)
-        log_series = np.log(series.replace(0.0, np.nan))
-        asset_ret = log_series.diff()
-        df[ret_col] = asset_ret.astype(np.float32)
-        df[div_col] = (ret1 - asset_ret).astype(np.float32)
-        if corr_window > 1:
-            corr = ret1.rolling(corr_window).corr(asset_ret)
-            df[corr_col] = corr.astype(np.float32)
-        else:
-            df[corr_col] = np.float32(fill_value)
 
-    # --- prefixed helper copies ----------------------------------------------
-    # Duplicate selected features using explicit prefixes so that downstream
-    # grouping (e.g. Group-SHAP) can rely on simple name patterns.  Keeping the
-    # original column names preserves back-compatibility with existing models
-    # and tests.
-    copy_map = {
-        "basis_annualized": "deriv_basis_annualized",
-        "oi_delta_1d": "deriv_oi_delta_1d",
-        "lob_imbalance_L1": "lob_imbalance_L1",
-        "lob_imbalance_L2": "lob_imbalance_L2",
-        "ret3": "mom_ret3",
-        "volatility_12d": "vol_volatility_12d",
-        "atr14": "vol_atr14",
-        "tod_sin": "time_tod_sin",
-        "tod_cos": "time_tod_cos",
-        "is_day": "time_is_day",
-        "is_night": "time_is_night",
-        "is_weekend": "time_is_weekend",
-        "is_weekday": "time_is_weekday",
-    }
-    if not settings.include_derivatives:
-        copy_map.pop("basis_annualized", None)
-        copy_map.pop("oi_delta_1d", None)
-    if not settings.include_orderbook:
-        copy_map.pop("lob_imbalance_L1", None)
-        copy_map.pop("lob_imbalance_L2", None)
-    for src, dst in copy_map.items():
-        if src in df.columns and dst not in df.columns:
-            df[dst] = df[src].astype(np.float32)
+    # --- základní numerika ---------------------------------------------------
+    # nech timestamp beze změny, ostatní numerické sloupce konvertuj na float32
+    numeric = df.select_dtypes(include=["number"]).columns.drop(["timestamp"], errors="ignore")
+    if len(numeric) > 0:
+        df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce").astype(np.float32)
 
-    # --- z-scores and deltas for prefixed features ---------------------------
-    prefixes = ["mom_", "vol_", "time_", "cross_"]
-    if settings.include_onchain:
-        prefixes.insert(0, "onch_")
-    if settings.include_derivatives:
-        prefixes.append("deriv_")
-    if settings.include_orderbook:
-        prefixes.append("lob_")
-    for prefix in prefixes:
-        cols = [c for c in df.columns if c.startswith(prefix)]
-        for col in cols:
-            if f"z_{col}" not in df.columns:
-                z = (df[col] - df[col].rolling(36).mean()) / df[col].rolling(36).std()
-                df[f"z_{col}"] = z.astype(np.float32)
-            if f"d_{col}" not in df.columns:
-                df[f"d_{col}"] = df[col].diff().astype(np.float32)
+    safe_close = df["close"].replace(0.0, np.nan)
+    context.log_close = np.log(safe_close)
+    context.ret1 = context.log_close.diff().astype(np.float32)
+
+    generators: list[FeatureGenerator] = [
+        OnChainFeatureGenerator(settings),
+        SentimentFeatureGenerator(settings),
+        OrderflowFeatureGenerator(settings),
+        TechnicalFeatureGenerator(settings),
+        DerivativesFeatureGenerator(settings),
+        OrderbookFeatureGenerator(settings),
+        TimeFeatureGenerator(settings),
+        CrossAssetFeatureGenerator(settings),
+        PrefixedFeatureGenerator(settings),
+        ZScoreFeatureGenerator(settings),
+    ]
+
+    for generator in generators:
+        df = generator.apply(df, context)
 
     # --- NaN handling před cíli ----------------------------------------------
     numeric_cols = df.select_dtypes(include=[np.number]).columns
