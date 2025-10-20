@@ -182,7 +182,7 @@ def run_pipeline(
         )
     horizon_steps = max(1, horizon // interval_minutes)
 
-    df = get_price_data(cfg.symbol, db_path=cfg.db_path)
+    df = get_price_data(cfg.symbol)
     df = create_features(df, settings=feature_settings)
     df = make_targets(df, horizons_min=[horizon], txn_cost_bps=txn_cost_bps)
     target_col = f"cls_sign_{horizon}m"

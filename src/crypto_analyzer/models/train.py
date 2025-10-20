@@ -837,7 +837,7 @@ def main_cli(args) -> Path:
     run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
     out_dir = Path("outputs") / run_id
 
-    df = get_price_data(CONFIG.symbol, db_path=CONFIG.db_path)
+    df = get_price_data(CONFIG.symbol)
     df = create_features(df)
     steps = args.horizon // 5
     df["target_cls"] = (df["close"].shift(-steps) > df["close"]).astype(int)

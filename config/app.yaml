@@ -7,10 +7,13 @@ core:
 
 database:
   price_store: data/crypto_data.sqlite
+  url: null
   predictions_table: predictions
   onchain_table: onchain_1d
   feature_store: null
   read_chunksize: 100000
+  pool_size: 5
+  max_overflow: 10
 
 runtime:
   cpu_limit: auto
