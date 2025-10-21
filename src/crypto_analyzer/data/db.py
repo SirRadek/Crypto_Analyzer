@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from typing import Iterable, Iterator
 
 import psycopg2
-from psycopg2 import OperationalError
+from psycopg2 import OperationalError, sql
 from psycopg2.extensions import connection as PGConnection
 
 from crypto_analyzer.utils.config import CONFIG
@@ -63,6 +63,7 @@ TABLE_DEFINITIONS: dict[str, str] = {
         CREATE TABLE IF NOT EXISTS sentiment_index (
             timestamp TIMESTAMPTZ NOT NULL,
             value SMALLINT CHECK (value BETWEEN 0 AND 100),
+            classification TEXT,
             PRIMARY KEY (timestamp)
         )
     """,
@@ -128,6 +129,7 @@ COMBINED_FEATURES_VIEW = """
         oc.exchange_outflow,
         oc.whale_transactions,
         si.value AS fear_greed_index,
+        si.classification AS fear_greed_classification,
         ss.reddit_score,
         ss.twitter_score,
         ss.mentions,
@@ -251,6 +253,36 @@ def _execute_statements(conn: PGConnection, statements: Iterable[str]) -> None:
             cursor.execute(statement)
 
 
+def _ensure_column_exists(
+    conn: PGConnection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    """Ensure that a table contains a specific column, adding it if required."""
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+              AND column_name = %s
+            """,
+            (table_name, column_name),
+        )
+        if cursor.fetchone() is None:
+            LOGGER.info("Adding missing column %s.%s", table_name, column_name)
+            cursor.execute(
+                sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
+                    sql.Identifier(table_name),
+                    sql.Identifier(column_name),
+                    sql.SQL(column_definition),
+                )
+            )
+
+
 def initialize_schema(conn: PGConnection) -> None:
     """Create TimescaleDB tables, hypertables and views if they do not exist."""
 
@@ -260,6 +292,9 @@ def initialize_schema(conn: PGConnection) -> None:
 
         LOGGER.info("Creating base tables")
         _execute_statements(conn, TABLE_DEFINITIONS.values())
+
+        LOGGER.info("Applying schema migrations")
+        _ensure_column_exists(conn, "sentiment_index", "classification", "TEXT")
 
         LOGGER.info("Converting tables to hypertables")
         _execute_statements(conn, HYPERTABLE_STATEMENTS)

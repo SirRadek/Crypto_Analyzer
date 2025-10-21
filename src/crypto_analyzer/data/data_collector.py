@@ -35,6 +35,7 @@ logger = get_logger(__name__)
 
 GLASSNODE_ENDPOINT = "https://api.glassnode.com/v1/metrics/addresses/active_count"
 BINANCE_FUNDING_ENDPOINT = "https://fapi.binance.com/fapi/v1/fundingRate"
+BINANCE_ORDERBOOK_ENDPOINT = "https://fapi.binance.com/fapi/v1/depth"
 BINANCE_OPEN_INTEREST_ENDPOINT = "https://fapi.binance.com/futures/data/openInterestHist"
 
 
@@ -193,6 +194,122 @@ def fetch_binance_funding_rates(
     return frame.loc[:, ["timestamp", "funding_rate"]].reset_index(drop=True)
 
 
+def fetch_binance_order_book(
+    symbol: str,
+    *,
+    depth: int = 20,
+    session: requests.Session | None = None,
+) -> pd.DataFrame:
+    """Fetch a futures order book snapshot for ``symbol`` from Binance.
+
+    Parameters
+    ----------
+    symbol:
+        Trading pair in Binance notation, e.g. ``"BTCUSDT"``.
+    depth:
+        Number of price levels to request from each side of the book.  Binance
+        accepts a discrete set of values; the closest supported depth greater
+        than or equal to the requested value is used.
+    session:
+        Optional :class:`requests.Session` to reuse across invocations.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Frame with a single row describing top-of-book statistics.  When the
+        exchange returns an empty book the function yields an empty frame with
+        the expected columns instead of raising an exception.
+    """
+
+    allowed_depths = (5, 10, 20, 50, 100, 500, 1000)
+    if depth <= 0:
+        raise ValueError("Depth must be a positive integer")
+    limit = next((value for value in allowed_depths if value >= depth), allowed_depths[-1])
+
+    sess = session or requests.Session()
+    params = {"symbol": symbol, "limit": limit}
+    response = sess.get(BINANCE_ORDERBOOK_ENDPOINT, params=params, timeout=10)
+    response.raise_for_status()
+    payload = response.json() or {}
+
+    bids = payload.get("bids") or []
+    asks = payload.get("asks") or []
+
+    def _parse_side(levels: list[list[object]] | list[tuple[object, object]]) -> list[tuple[float, float]]:
+        parsed: list[tuple[float, float]] = []
+        for level in levels[:limit]:
+            if not isinstance(level, (list, tuple)) or len(level) < 2:
+                continue
+            price_raw, qty_raw = level[0], level[1]
+            try:
+                price = float(price_raw)
+                quantity = float(qty_raw)
+            except (TypeError, ValueError):
+                continue
+            parsed.append((price, quantity))
+        return parsed
+
+    parsed_bids = _parse_side(bids)
+    parsed_asks = _parse_side(asks)
+
+    columns = [
+        "timestamp",
+        "bid_price",
+        "bid_volume",
+        "ask_price",
+        "ask_volume",
+        "spread",
+        "mid_price",
+        "bid_volume_total",
+        "ask_volume_total",
+        "bid_notional_total",
+        "ask_notional_total",
+        "depth_imbalance",
+    ]
+
+    if not parsed_bids or not parsed_asks:
+        return pd.DataFrame(columns=columns)
+
+    best_bid_price, best_bid_volume = parsed_bids[0]
+    best_ask_price, best_ask_volume = parsed_asks[0]
+
+    bid_volume_total = sum(qty for _, qty in parsed_bids)
+    ask_volume_total = sum(qty for _, qty in parsed_asks)
+    bid_notional_total = sum(price * qty for price, qty in parsed_bids)
+    ask_notional_total = sum(price * qty for price, qty in parsed_asks)
+
+    spread = best_ask_price - best_bid_price
+    mid_price = (best_bid_price + best_ask_price) / 2
+
+    depth_sum = bid_volume_total + ask_volume_total
+    depth_imbalance = (
+        (bid_volume_total - ask_volume_total) / depth_sum if depth_sum else float("nan")
+    )
+
+    timestamp = pd.Timestamp.utcnow()
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    frame = pd.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "bid_price": [best_bid_price],
+            "bid_volume": [best_bid_volume],
+            "ask_price": [best_ask_price],
+            "ask_volume": [best_ask_volume],
+            "spread": [spread],
+            "mid_price": [mid_price],
+            "bid_volume_total": [bid_volume_total],
+            "ask_volume_total": [ask_volume_total],
+            "bid_notional_total": [bid_notional_total],
+            "ask_notional_total": [ask_notional_total],
+            "depth_imbalance": [depth_imbalance],
+        }
+    )
+    return frame
+
+
 def fetch_binance_open_interest(
     symbol: str,
     start: datetime,
@@ -270,6 +387,7 @@ def load_enriched_market_data(
             raise RuntimeError("Application configuration is unavailable; pass config explicitly")
         cfg = CONFIG
     market_symbol = symbol or cfg.symbol
+    onchain_cfg = getattr(cfg, "onchain", None)
 
     start_ms = int(_as_timestamp(start).timestamp() * 1000) if start else None
     end_ms = int(_as_timestamp(end).timestamp() * 1000) if end else None
@@ -290,7 +408,7 @@ def load_enriched_market_data(
         glassnode = pd.DataFrame(columns=["timestamp", "onch_active_addresses"])
 
     mempool = pd.DataFrame()
-    if getattr(cfg.onchain, "use_mempool", False):
+    if getattr(onchain_cfg, "use_mempool", False):
         try:
             mempool = fetch_mempool_stats()
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -298,8 +416,8 @@ def load_enriched_market_data(
             mempool = pd.DataFrame()
 
     exchange_flows = pd.DataFrame()
-    if getattr(cfg.onchain, "use_exchange_flows", False):
-        api_key = getattr(cfg.onchain, "glassnode_api_key", None)
+    if getattr(onchain_cfg, "use_exchange_flows", False):
+        api_key = getattr(onchain_cfg, "glassnode_api_key", None)
         if api_key:
             try:
                 exchange_flows = fetch_exchange_flows(api_key, start=span_start, end=span_end)
@@ -375,6 +493,7 @@ def load_enriched_market_data(
 __all__ = [
     "fetch_glassnode_active_addresses",
     "fetch_binance_funding_rates",
+    "fetch_binance_order_book",
     "fetch_binance_open_interest",
     "fetch_exchange_flows",
     "fetch_mempool_stats",
