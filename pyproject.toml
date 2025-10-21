@@ -34,6 +34,7 @@ dependencies = [
     "pandera==0.20.3",
     "SQLAlchemy==2.0.35",
     "psycopg[binary]==3.1.12",
+    "psycopg2-binary==2.9.9",
 ]
 
 [project.optional-dependencies]
