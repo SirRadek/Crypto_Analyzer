@@ -179,23 +179,23 @@ def _upsert(table: Table, records: Iterable[dict[str, object]], engine: Engine, 
         return 0
 
     dialect = engine.dialect.name
-    if dialect == "postgresql":
-        insert_stmt = pg_insert(table)
-        update_cols = {
+
+    def _build_update_cols(insert_stmt):
+        return {
             col.name: getattr(insert_stmt.excluded, col.name)
             for col in table.c
-            if col.name not in conflict_cols
+            if col.name not in conflict_cols and not col.primary_key
         }
+
+    if dialect == "postgresql":
+        insert_stmt = pg_insert(table)
+        update_cols = _build_update_cols(insert_stmt)
         insert_stmt = insert_stmt.on_conflict_do_update(
             index_elements=[table.c[name] for name in conflict_cols], set_=update_cols
         )
     elif dialect == "sqlite":
         insert_stmt = sqlite_insert(table)
-        update_cols = {
-            col.name: getattr(insert_stmt.excluded, col.name)
-            for col in table.c
-            if col.name not in conflict_cols
-        }
+        update_cols = _build_update_cols(insert_stmt)
         insert_stmt = insert_stmt.on_conflict_do_update(index_elements=list(conflict_cols), set_=update_cols)
     else:
         insert_stmt = table.insert().prefix_with("OR REPLACE")
