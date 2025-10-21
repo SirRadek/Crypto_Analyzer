@@ -51,6 +51,73 @@ def test_fetch_glassnode_active_addresses_parses_payload():
     assert frame["timestamp"].iloc[0].tzinfo is not None
 
 
+def test_fetch_binance_order_book_extracts_top_of_book():
+    payload = {
+        "lastUpdateId": 1,
+        "bids": [["50000.0", "1.5"], ["49990.0", "0.25"]],
+        "asks": [["50010.0", "2.0"], ["50020.0", "1.0"]],
+    }
+    session = _DummySession(payload)
+
+    frame = data_collector.fetch_binance_order_book(
+        "BTCUSDT", depth=20, session=session
+    )
+
+    assert list(frame.columns) == [
+        "timestamp",
+        "bid_price",
+        "bid_volume",
+        "ask_price",
+        "ask_volume",
+        "spread",
+        "mid_price",
+        "bid_volume_total",
+        "ask_volume_total",
+        "bid_notional_total",
+        "ask_notional_total",
+        "depth_imbalance",
+    ]
+    assert frame.shape[0] == 1
+
+    row = frame.iloc[0]
+    assert row["bid_price"] == pytest.approx(50_000.0)
+    assert row["ask_price"] == pytest.approx(50_010.0)
+    assert row["spread"] == pytest.approx(10.0)
+    assert row["bid_volume_total"] == pytest.approx(1.75)
+    assert row["ask_volume_total"] == pytest.approx(3.0)
+    assert -1.0 <= row["depth_imbalance"] <= 1.0
+    assert session.calls[0]["params"]["limit"] == 20
+
+
+def test_fetch_binance_order_book_handles_missing_levels():
+    payload = {"bids": [], "asks": []}
+    session = _DummySession(payload)
+
+    frame = data_collector.fetch_binance_order_book("BTCUSDT", session=session)
+
+    assert frame.empty
+    assert list(frame.columns) == [
+        "timestamp",
+        "bid_price",
+        "bid_volume",
+        "ask_price",
+        "ask_volume",
+        "spread",
+        "mid_price",
+        "bid_volume_total",
+        "ask_volume_total",
+        "bid_notional_total",
+        "ask_notional_total",
+        "depth_imbalance",
+    ]
+
+
+def test_fetch_binance_order_book_rejects_invalid_depth():
+    session = _DummySession({"bids": [], "asks": []})
+    with pytest.raises(ValueError):
+        data_collector.fetch_binance_order_book("BTCUSDT", depth=0, session=session)
+
+
 def test_load_enriched_market_data_aligns_daily_series(monkeypatch):
     base = pd.DataFrame(
         {

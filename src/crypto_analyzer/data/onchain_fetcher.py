@@ -16,6 +16,15 @@ MEMPOOL_STATS_ENDPOINT = "https://mempool.space/api/mempool"
 MEMPOOL_FEES_ENDPOINT = "https://mempool.space/api/v1/fees/recommended"
 GLASSNODE_EXCHANGE_INFLOW_ENDPOINT = "https://api.glassnode.com/v1/metrics/exchanges/inflow_sum"
 GLASSNODE_EXCHANGE_OUTFLOW_ENDPOINT = "https://api.glassnode.com/v1/metrics/exchanges/outflow_sum"
+COINMETRICS_ASSET_METRICS_ENDPOINT = (
+    "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+)
+
+_COINMETRICS_COLUMN_MAP = {
+    "ExchgNetFlow": "onch_exchange_net_flow",
+    "ExchgInflowVolume": "onch_exchange_inflow",
+    "ExchgOutflowVolume": "onch_exchange_outflow",
+}
 
 
 def _empty_timestamp_frame(columns: list[str]) -> pd.DataFrame:
@@ -174,4 +183,96 @@ def fetch_exchange_flows(
     return frame
 
 
-__all__ = ["fetch_mempool_stats", "fetch_exchange_flows"]
+def _format_coinmetrics_timestamp(value: Any) -> str:
+    ts = _ensure_utc_timestamp(value)
+    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fetch_coinmetrics_exchange_flows(
+    *,
+    asset: str = "btc",
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+    metrics: tuple[str, ...] = tuple(_COINMETRICS_COLUMN_MAP.keys()),
+    session: requests.Session | None = None,
+) -> pd.DataFrame:
+    """Fetch exchange flow metrics from the CoinMetrics community API."""
+
+    if not metrics:
+        raise ValueError("At least one metric must be requested from CoinMetrics")
+
+    params: dict[str, Any] = {
+        "assets": asset.lower(),
+        "metrics": ",".join(metrics),
+        "frequency": "1d",
+    }
+    if start is not None:
+        params["start_time"] = _format_coinmetrics_timestamp(start)
+    if end is not None:
+        params["end_time"] = _format_coinmetrics_timestamp(end)
+
+    sess = session or requests.Session()
+    collected: list[dict[str, Any]] = []
+    next_token: str | None = None
+
+    try:
+        for _ in range(16):  # defensive guard against endless pagination loops
+            request_params = params.copy()
+            if next_token:
+                request_params["page_token"] = next_token
+            response = sess.get(
+                COINMETRICS_ASSET_METRICS_ENDPOINT,
+                params=request_params,
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            data_chunk = payload.get("data", [])
+            if data_chunk:
+                collected.extend(data_chunk)
+            next_token = payload.get("next_page_token")
+            if not next_token:
+                break
+        else:
+            logger.warning("CoinMetrics pagination exceeded iteration guard; aborting fetch")
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Failed to fetch CoinMetrics exchange flows", exc_info=exc)
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics]
+        return _empty_timestamp_frame(target_cols)
+
+    if not collected:
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics]
+        return _empty_timestamp_frame(target_cols)
+
+    frame = pd.DataFrame(collected)
+    if frame.empty or "time" not in frame.columns:
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics]
+        return _empty_timestamp_frame(target_cols)
+
+    frame["timestamp"] = pd.to_datetime(frame["time"], utc=True, errors="coerce")
+    frame = frame.dropna(subset=["timestamp"])  # drop rows with invalid timestamps
+
+    rename_map = {metric: _COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics}
+    available_metrics = [metric for metric in metrics if metric in frame.columns]
+    if not available_metrics:
+        target_cols = list(rename_map.values())
+        return _empty_timestamp_frame(target_cols)
+
+    frame = frame.rename(columns=rename_map)
+    for column in rename_map.values():
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    desired_columns = [rename_map[metric] for metric in available_metrics]
+    frame = frame.set_index("timestamp")
+    frame = frame.loc[:, desired_columns]
+    frame.index.name = "timestamp"
+    frame = frame.sort_index()
+    return frame
+
+
+__all__ = [
+    "fetch_mempool_stats",
+    "fetch_exchange_flows",
+    "fetch_coinmetrics_exchange_flows",
+]

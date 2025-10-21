@@ -10,9 +10,11 @@ import pytest
 import requests
 
 from crypto_analyzer.data.onchain_fetcher import (
+    COINMETRICS_ASSET_METRICS_ENDPOINT,
     GLASSNODE_EXCHANGE_INFLOW_ENDPOINT,
     GLASSNODE_EXCHANGE_OUTFLOW_ENDPOINT,
     fetch_exchange_flows,
+    fetch_coinmetrics_exchange_flows,
     fetch_mempool_stats,
 )
 
@@ -169,3 +171,58 @@ def test_fetch_exchange_flows_handles_request_errors() -> None:
     assert frame.index.name == "timestamp"
     assert frame.index.tz is not None
     assert list(frame.columns) == ["onch_exchange_inflow", "onch_exchange_outflow"]
+
+
+def test_fetch_coinmetrics_exchange_flows_paginates_and_parses() -> None:
+    page_one = {
+        "data": [
+            {
+                "time": "2024-01-01T00:00:00Z",
+                "ExchgNetFlow": "10.5",
+                "ExchgInflowVolume": "20.0",
+                "ExchgOutflowVolume": "9.5",
+            }
+        ],
+        "next_page_token": "token-1",
+    }
+    page_two = {
+        "data": [
+            {
+                "time": "2024-01-02T00:00:00Z",
+                "ExchgNetFlow": "-3.0",
+                "ExchgInflowVolume": "12.0",
+                "ExchgOutflowVolume": "15.0",
+            }
+        ]
+    }
+    session = QueueSession([DummyResponse(page_one), DummyResponse(page_two)])
+
+    frame = fetch_coinmetrics_exchange_flows(session=session)
+
+    assert list(frame.columns) == [
+        "onch_exchange_net_flow",
+        "onch_exchange_inflow",
+        "onch_exchange_outflow",
+    ]
+    assert frame.index.name == "timestamp"
+    assert frame.index.tz is not None
+    assert frame.iloc[0, 0] == pytest.approx(10.5)
+    assert frame.iloc[1, 1] == pytest.approx(12.0)
+    assert frame.iloc[1, 2] == pytest.approx(15.0)
+
+    first_call = session.calls[0]
+    assert first_call[0] == COINMETRICS_ASSET_METRICS_ENDPOINT
+    assert first_call[1]["params"]["frequency"] == "1d"
+    second_call = session.calls[1]
+    assert second_call[1]["params"]["page_token"] == "token-1"
+
+
+def test_fetch_coinmetrics_exchange_flows_handles_errors() -> None:
+    class FailingSession:
+        def get(self, *_: Any, **__: Any) -> Any:
+            raise requests.RequestException("bad")
+
+    frame = fetch_coinmetrics_exchange_flows(session=FailingSession())
+
+    assert frame.empty
+    assert frame.index.tz is not None

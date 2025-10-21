@@ -63,6 +63,7 @@ TABLE_DEFINITIONS: dict[str, str] = {
         CREATE TABLE IF NOT EXISTS sentiment_index (
             timestamp TIMESTAMPTZ NOT NULL,
             value SMALLINT CHECK (value BETWEEN 0 AND 100),
+            classification TEXT,
             PRIMARY KEY (timestamp)
         )
     """,
@@ -128,6 +129,7 @@ COMBINED_FEATURES_VIEW = """
         oc.exchange_outflow,
         oc.whale_transactions,
         si.value AS fear_greed_index,
+        si.classification AS fear_greed_classification,
         ss.reddit_score,
         ss.twitter_score,
         ss.mentions,
