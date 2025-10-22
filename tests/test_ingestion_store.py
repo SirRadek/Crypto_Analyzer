@@ -83,6 +83,73 @@ def test_store_derivatives_upserts_and_tracks_latest_timestamp() -> None:
     assert stored_basis == pytest.approx(200.0)
 
 
+def test_store_derivatives_preserves_existing_basis_values() -> None:
+    engine = _setup_engine()
+    initial_funding = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-02-01T00:00:00Z"),
+                pd.Timestamp("2024-02-01T08:00:00Z"),
+            ],
+            "funding_rate": [0.01, 0.02],
+        }
+    )
+    initial_basis = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-02-01T00:00:00Z")],
+            "basis": [125.0],
+        }
+    )
+
+    ingestion_store.store_derivatives(
+        initial_funding,
+        pd.DataFrame(),
+        initial_basis,
+        engine=engine,
+        symbol="BTCUSDT",
+    )
+
+    follow_up_funding = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-02-01T00:00:00Z"),
+                pd.Timestamp("2024-02-01T08:00:00Z"),
+            ],
+            "funding_rate": [0.015, 0.025],
+        }
+    )
+    follow_up_basis = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-02-01T08:00:00Z")],
+            "basis": [175.0],
+        }
+    )
+
+    ingestion_store.store_derivatives(
+        follow_up_funding,
+        pd.DataFrame(),
+        follow_up_basis,
+        engine=engine,
+        symbol="BTCUSDT",
+    )
+
+    query = select(ingestion_store.DERIVATIVES_TABLE.c.basis).where(
+        ingestion_store.DERIVATIVES_TABLE.c.timestamp == pd.Timestamp("2024-02-01T00:00:00Z"),
+        ingestion_store.DERIVATIVES_TABLE.c.symbol == "BTCUSDT",
+    )
+    with engine.connect() as conn:
+        preserved_basis = conn.execute(query).scalar_one()
+    assert preserved_basis == pytest.approx(125.0)
+
+    follow_up_query = select(ingestion_store.DERIVATIVES_TABLE.c.basis).where(
+        ingestion_store.DERIVATIVES_TABLE.c.timestamp == pd.Timestamp("2024-02-01T08:00:00Z"),
+        ingestion_store.DERIVATIVES_TABLE.c.symbol == "BTCUSDT",
+    )
+    with engine.connect() as conn:
+        updated_basis = conn.execute(follow_up_query).scalar_one()
+    assert updated_basis == pytest.approx(175.0)
+
+
 def test_store_news_deduplicates_by_url() -> None:
     engine = _setup_engine()
     news = pd.DataFrame(

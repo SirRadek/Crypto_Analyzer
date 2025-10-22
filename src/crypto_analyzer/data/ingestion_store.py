@@ -174,7 +174,14 @@ def _prepare_records(frame: pd.DataFrame, *, extra: dict[str, object] | None = N
     return records
 
 
-def _upsert(table: Table, records: Iterable[dict[str, object]], engine: Engine, conflict_cols: tuple[str, ...]) -> int:
+def _upsert(
+    table: Table,
+    records: Iterable[dict[str, object]],
+    engine: Engine,
+    conflict_cols: tuple[str, ...],
+    *,
+    update_columns: Iterable[str] | None = None,
+) -> int:
     payload = list(records)
     if not payload:
         return 0
@@ -182,10 +189,12 @@ def _upsert(table: Table, records: Iterable[dict[str, object]], engine: Engine, 
     dialect = engine.dialect.name
 
     def _build_update_cols(insert_stmt):
+        allowed = set(update_columns) if update_columns is not None else None
         return {
             col.name: getattr(insert_stmt.excluded, col.name)
             for col in table.c
             if col.name not in conflict_cols and not col.primary_key
+            and (allowed is None or col.name in allowed)
         }
 
     if dialect == "postgresql":
@@ -283,7 +292,39 @@ def store_derivatives(
     merged = merged.sort_values("timestamp").reset_index(drop=True)
 
     records = _prepare_records(merged)
-    inserted = _upsert(DERIVATIVES_TABLE, records, engine, ("timestamp", "symbol"))
+    if not records:
+        return StoreResult(0)
+
+    records_with_basis: list[dict[str, object]] = []
+    records_without_basis: list[dict[str, object]] = []
+
+    for record in records:
+        if "basis" in record:
+            if record["basis"] is None:
+                trimmed = {key: value for key, value in record.items() if key != "basis"}
+                records_without_basis.append(trimmed)
+            else:
+                records_with_basis.append(record)
+        else:
+            records_without_basis.append(record)
+
+    inserted = 0
+    if records_without_basis:
+        update_columns = sorted({key for record in records_without_basis for key in record})
+        inserted += _upsert(
+            DERIVATIVES_TABLE,
+            records_without_basis,
+            engine,
+            ("timestamp", "symbol"),
+            update_columns=update_columns,
+        )
+    if records_with_basis:
+        inserted += _upsert(
+            DERIVATIVES_TABLE,
+            records_with_basis,
+            engine,
+            ("timestamp", "symbol"),
+        )
     return StoreResult(inserted)
 
 
