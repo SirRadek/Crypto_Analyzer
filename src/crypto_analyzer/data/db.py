@@ -2,8 +2,11 @@
 
 This module provides helpers to connect to a TimescaleDB/PostgreSQL instance and
 ensure that all tables required by the project exist as hypertables.  The
-``combined_features`` view aggregates the most important features for the ML
-pipeline in a single relation.
+``combined_features`` materialized view aggregates the most important features
+for the ML pipeline in a single relation so feature engineering queries can hit
+a precomputed join instead of recalculating it on the fly.  Recreate or refresh
+the materialized view whenever one of the underlying tables changes schema or
+receives new data.
 
 Typical usage from the command line::
 
@@ -125,12 +128,40 @@ HYPERTABLE_STATEMENTS: tuple[str, ...] = (
     "SELECT create_hypertable('news', 'timestamp', if_not_exists => TRUE)",
 )
 
-COMBINED_FEATURES_VIEW = """
-    CREATE OR REPLACE VIEW combined_features AS
+_PREFERRED_MARKET_INTERVAL = CONFIG.interval.replace("'", "''")
+
+COMBINED_FEATURES_DEPENDENCIES: tuple[str, ...] = (
+    "market_data",
+    "derivatives_signals",
+    "onchain_metrics",
+    "sentiment_index",
+    "social_sentiment",
+    "news",
+)
+
+COMBINED_FEATURES_MATERIALIZED_VIEW = f"""
+    CREATE MATERIALIZED VIEW combined_features AS
+    WITH base_market_data AS (
+        SELECT DISTINCT ON (timestamp, symbol)
+            timestamp,
+            symbol,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            quote_volume,
+            trades
+        FROM market_data
+        ORDER BY
+            timestamp,
+            symbol,
+            CASE WHEN interval = '{_PREFERRED_MARKET_INTERVAL}' THEN 0 ELSE 1 END,
+            interval
+    )
     SELECT
         md.timestamp,
         md.symbol,
-        md.interval,
         md.open,
         md.high,
         md.low,
@@ -151,10 +182,8 @@ COMBINED_FEATURES_VIEW = """
         ss.reddit_score,
         ss.twitter_score,
         ss.mentions,
-        ss.twitter_positive_count,
-        ss.twitter_negative_count,
         news_agg.sentiment AS news_sentiment
-    FROM market_data AS md
+    FROM base_market_data AS md
     LEFT JOIN derivatives_signals AS ds
         ON ds.timestamp = md.timestamp AND ds.symbol = md.symbol
     LEFT JOIN onchain_metrics AS oc
@@ -170,6 +199,11 @@ COMBINED_FEATURES_VIEW = """
         FROM news
         GROUP BY timestamp
     ) AS news_agg ON news_agg.timestamp = md.timestamp
+"""
+
+COMBINED_FEATURES_INDEX = """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_combined_features_timestamp_symbol
+        ON combined_features (timestamp, symbol)
 """
 
 
@@ -273,6 +307,96 @@ def _execute_statements(conn: PGConnection, statements: Iterable[str]) -> None:
             cursor.execute(statement)
 
 
+def _ensure_combined_features_dependencies(conn: PGConnection) -> None:
+    """Validate that the tables required by ``combined_features`` exist."""
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = ANY(%s)
+            """,
+            (list(COMBINED_FEATURES_DEPENDENCIES),),
+        )
+        existing = {name for (name,) in cursor.fetchall()}
+
+    missing = set(COMBINED_FEATURES_DEPENDENCIES) - existing
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise RuntimeError(
+            "Cannot create combined_features materialized view; missing tables: %s" % joined
+        )
+
+
+def _create_combined_features_materialized_view(conn: PGConnection) -> None:
+    """Create the ``combined_features`` materialized view and its index."""
+
+    _ensure_combined_features_dependencies(conn)
+    LOGGER.info("Creating combined_features materialized view")
+    _execute_statements(
+        conn,
+        (
+            "DROP MATERIALIZED VIEW IF EXISTS combined_features",
+            "DROP VIEW IF EXISTS combined_features",
+            COMBINED_FEATURES_MATERIALIZED_VIEW,
+            COMBINED_FEATURES_INDEX,
+        ),
+    )
+
+
+def refresh_combined_features(
+    conn: PGConnection,
+    *,
+    concurrently: bool = False,
+) -> None:
+    """Refresh the ``combined_features`` materialized view.
+
+    Parameters
+    ----------
+    conn:
+        Open psycopg2 connection targeting TimescaleDB.
+    concurrently:
+        Request ``REFRESH MATERIALIZED VIEW CONCURRENTLY`` to keep the view
+        accessible for reads during refresh.  Requires the unique index created
+        by :func:`_create_combined_features_materialized_view`.
+
+    Notes
+    -----
+    Schedule refreshes after data ingestion completes (e.g. nightly) so model
+    training jobs always see up-to-date features.  ``REFRESH CONCURRENTLY``
+    avoids blocking reads but still needs to reprocess the full dataset; when
+    refresh time becomes an issue consider partial refresh strategies such as
+    materializing only recent partitions into staging tables.
+    """
+
+    keyword = " CONCURRENTLY" if concurrently else ""
+    statement = f"REFRESH MATERIALIZED VIEW{keyword} combined_features"
+    original_autocommit_value = getattr(conn, "autocommit", False)
+    original_autocommit = bool(original_autocommit_value)
+    autocommit_enabled = False
+
+    try:
+        if concurrently and not original_autocommit:
+            conn.autocommit = True
+            autocommit_enabled = True
+
+        with conn.cursor() as cursor:
+            cursor.execute(statement)
+
+        if not concurrently and not original_autocommit:
+            conn.commit()
+    except Exception as exc:
+        if not concurrently and not original_autocommit:
+            conn.rollback()
+        LOGGER.error("Failed to refresh combined_features materialized view: %s", exc)
+        raise
+    finally:
+        if autocommit_enabled:
+            conn.autocommit = original_autocommit_value
+
+
 def _ensure_column_exists(
     conn: PGConnection,
     table_name: str,
@@ -319,8 +443,7 @@ def initialize_schema(conn: PGConnection) -> None:
         LOGGER.info("Converting tables to hypertables")
         _execute_statements(conn, HYPERTABLE_STATEMENTS)
 
-        LOGGER.info("Creating combined_features view")
-        _execute_statements(conn, (COMBINED_FEATURES_VIEW,))
+        _create_combined_features_materialized_view(conn)
 
         conn.commit()
     except Exception:
