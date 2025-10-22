@@ -36,6 +36,7 @@ DERIVATIVES_TABLE = Table(
     Column("symbol", String(20), nullable=False),
     Column("funding_rate", Float),
     Column("open_interest", Float),
+    Column("basis", Float),
     Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
     UniqueConstraint("timestamp", "symbol", name="ux_derivatives_intraday"),
 )
@@ -243,6 +244,7 @@ def latest_fear_greed_timestamp(engine: Engine) -> pd.Timestamp | None:
 def store_derivatives(
     funding: pd.DataFrame,
     open_interest: pd.DataFrame,
+    basis: pd.DataFrame | None = None,
     *,
     engine: Engine,
     symbol: str,
@@ -254,6 +256,16 @@ def store_derivatives(
         frames.append(frame)
     if not open_interest.empty:
         frame = open_interest.loc[:, ["timestamp", "open_interest"]].copy()
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+        frames.append(frame)
+    if basis is not None and not basis.empty:
+        frame = basis.copy()
+        if "basis" not in frame.columns and "basis_bp" in frame.columns:
+            frame = frame.rename(columns={"basis_bp": "basis"})
+        missing = {"timestamp", "basis"} - set(frame.columns)
+        if missing:
+            raise KeyError(f"Basis frame missing required columns: {sorted(missing)}")
+        frame = frame.loc[:, ["timestamp", "basis"]]
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
         frames.append(frame)
 

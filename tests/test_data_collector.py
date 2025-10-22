@@ -29,6 +29,18 @@ class _DummySession:
         return _DummyResponse(self._payload)
 
 
+class _SequentialSession:
+    def __init__(self, payloads: list[dict[str, object]]):
+        self._payloads = payloads
+        self.calls: list[dict[str, object]] = []
+
+    def get(self, url, params=None, timeout=None):  # noqa: D401 - signature matches requests
+        index = len(self.calls)
+        payload = self._payloads[min(index, len(self._payloads) - 1)]
+        self.calls.append({"url": url, "params": params, "timeout": timeout})
+        return _DummyResponse(payload)
+
+
 def test_fetch_glassnode_active_addresses_parses_payload():
     payload = [
         {"t": 1_609_459_200, "v": 123},
@@ -116,6 +128,32 @@ def test_fetch_binance_order_book_rejects_invalid_depth():
     session = _DummySession({"bids": [], "asks": []})
     with pytest.raises(ValueError):
         data_collector.fetch_binance_order_book("BTCUSDT", depth=0, session=session)
+
+
+def test_fetch_binance_basis_computes_basis_points():
+    futures_payload = {"markPrice": "50000", "time": 1_609_459_200_000}
+    spot_payload = {"price": "49000"}
+    session = _SequentialSession([futures_payload, spot_payload])
+
+    frame = data_collector.fetch_binance_basis("BTCUSDT", session=session)
+
+    assert list(frame.columns) == [
+        "timestamp",
+        "basis",
+        "basis_bp",
+        "futures_price",
+        "spot_price",
+    ]
+    assert frame.shape[0] == 1
+
+    row = frame.iloc[0]
+    expected = (50_000 - 49_000) / 49_000 * 10_000
+    assert row["basis"] == pytest.approx(expected)
+    assert row["basis_bp"] == pytest.approx(expected)
+    assert row["futures_price"] == pytest.approx(50_000.0)
+    assert row["spot_price"] == pytest.approx(49_000.0)
+    assert row["timestamp"].tzinfo is not None
+    assert len(session.calls) == 2
 
 
 def test_load_enriched_market_data_aligns_daily_series(monkeypatch):

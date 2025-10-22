@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pandas as pd
+import pytest
 from sqlalchemy import create_engine, select
 
 from crypto_analyzer.data import ingestion_store
@@ -34,8 +35,23 @@ def test_store_derivatives_upserts_and_tracks_latest_timestamp() -> None:
             "open_interest": [1_000.0, 1_100.0],
         }
     )
+    basis = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-01-01T00:00:00Z"),
+                pd.Timestamp("2024-01-01T16:00:00Z"),
+            ],
+            "basis": [150.0, 200.0],
+        }
+    )
 
-    result = ingestion_store.store_derivatives(funding, open_interest, engine=engine, symbol="BTCUSDT")
+    result = ingestion_store.store_derivatives(
+        funding,
+        open_interest,
+        basis,
+        engine=engine,
+        symbol="BTCUSDT",
+    )
     assert result.inserted == 3
 
     latest = ingestion_store.latest_derivatives_timestamp(engine, symbol="BTCUSDT")
@@ -57,6 +73,14 @@ def test_store_derivatives_upserts_and_tracks_latest_timestamp() -> None:
     with engine.connect() as conn:
         stored_value = conn.execute(query).scalar_one()
     assert stored_value == 0.05
+
+    basis_query = select(ingestion_store.DERIVATIVES_TABLE.c.basis).where(
+        ingestion_store.DERIVATIVES_TABLE.c.timestamp == pd.Timestamp("2024-01-01T16:00:00Z"),
+        ingestion_store.DERIVATIVES_TABLE.c.symbol == "BTCUSDT",
+    )
+    with engine.connect() as conn:
+        stored_basis = conn.execute(basis_query).scalar_one()
+    assert stored_basis == pytest.approx(200.0)
 
 
 def test_store_news_deduplicates_by_url() -> None:

@@ -37,6 +37,8 @@ GLASSNODE_ENDPOINT = "https://api.glassnode.com/v1/metrics/addresses/active_coun
 BINANCE_FUNDING_ENDPOINT = "https://fapi.binance.com/fapi/v1/fundingRate"
 BINANCE_ORDERBOOK_ENDPOINT = "https://fapi.binance.com/fapi/v1/depth"
 BINANCE_OPEN_INTEREST_ENDPOINT = "https://fapi.binance.com/futures/data/openInterestHist"
+BINANCE_PREMIUM_INDEX_ENDPOINT = "https://fapi.binance.com/fapi/v1/premiumIndex"
+BINANCE_SPOT_TICKER_ENDPOINT = "https://api.binance.com/api/v3/ticker/price"
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,93 @@ def fetch_binance_open_interest(
     return frame.loc[:, ["timestamp", "open_interest"]].reset_index(drop=True)
 
 
+def fetch_binance_basis(
+    symbol: str,
+    *,
+    session: requests.Session | None = None,
+    settings: _HTTPSettings | None = None,
+) -> pd.DataFrame:
+    """Compute the futures basis in basis points for ``symbol``.
+
+    The function requests the perpetual futures mark price from Binance's
+    ``/premiumIndex`` endpoint and compares it with the spot ticker price from
+    the main exchange REST API.  The resulting basis is expressed in basis
+    points and aligned to the timestamp reported by the futures endpoint.
+
+    Parameters
+    ----------
+    symbol:
+        Trading pair identifier understood by Binance, e.g. ``"BTCUSDT"``.
+    session:
+        Optional :class:`requests.Session` reused across invocations.
+    settings:
+        Optional :class:`_HTTPSettings` overriding timeout defaults.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Frame with columns ``timestamp``, ``basis`` (basis points),
+        ``basis_bp``, ``futures_price`` and ``spot_price``.  When the exchange
+        returns incomplete data an empty frame is produced.
+    """
+
+    if not symbol or not isinstance(symbol, str):
+        raise ValueError("Symbol must be provided when fetching Binance basis")
+
+    cfg = settings or _HTTPSettings()
+    sess = session or requests.Session()
+
+    params = {"symbol": symbol}
+    response = sess.get(BINANCE_PREMIUM_INDEX_ENDPOINT, params=params, timeout=cfg.timeout)
+    response.raise_for_status()
+    payload = response.json() or {}
+
+    mark_raw = payload.get("markPrice")
+    try:
+        mark_price = float(mark_raw)
+    except (TypeError, ValueError):
+        mark_price = float("nan")
+
+    time_raw = payload.get("time") or payload.get("closeTime") or payload.get("updateTime")
+    if time_raw is not None:
+        try:
+            timestamp = pd.to_datetime(int(time_raw), unit="ms", utc=True)
+        except (TypeError, ValueError):
+            timestamp = pd.Timestamp.now(tz="UTC")
+    else:
+        timestamp = pd.Timestamp.now(tz="UTC")
+
+    spot_response = sess.get(BINANCE_SPOT_TICKER_ENDPOINT, params=params, timeout=cfg.timeout)
+    spot_response.raise_for_status()
+    spot_payload = spot_response.json() or {}
+
+    spot_raw = spot_payload.get("price")
+    try:
+        spot_price = float(spot_raw)
+    except (TypeError, ValueError):
+        spot_price = float("nan")
+
+    if not pd.notna(mark_price) or not pd.notna(spot_price) or spot_price == 0:
+        logger.warning(
+            "Unable to compute Binance basis due to missing price data",
+            extra={"symbol": symbol, "mark_price": mark_raw, "spot_price": spot_raw},
+        )
+        return pd.DataFrame(columns=["timestamp", "basis", "basis_bp", "futures_price", "spot_price"])
+
+    basis_bp = (mark_price - spot_price) / spot_price * 10_000.0
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "basis": [basis_bp],
+            "basis_bp": [basis_bp],
+            "futures_price": [mark_price],
+            "spot_price": [spot_price],
+        }
+    )
+    return frame
+
+
 def _merge_daily_features(base: pd.DataFrame, daily_frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     """Merge daily features into the base OHLCV frame."""
 
@@ -495,6 +584,7 @@ __all__ = [
     "fetch_binance_funding_rates",
     "fetch_binance_order_book",
     "fetch_binance_open_interest",
+    "fetch_binance_basis",
     "fetch_exchange_flows",
     "fetch_mempool_stats",
     "load_enriched_market_data",

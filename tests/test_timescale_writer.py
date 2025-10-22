@@ -90,6 +90,41 @@ def test_save_market_data_requires_symbol(mock_connection: MagicMock, monkeypatc
     writer.execute_batch.assert_not_called()  # type: ignore[attr-defined]
 
 
+def test_save_derivatives_data_accepts_basis_bp(
+    mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute_batch(cursor, sql, params, page_size=None):  # type: ignore[no-untyped-def]
+        captured["sql"] = sql
+        captured["params"] = params
+        captured["page_size"] = page_size
+
+    monkeypatch.setattr(writer, "execute_batch", fake_execute_batch)
+
+    payload = [
+        {
+            "timestamp": "2024-01-01T00:00:00Z",
+            "symbol": "BTCUSDT",
+            "funding_rate": "0.01",
+            "open_interest": "123.45",
+            "basis_bp": "150.5",
+        }
+    ]
+
+    rows = writer.save_derivatives_data(payload, connection=mock_connection)
+
+    assert rows == 1
+    params = captured["params"]
+    assert isinstance(params, list)
+    row = params[0]
+    assert isinstance(row[0], datetime)
+    assert row[1] == "BTCUSDT"
+    assert row[2] == pytest.approx(0.01)
+    assert row[3] == pytest.approx(123.45)
+    assert row[4] == pytest.approx(150.5)
+
+
 def test_save_sentiment_index_validates_range(mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(writer, "execute_batch", MagicMock())
 

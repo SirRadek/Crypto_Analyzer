@@ -297,7 +297,10 @@ def save_derivatives_data(
         sym = _require_string(record.get("symbol"), field="symbol")
         funding = _coerce_float(record.get("funding_rate"), field="funding_rate")
         open_interest = _coerce_float(record.get("open_interest"), field="open_interest")
-        basis = _coerce_float(record.get("basis"), field="basis")
+        basis_value = record.get("basis")
+        if basis_value is None:
+            basis_value = record.get("basis_bp")
+        basis = _coerce_float(basis_value, field="basis")
         payload.append((ts, sym, funding, open_interest, basis))
 
     sql = (

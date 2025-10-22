@@ -14,6 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from crypto_analyzer.data.data_collector import (
+    fetch_binance_basis,
     fetch_binance_funding_rates,
     fetch_binance_open_interest,
     fetch_binance_order_book,
@@ -237,6 +238,44 @@ class DataIngestionScheduler:
     # Job implementations
     # ------------------------------------------------------------------
 
+    def _fetch_with_retries(
+        self,
+        fetcher: Callable[..., pd.DataFrame],
+        *,
+        description: str,
+        job_id: str,
+        max_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        attempts = max(1, (max_attempts or (self.settings.max_retries + 1)))
+        for attempt in range(1, attempts + 1):
+            try:
+                return fetcher(**kwargs)
+            except Exception as exc:  # pragma: no cover - network failures
+                extra = {
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                    "stage": description,
+                }
+                if attempt >= attempts:
+                    self.logger.error(
+                        "Failed to fetch %s after %s attempts",
+                        description,
+                        attempts,
+                        exc_info=exc,
+                        extra=extra,
+                    )
+                    break
+                self.logger.warning(
+                    "Fetch attempt %s/%s for %s failed; retrying",
+                    attempt,
+                    attempts,
+                    description,
+                    extra=extra,
+                )
+        return pd.DataFrame()
+
     def _run_binance_job(self) -> None:
         symbol = self._config.symbol
         now = datetime.now(tz=UTC)
@@ -254,9 +293,35 @@ class DataIngestionScheduler:
             extra={"job_id": "binance", "symbol": symbol, "start": start_dt.isoformat(), "end": now.isoformat()},
         )
 
-        funding = fetch_binance_funding_rates(symbol, start=start_dt, end=now)
-        open_interest = fetch_binance_open_interest(symbol, start=start_dt, end=now)
-        derivatives_result = store_derivatives(funding, open_interest, engine=self.engine, symbol=symbol)
+        funding = self._fetch_with_retries(
+            fetch_binance_funding_rates,
+            description="funding rates",
+            job_id="binance",
+            symbol=symbol,
+            start=start_dt,
+            end=now,
+        )
+        open_interest = self._fetch_with_retries(
+            fetch_binance_open_interest,
+            description="open interest",
+            job_id="binance",
+            symbol=symbol,
+            start=start_dt,
+            end=now,
+        )
+        basis = self._fetch_with_retries(
+            fetch_binance_basis,
+            description="basis",
+            job_id="binance",
+            symbol=symbol,
+        )
+        derivatives_result = store_derivatives(
+            funding,
+            open_interest,
+            basis,
+            engine=self.engine,
+            symbol=symbol,
+        )
 
         orderbook = fetch_binance_order_book(symbol, depth=self.settings.binance_depth)
         orderbook_result = store_orderbook(orderbook, engine=self.engine, symbol=symbol)
@@ -265,6 +330,7 @@ class DataIngestionScheduler:
             "binance",
             {
                 "derivative_rows": derivatives_result.inserted,
+                "basis_rows": 0 if basis.empty else len(basis),
                 "orderbook_rows": orderbook_result.inserted,
             },
         )
