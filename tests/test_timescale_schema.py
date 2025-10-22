@@ -82,19 +82,45 @@ def test_create_materialized_view_runs_all_statements(monkeypatch) -> None:
 
 
 def test_refresh_combined_features_concurrently() -> None:
-    conn = MagicMock()
-    cursor = _mock_cursor(conn)
+    class _CursorStub:
+        def __init__(self, conn: "_ConnectionStub") -> None:
+            self._conn = conn
+            self.executed: list[str] = []
+
+        def execute(self, statement: str) -> None:
+            assert self._conn.autocommit, "autocommit should be enabled for concurrent refresh"
+            self.executed.append(statement)
+
+        def __enter__(self) -> "_CursorStub":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - no cleanup required
+            return None
+
+    class _ConnectionStub:
+        def __init__(self) -> None:
+            self.autocommit = False
+            self.commit = MagicMock()
+            self.rollback = MagicMock()
+            self._cursor = _CursorStub(self)
+
+        def cursor(self) -> _CursorStub:
+            return self._cursor
+
+    conn = _ConnectionStub()
 
     db.refresh_combined_features(conn, concurrently=True)
 
-    cursor.execute.assert_called_once_with(
+    assert conn._cursor.executed == [
         "REFRESH MATERIALIZED VIEW CONCURRENTLY combined_features"
-    )
-    conn.commit.assert_called_once()
+    ]
+    conn.commit.assert_not_called()
+    assert conn.autocommit is False
 
 
 def test_refresh_combined_features_logs_and_rolls_back(caplog: pytest.LogCaptureFixture) -> None:
     conn = MagicMock()
+    conn.autocommit = False
     cursor = _mock_cursor(conn)
     cursor.execute.side_effect = RuntimeError("lock contention")
 

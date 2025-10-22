@@ -373,14 +373,28 @@ def refresh_combined_features(
 
     keyword = " CONCURRENTLY" if concurrently else ""
     statement = f"REFRESH MATERIALIZED VIEW{keyword} combined_features"
+    original_autocommit_value = getattr(conn, "autocommit", False)
+    original_autocommit = bool(original_autocommit_value)
+    autocommit_enabled = False
+
     try:
+        if concurrently and not original_autocommit:
+            conn.autocommit = True
+            autocommit_enabled = True
+
         with conn.cursor() as cursor:
             cursor.execute(statement)
-        conn.commit()
+
+        if not concurrently and not original_autocommit:
+            conn.commit()
     except Exception as exc:
-        conn.rollback()
+        if not concurrently and not original_autocommit:
+            conn.rollback()
         LOGGER.error("Failed to refresh combined_features materialized view: %s", exc)
         raise
+    finally:
+        if autocommit_enabled:
+            conn.autocommit = original_autocommit_value
 
 
 def _ensure_column_exists(
