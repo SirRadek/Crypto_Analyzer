@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+import threading
+import time
 from typing import Any
 
 import pandas as pd
@@ -19,6 +21,15 @@ GLASSNODE_EXCHANGE_OUTFLOW_ENDPOINT = "https://api.glassnode.com/v1/metrics/exch
 COINMETRICS_ASSET_METRICS_ENDPOINT = (
     "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 )
+WHALE_ALERT_TRANSACTIONS_ENDPOINT = "https://api.whale-alert.io/v1/transactions"
+
+_DEFAULT_WHALE_TIMEOUT = 15.0
+_DEFAULT_WHALE_RETRIES = 5
+_DEFAULT_WHALE_BACKOFF = 1.0
+_DEFAULT_WHALE_RATE_LIMIT_SECONDS = 1.0
+
+_WHALE_RATE_LOCK = threading.Lock()
+_WHALE_LAST_CALL: float | None = None
 
 _COINMETRICS_COLUMN_MAP = {
     "ExchgNetFlow": "onch_exchange_net_flow",
@@ -41,6 +52,25 @@ def _ensure_utc_timestamp(value: Any) -> pd.Timestamp:
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
     return ts.tz_convert("UTC")
+
+
+def _respect_whale_rate_limit(
+    min_interval: float, sleep: Callable[[float], None]
+) -> None:
+    """Ensure at least ``min_interval`` seconds elapsed since the previous call."""
+
+    if min_interval <= 0:
+        return
+
+    global _WHALE_LAST_CALL
+    with _WHALE_RATE_LOCK:
+        now = time.monotonic()
+        if _WHALE_LAST_CALL is not None:
+            wait = (_WHALE_LAST_CALL + min_interval) - now
+            if wait > 0:
+                sleep(wait)
+                now = time.monotonic()
+        _WHALE_LAST_CALL = now
 
 
 def fetch_mempool_stats(*, session: requests.Session | None = None) -> pd.DataFrame:
@@ -275,4 +305,213 @@ __all__ = [
     "fetch_mempool_stats",
     "fetch_exchange_flows",
     "fetch_coinmetrics_exchange_flows",
+    "fetch_whale_alert_transactions",
+    "WHALE_ALERT_TRANSACTIONS_ENDPOINT",
 ]
+
+
+def fetch_whale_alert_transactions(
+    *,
+    api_key: str | None,
+    start: pd.Timestamp | str | None = None,
+    end: pd.Timestamp | str | None = None,
+    lookback_hours: float | None = None,
+    currency: str | None = None,
+    min_value_usd: float | None = None,
+    limit: int | None = None,
+    session: requests.Session | None = None,
+    timeout: float = _DEFAULT_WHALE_TIMEOUT,
+    retries: int = _DEFAULT_WHALE_RETRIES,
+    backoff: float = _DEFAULT_WHALE_BACKOFF,
+    rate_limit_seconds: float = _DEFAULT_WHALE_RATE_LIMIT_SECONDS,
+    _sleep: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
+    """Retrieve large transfers from the Whale Alert REST API.
+
+    Parameters
+    ----------
+    api_key:
+        Whale Alert API key.  The function raises :class:`ValueError` when the
+        key is missing or an empty string.
+    start, end:
+        Optional timestamps bounding the requested interval.  When omitted,
+        ``lookback_hours`` must be provided.
+    lookback_hours:
+        Convenience shorthand for fetching the most recent *N* hours of data.
+    currency:
+        Optional asset ticker filter understood by Whale Alert, e.g. ``"USDT"``.
+    min_value_usd:
+        Optional minimum USD value filter.
+    limit:
+        Optional pagination limit (defaults to the API default when omitted).
+    session:
+        Optional :class:`requests.Session` reused across calls.
+    timeout:
+        HTTP timeout per request in seconds.
+    retries, backoff:
+        Retry configuration for transient errors using exponential backoff.
+    rate_limit_seconds:
+        Minimum number of seconds to wait between consecutive API calls.
+    _sleep:
+        Internal testing hook to override :func:`time.sleep`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Data frame indexed by the transaction timestamp with Whale Alert
+        metadata.  Empty results produce an empty frame with the expected
+        columns.
+    """
+
+    key = (api_key or "").strip()
+    if not key:
+        raise ValueError("Whale Alert API key required")
+
+    if lookback_hours is not None:
+        if lookback_hours <= 0:
+            raise ValueError("lookback_hours must be positive when provided")
+        end_ts = _ensure_utc_timestamp(end) if end is not None else pd.Timestamp.utcnow()
+        start_ts = end_ts - pd.Timedelta(hours=lookback_hours)
+    else:
+        if start is None or end is None:
+            raise ValueError("Both start and end must be provided when lookback_hours is omitted")
+        start_ts = _ensure_utc_timestamp(start)
+        end_ts = _ensure_utc_timestamp(end)
+
+    if start_ts >= end_ts:
+        raise ValueError("start must be earlier than end for Whale Alert queries")
+
+    sess = session or requests.Session()
+
+    params: dict[str, Any] = {
+        "start": int(start_ts.timestamp()),
+        "end": int(end_ts.timestamp()),
+        "api_key": key,
+    }
+    if currency:
+        params["currency"] = currency.lower()
+    if min_value_usd is not None:
+        params["min_value"] = float(min_value_usd)
+    if limit is not None:
+        params["limit"] = int(limit)
+
+    delay = max(backoff, 0.0) or 1.0
+    last_error: Exception | None = None
+
+    for attempt in range(max(1, retries)):
+        try:
+            _respect_whale_rate_limit(rate_limit_seconds, _sleep)
+            response = sess.get(
+                WHALE_ALERT_TRANSACTIONS_ENDPOINT,
+                params=params,
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            last_error = exc
+        else:
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    wait_seconds = float(retry_after) if retry_after is not None else delay
+                except ValueError:
+                    wait_seconds = delay
+                logger.warning(
+                    "Whale Alert rate limit hit; retrying", extra={"wait_seconds": wait_seconds}
+                )
+                _sleep(max(wait_seconds, delay))
+                delay *= 2
+                last_error = requests.HTTPError("HTTP 429: Too Many Requests")
+                continue
+
+            if response.status_code in (401, 403):
+                raise ValueError("Whale Alert API key required")
+
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                if 500 <= response.status_code < 600:
+                    last_error = exc
+                else:
+                    raise
+            else:
+                try:
+                    payload = response.json() or {}
+                except ValueError as exc:  # pragma: no cover - defensive guard
+                    raise ValueError("Invalid JSON payload from Whale Alert") from exc
+
+                transactions = payload.get("transactions", [])
+                records: list[dict[str, Any]] = []
+                for tx in transactions:
+                    timestamp_value = tx.get("timestamp")
+                    if timestamp_value is None:
+                        continue
+                    ts = pd.to_datetime(timestamp_value, unit="s", utc=True, errors="coerce")
+                    if pd.isna(ts):
+                        continue
+
+                    from_info = tx.get("from") if isinstance(tx.get("from"), Mapping) else {}
+                    to_info = tx.get("to") if isinstance(tx.get("to"), Mapping) else {}
+
+                    amount_native = tx.get("amount")
+                    amount_usd = tx.get("amount_usd")
+                    try:
+                        amount_native_f = float(amount_native) if amount_native is not None else None
+                    except (TypeError, ValueError):
+                        amount_native_f = None
+                    try:
+                        amount_usd_f = float(amount_usd) if amount_usd is not None else None
+                    except (TypeError, ValueError):
+                        amount_usd_f = None
+
+                    currency_value = tx.get("symbol") or tx.get("currency")
+                    currency_text = str(currency_value).upper() if currency_value else None
+
+                    record = {
+                        "timestamp": ts,
+                        "transaction_hash": tx.get("hash") or tx.get("transaction_hash"),
+                        "blockchain": tx.get("blockchain"),
+                        "currency": currency_text,
+                        "amount": amount_native_f,
+                        "amount_usd": amount_usd_f,
+                        "from_address": from_info.get("address") if isinstance(from_info, Mapping) else None,
+                        "from_owner": from_info.get("owner") if isinstance(from_info, Mapping) else None,
+                        "to_address": to_info.get("address") if isinstance(to_info, Mapping) else None,
+                        "to_owner": to_info.get("owner") if isinstance(to_info, Mapping) else None,
+                    }
+                    records.append(record)
+
+                if not records:
+                    columns = [
+                        "transaction_hash",
+                        "blockchain",
+                        "currency",
+                        "amount",
+                        "amount_usd",
+                        "from_address",
+                        "from_owner",
+                        "to_address",
+                        "to_owner",
+                    ]
+                    index = pd.DatetimeIndex([], name="timestamp", tz="UTC")
+                    return pd.DataFrame(columns=columns, index=index)
+
+                frame = pd.DataFrame.from_records(records)
+                frame = frame.dropna(subset=["timestamp"]).copy()
+                frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+                frame = frame.set_index("timestamp").sort_index()
+
+                logger.info(
+                    "Fetched Whale Alert transactions",
+                    extra={"rows": len(frame), "currency": currency},
+                )
+                return frame
+
+        if attempt == retries - 1:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("Failed to fetch Whale Alert transactions")
+
+        _sleep(delay)
+        delay *= 2
+
+    raise RuntimeError("Exhausted retries fetching Whale Alert transactions")

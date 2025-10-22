@@ -129,3 +129,65 @@ def test_save_news_strips_optional_fields(mock_connection: MagicMock, monkeypatc
     assert row[2] is None  # URL stripped to None
     assert row[3] == "Coindesk"
 
+
+def test_save_whale_transactions_upserts(mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute_batch(cursor, sql, params, page_size=None):  # type: ignore[no-untyped-def]
+        captured["sql"] = sql
+        captured["params"] = params
+        captured["page_size"] = page_size
+
+    monkeypatch.setattr(writer, "execute_batch", fake_execute_batch)
+
+    payload = [
+        {
+            "timestamp": "2024-01-01T00:00:00Z",
+            "transaction_hash": "abc123",
+            "currency": "usdt",
+            "amount": "123.45",
+            "amount_usd": "6789.01",
+            "from_owner": "Exchange A",
+            "to_owner": "Wallet B",
+            "blockchain": "tron",
+        }
+    ]
+
+    rows = writer.save_whale_transactions(payload, connection=mock_connection)
+
+    assert rows == 1
+    assert "INSERT INTO whale_transactions" in captured["sql"]
+    params = captured["params"]
+    assert isinstance(params, list)
+    row = params[0]
+    assert row[1] == "abc123"
+    assert row[2] == "USDT"
+    assert row[3] == pytest.approx(123.45)
+    assert row[4] == pytest.approx(6789.01)
+    assert row[6] == "Exchange A"
+    assert row[8] == "Wallet B"
+    assert captured["page_size"] == 200
+
+    mock_connection.cursor.assert_called_once()
+    mock_connection.commit.assert_called_once()
+    mock_connection.rollback.assert_not_called()
+
+
+def test_save_whale_transactions_validates_required_fields(
+    mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(writer, "execute_batch", MagicMock())
+
+    payload = [
+        {
+            "timestamp": "2024-01-01T00:00:00Z",
+            "currency": "usdt",
+            "amount_usd": "6789.01",
+        }
+    ]
+
+    with pytest.raises(ValueError):
+        writer.save_whale_transactions(payload, connection=mock_connection)
+
+    writer.execute_batch.assert_not_called()  # type: ignore[attr-defined]
+

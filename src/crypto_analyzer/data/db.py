@@ -59,6 +59,21 @@ TABLE_DEFINITIONS: dict[str, str] = {
             PRIMARY KEY (timestamp)
         )
     """,
+    "whale_transactions": """
+        CREATE TABLE IF NOT EXISTS whale_transactions (
+            timestamp TIMESTAMPTZ NOT NULL,
+            transaction_hash TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            amount NUMERIC(30, 10),
+            amount_usd NUMERIC(30, 10),
+            from_address TEXT,
+            from_owner TEXT,
+            to_address TEXT,
+            to_owner TEXT,
+            blockchain TEXT,
+            PRIMARY KEY (timestamp, transaction_hash)
+        )
+    """,
     "sentiment_index": """
         CREATE TABLE IF NOT EXISTS sentiment_index (
             timestamp TIMESTAMPTZ NOT NULL,
@@ -101,6 +116,7 @@ TABLE_DEFINITIONS: dict[str, str] = {
 HYPERTABLE_STATEMENTS: tuple[str, ...] = (
     "SELECT create_hypertable('market_data', 'timestamp', if_not_exists => TRUE)",
     "SELECT create_hypertable('onchain_metrics', 'timestamp', if_not_exists => TRUE)",
+    "SELECT create_hypertable('whale_transactions', 'timestamp', if_not_exists => TRUE)",
     "SELECT create_hypertable('sentiment_index', 'timestamp', if_not_exists => TRUE)",
     "SELECT create_hypertable('social_sentiment', 'timestamp', if_not_exists => TRUE)",
     "SELECT create_hypertable('derivatives_signals', 'timestamp', if_not_exists => TRUE)",
