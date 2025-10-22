@@ -437,6 +437,85 @@ def save_onchain_metrics(
         return written
 
 
+def save_whale_transactions(
+    data: Any,
+    *,
+    connection: PGConnection | None = None,
+    batch_size: int = 200,
+    **connect_kwargs: Any,
+) -> int:
+    """Persist Whale Alert transactions into the ``whale_transactions`` table."""
+
+    records = _ensure_records(data)
+    if not records:
+        LOGGER.debug("No whale transactions supplied – skipping insert")
+        return 0
+
+    payload: list[tuple[Any, ...]] = []
+    for record in records:
+        tx_hash_value = record.get("transaction_hash") or record.get("hash")
+        currency_value = record.get("currency") or record.get("symbol")
+        blockchain = record.get("blockchain")
+
+        from_info = record.get("from") if isinstance(record.get("from"), Mapping) else None
+        to_info = record.get("to") if isinstance(record.get("to"), Mapping) else None
+
+        from_address = record.get("from_address")
+        if from_address is None and isinstance(from_info, Mapping):
+            from_address = from_info.get("address")
+        to_address = record.get("to_address")
+        if to_address is None and isinstance(to_info, Mapping):
+            to_address = to_info.get("address")
+
+        from_owner = record.get("from_owner")
+        if from_owner is None and isinstance(from_info, Mapping):
+            from_owner = from_info.get("owner")
+        to_owner = record.get("to_owner")
+        if to_owner is None and isinstance(to_info, Mapping):
+            to_owner = to_info.get("owner")
+
+        ts = _ensure_timestamp(record.get("timestamp"))
+        tx_hash = _require_string(tx_hash_value, field="transaction_hash")
+        currency = _require_string(currency_value, field="currency").upper()
+        amount = _coerce_float(record.get("amount"), field="amount")
+        amount_usd = _coerce_float(record.get("amount_usd"), field="amount_usd", required=True)
+        payload.append(
+            (
+                ts,
+                tx_hash,
+                currency,
+                amount,
+                amount_usd,
+                _optional_string(from_address),
+                _optional_string(from_owner),
+                _optional_string(to_address),
+                _optional_string(to_owner),
+                _optional_string(blockchain),
+            )
+        )
+
+    sql = (
+        "INSERT INTO whale_transactions "
+        "(timestamp, transaction_hash, currency, amount, amount_usd, from_address, "
+        "from_owner, to_address, to_owner, blockchain) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (timestamp, transaction_hash) DO UPDATE SET "
+        "currency = EXCLUDED.currency, "
+        "amount = EXCLUDED.amount, "
+        "amount_usd = EXCLUDED.amount_usd, "
+        "from_address = EXCLUDED.from_address, "
+        "from_owner = EXCLUDED.from_owner, "
+        "to_address = EXCLUDED.to_address, "
+        "to_owner = EXCLUDED.to_owner, "
+        "blockchain = EXCLUDED.blockchain"
+    )
+
+    with _managed_connection(connection, connect_kwargs) as conn:
+        written = _execute_upsert(conn, sql, payload, page_size=batch_size)
+        LOGGER.info("Stored whale transaction rows", extra={"rows": written})
+        return written
+
+
 def save_news(
     data: Any,
     *,
@@ -482,5 +561,6 @@ __all__ = [
     "save_sentiment_index",
     "save_onchain_metrics",
     "save_news",
+    "save_whale_transactions",
 ]
 

@@ -8,6 +8,7 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
+from crypto_analyzer.data.onchain_fetcher import fetch_whale_alert_transactions
 from crypto_analyzer.utils.config import CONFIG, OnChainSettings
 from crypto_analyzer.utils.timeframes import interval_to_pandas_freq
 
@@ -163,31 +164,23 @@ def fetch_usdt_events(start: datetime, end: datetime, api_key: str | None = None
     key = api_key or SETTINGS.whale_api_key
     if not key:
         raise ValueError("api_key required for Whale Alert")
+
     sess = _session()
-    params = {
-        "start": int(start.timestamp()),
-        "end": int(end.timestamp()),
-        "currency": "usdt",
-        "api_key": key,
-    }
-    resp = _get_with_retry(
-        sess,
-        "https://api.whale-alert.io/v1/transactions",
-        params=params,
+    tx_frame = fetch_whale_alert_transactions(
+        api_key=key,
+        start=start,
+        end=end,
+        currency="USDT",
+        session=sess,
         timeout=SETTINGS.request_timeout,
         retries=SETTINGS.request_retries,
+        backoff=1.0,
     )
-    data = resp.json().get("transactions", [])
-    records: list[dict[str, float]] = []
-    for tx in data:
-        ts = pd.to_datetime(tx.get("timestamp"), unit="s", utc=True)
-        usd = float(tx.get("amount_usd", 0.0))
-        records.append({"timestamp": ts, "usd": usd})
-    df = pd.DataFrame(records)
-    if not df.empty:
-        df = df.set_index("timestamp").sort_index()
+
+    if not tx_frame.empty:
+        df = tx_frame.copy()
         df["onch_usdt_count"] = 1
-        df.rename(columns={"usd": "onch_usd"}, inplace=True)
+        df["onch_usd"] = df["amount_usd"].fillna(0.0)
         df = df.resample(CANDLE_FREQ, label="right", closed="right").agg(
             {"onch_usdt_count": "sum", "onch_usd": "sum"}
         )
