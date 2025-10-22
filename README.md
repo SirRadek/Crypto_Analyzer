@@ -118,6 +118,40 @@ ALTER TABLE social_sentiment
     ADD COLUMN twitter_negative_count BIGINT;
 ```
 
+### Combined features materialized view
+
+Schema initialisation now provisions a `combined_features` materialized view
+that pre-joins the market, derivative, on-chain, sentiment and news signals. The
+view stores one row per `(timestamp, symbol)` with columns such as
+`open/high/low/close`, `funding_rate`, `active_addresses`, the
+Fear & Greed index, social scores and aggregated news sentiment so feature store
+queries no longer repeat the join.
+
+To build or rebuild the view manually run:
+
+```sql
+DROP MATERIALIZED VIEW IF EXISTS combined_features;
+CREATE MATERIALIZED VIEW combined_features AS
+    SELECT ...;  -- see ``crypto_analyzer.data.db`` for the canonical SELECT
+CREATE UNIQUE INDEX IF NOT EXISTS idx_combined_features_timestamp_symbol
+    ON combined_features (timestamp, symbol);
+```
+
+Refresh the materialized view after ingesting new data so downstream consumers
+observe the latest features:
+
+```sql
+REFRESH MATERIALIZED VIEW combined_features;
+-- or keep the relation readable during the refresh (requires the unique index)
+REFRESH MATERIALIZED VIEW CONCURRENTLY combined_features;
+```
+
+Large backfills benefit from scheduling the refresh (for example nightly) or
+recomputing only recent partitions into staging tables before swapping them in.
+If the schema of an upstream table changes, drop and recreate the materialized
+view so it reflects the new layout. Creation fails fast when required source
+tables are missing, helping diagnose incomplete deployments.
+
 #### Windows: pandas build failure (`Could not parse vswhere.exe output`)
 
 On some Windows setups, installing the dependencies can fail while building
