@@ -178,3 +178,36 @@ def test_store_news_deduplicates_by_url() -> None:
     with engine.connect() as conn:
         sentiment_value = conn.execute(query).scalar_one()
     assert sentiment_value == 0.5
+
+
+def test_store_whale_transactions_upserts_latest_timestamp() -> None:
+    engine = _setup_engine()
+    base = pd.Timestamp("2024-03-01T00:00:00Z")
+    transactions = pd.DataFrame(
+        {
+            "timestamp": [base, base + pd.Timedelta(hours=6)],
+            "transaction_hash": ["hash-1", "hash-2"],
+            "currency": ["btc", "eth"],
+            "amount": [12.5, 20.0],
+            "amount_usd": [325_000.0, 450_000.0],
+            "from_address": ["addr-1", None],
+            "to_address": ["addr-2", "addr-3"],
+        }
+    )
+
+    result = ingestion_store.store_whale_transactions(transactions, engine=engine)
+    assert result.inserted == 2
+
+    latest = ingestion_store.latest_whale_transaction_timestamp(engine)
+    assert latest is not None
+    assert latest.tz_convert("UTC").to_pydatetime() == datetime(2024, 3, 1, 6, tzinfo=timezone.utc)
+
+    update = transactions.iloc[[1]].assign(amount_usd=[475_000.0])
+    ingestion_store.store_whale_transactions(update, engine=engine)
+
+    query = select(ingestion_store.WHALE_TRANSACTIONS_TABLE.c.amount_usd).where(
+        ingestion_store.WHALE_TRANSACTIONS_TABLE.c.transaction_hash == "hash-2"
+    )
+    with engine.connect() as conn:
+        stored_amount = conn.execute(query).scalar_one()
+    assert stored_amount == pytest.approx(475_000.0)

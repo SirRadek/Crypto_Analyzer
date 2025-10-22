@@ -126,6 +126,23 @@ FEAR_GREED_TABLE = Table(
     Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+WHALE_TRANSACTIONS_TABLE = Table(
+    "whale_transactions",
+    _METADATA,
+    Column("timestamp", DateTime(timezone=True), nullable=False),
+    Column("transaction_hash", String(128), nullable=False),
+    Column("blockchain", String(64)),
+    Column("currency", String(32)),
+    Column("amount", Float),
+    Column("amount_usd", Float),
+    Column("from_address", String(128)),
+    Column("from_owner", String(128)),
+    Column("to_address", String(128)),
+    Column("to_owner", String(128)),
+    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("timestamp", "transaction_hash", name="ux_whale_transactions"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class StoreResult:
@@ -248,6 +265,10 @@ def latest_coinmetrics_timestamp(engine: Engine, *, asset: str) -> pd.Timestamp 
 
 def latest_fear_greed_timestamp(engine: Engine) -> pd.Timestamp | None:
     return _latest_timestamp(FEAR_GREED_TABLE, engine)
+
+
+def latest_whale_transaction_timestamp(engine: Engine) -> pd.Timestamp | None:
+    return _latest_timestamp(WHALE_TRANSACTIONS_TABLE, engine)
 
 
 def store_derivatives(
@@ -419,12 +440,62 @@ def store_fear_greed_index(index_frame: pd.DataFrame, *, engine: Engine) -> Stor
     return StoreResult(inserted)
 
 
+def store_whale_transactions(transactions: pd.DataFrame, *, engine: Engine) -> StoreResult:
+    if transactions.empty:
+        return StoreResult(0)
+
+    frame = transactions.copy()
+    if "timestamp" not in frame.columns:
+        frame = frame.reset_index()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame = frame.dropna(subset=["timestamp", "transaction_hash"]).reset_index(drop=True)
+
+    if "transaction_hash" in frame.columns:
+        frame["transaction_hash"] = frame["transaction_hash"].astype(str).str.strip()
+        frame = frame.loc[frame["transaction_hash"] != ""]
+
+    if "currency" in frame.columns:
+        mask = frame["currency"].notna()
+        frame.loc[mask, "currency"] = frame.loc[mask, "currency"].astype(str).str.upper()
+        frame.loc[~mask, "currency"] = None
+
+    for column in ("from_address", "from_owner", "to_address", "to_owner", "blockchain"):
+        if column in frame.columns:
+            mask = frame[column].notna()
+            frame.loc[mask, column] = frame.loc[mask, column].astype(str).str.strip()
+            frame.loc[~mask, column] = None
+
+    records = _prepare_records(frame)
+    if not records:
+        return StoreResult(0)
+
+    update_columns = (
+        "blockchain",
+        "currency",
+        "amount",
+        "amount_usd",
+        "from_address",
+        "from_owner",
+        "to_address",
+        "to_owner",
+    )
+    inserted = _upsert(
+        WHALE_TRANSACTIONS_TABLE,
+        records,
+        engine,
+        ("timestamp", "transaction_hash"),
+        update_columns=update_columns,
+    )
+    return StoreResult(inserted)
+
+
 __all__ = [
     "StoreResult",
     "ensure_schema",
     "latest_coinmetrics_timestamp",
     "latest_derivatives_timestamp",
     "latest_fear_greed_timestamp",
+    "latest_whale_transaction_timestamp",
     "latest_glassnode_timestamp",
     "store_coinmetrics_flows",
     "store_derivatives",
@@ -433,4 +504,5 @@ __all__ = [
     "store_news",
     "store_orderbook",
     "store_reddit_sentiment",
+    "store_whale_transactions",
 ]
