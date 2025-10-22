@@ -27,6 +27,7 @@ from crypto_analyzer.data.ingestion_store import (
     latest_derivatives_timestamp,
     latest_fear_greed_timestamp,
     latest_glassnode_timestamp,
+    latest_whale_transaction_timestamp,
     store_coinmetrics_flows,
     store_derivatives,
     store_fear_greed_index,
@@ -34,9 +35,13 @@ from crypto_analyzer.data.ingestion_store import (
     store_news,
     store_orderbook,
     store_reddit_sentiment,
+    store_whale_transactions,
 )
 from crypto_analyzer.data.news_fetcher import fetch_cryptopanic_news
-from crypto_analyzer.data.onchain_fetcher import fetch_coinmetrics_exchange_flows
+from crypto_analyzer.data.onchain_fetcher import (
+    fetch_coinmetrics_exchange_flows,
+    fetch_whale_alert_transactions,
+)
 from crypto_analyzer.data.sentiment_index_fetcher import fetch_fear_greed_index
 from crypto_analyzer.data.social_sentiment import fetch_reddit_sentiment
 from crypto_analyzer.utils.logging import get_logger
@@ -130,6 +135,11 @@ class DataIngestionScheduler:
             api_key = get_secret("GLASSNODE_API_KEY")
         self._glassnode_api_key = api_key
 
+        whale_key = getattr(onchain_cfg, "whale_api_key", None) if onchain_cfg else None
+        if not whale_key:
+            whale_key = get_secret("WHALE_API_KEY")
+        self._whale_api_key = whale_key
+
     # ------------------------------------------------------------------
     # Job scheduling helpers
     # ------------------------------------------------------------------
@@ -180,15 +190,35 @@ class DataIngestionScheduler:
             )
 
         daily_time = self.settings.daily_run_time
-        cron = CronTrigger(hour=daily_time.hour, minute=daily_time.minute, timezone=self.timezone)
+        daily_cron = CronTrigger(hour=daily_time.hour, minute=daily_time.minute, timezone=self.timezone)
         self.scheduler.add_job(
             self._wrap_job(self._run_daily_job, job_id="daily"),
-            cron,
+            daily_cron,
             id="daily_job",
             replace_existing=True,
             max_instances=1,
             kwargs={"attempt": 1},
         )
+
+        if not self._whale_api_key:
+            self.logger.info(
+                "Whale Alert job disabled; missing API key",
+                extra={"job_id": "whale"},
+            )
+        else:
+            whale_cron = CronTrigger(
+                hour=daily_time.hour,
+                minute=daily_time.minute,
+                timezone=self.timezone,
+            )
+            self.scheduler.add_job(
+                self._wrap_job(self._run_whale_daily, job_id="whale"),
+                whale_cron,
+                id="whale_daily_job",
+                replace_existing=True,
+                max_instances=1,
+                kwargs={"attempt": 1},
+            )
 
     def start(self) -> None:
         """Start the underlying APScheduler instance."""
@@ -438,6 +468,35 @@ class DataIngestionScheduler:
                 "fear_greed_rows": fear_greed_result.inserted,
             },
         )
+
+    def _run_whale_daily(self) -> None:
+        if not self._whale_api_key:
+            self.logger.warning(
+                "Whale Alert API key missing; skipping fetch",
+                extra={"job_id": "whale"},
+            )
+            return
+
+        end = pd.Timestamp(datetime.now(tz=UTC))
+        start = end - pd.Timedelta(days=1)
+        last_seen = latest_whale_transaction_timestamp(self.engine)
+
+        extra: dict[str, Any] = {
+            "job_id": "whale",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        }
+        if last_seen is not None:
+            extra["latest_stored"] = last_seen.isoformat()
+
+        self.logger.info("Fetching Whale Alert transactions", extra=extra)
+        transactions = fetch_whale_alert_transactions(
+            api_key=self._whale_api_key,
+            start=start,
+            end=end,
+        )
+        result = store_whale_transactions(transactions, engine=self.engine)
+        self._log_store_result("whale", {"records": result.inserted})
 
     def _log_store_result(self, job_id: str, metrics: dict[str, Any]) -> None:
         payload = {"job_id": job_id}
