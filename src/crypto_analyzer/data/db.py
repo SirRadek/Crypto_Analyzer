@@ -88,6 +88,8 @@ TABLE_DEFINITIONS: dict[str, str] = {
             reddit_score DOUBLE PRECISION,
             twitter_score DOUBLE PRECISION,
             mentions BIGINT,
+            twitter_positive_count BIGINT,
+            twitter_negative_count BIGINT,
             PRIMARY KEY (timestamp)
         )
     """,
@@ -149,6 +151,8 @@ COMBINED_FEATURES_VIEW = """
         ss.reddit_score,
         ss.twitter_score,
         ss.mentions,
+        ss.twitter_positive_count,
+        ss.twitter_negative_count,
         news_agg.sentiment AS news_sentiment
     FROM market_data AS md
     LEFT JOIN derivatives_signals AS ds

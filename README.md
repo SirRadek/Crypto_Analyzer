@@ -106,6 +106,18 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+## Database schema updates
+
+Deployments that already created the TimescaleDB schema need to add the new
+Twitter sentiment counters. Run the following SQL against your Timescale
+instance (feel free to append `IF NOT EXISTS` for idempotency):
+
+```sql
+ALTER TABLE social_sentiment
+    ADD COLUMN twitter_positive_count BIGINT,
+    ADD COLUMN twitter_negative_count BIGINT;
+```
+
 #### Windows: pandas build failure (`Could not parse vswhere.exe output`)
 
 On some Windows setups, installing the dependencies can fail while building

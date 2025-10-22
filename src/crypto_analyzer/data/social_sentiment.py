@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 import requests
@@ -12,10 +13,260 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from crypto_analyzer.utils.logging import get_logger
 
+try:  # pragma: no cover - optional dependency during some tests
+    import tweepy
+except ModuleNotFoundError:  # pragma: no cover - allow fetch_twitter_sentiment to degrade gracefully
+    tweepy = None  # type: ignore[assignment]
+
 LOGGER = get_logger(__name__)
 
 _PUSHSHIFT_BASE_URL = "https://api.pushshift.io/reddit"
 _VALID_CONTENT_TYPES = {"comment", "submission"}
+
+
+def _empty_twitter_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "timestamp",
+            "twitter_score",
+            "positive_count",
+            "negative_count",
+            "mentions",
+        ]
+    )
+
+
+def _normalise_datetime(value: Any) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts
+
+
+def _format_twitter_time(ts: pd.Timestamp) -> str:
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts.isoformat().replace("+00:00", "Z")
+
+
+def _build_twitter_query(keywords: Sequence[str]) -> str:
+    tokens: list[str] = []
+    for keyword in keywords:
+        term = str(keyword or "").strip()
+        if not term:
+            continue
+        if " " in term:
+            term = f'"{term}"'
+        tokens.append(term)
+    if not tokens:
+        raise ValueError("At least one non-empty keyword must be provided")
+    joined = " OR ".join(tokens)
+    return f"({joined}) -is:retweet lang:en"
+
+
+def _isinstance_of_tweepy_error(exc: Exception, name: str) -> bool:
+    if tweepy is None:
+        return False
+    modules: list[Any] = [tweepy]
+    errors_module = getattr(tweepy, "errors", None)
+    if errors_module is not None:
+        modules.append(errors_module)
+    for module in modules:
+        cls = getattr(module, name, None)
+        if isinstance(cls, type) and issubclass(cls, Exception) and isinstance(exc, cls):
+            return True
+    return False
+
+
+def _extract_next_token(meta: Any) -> str | None:
+    if meta is None:
+        return None
+    token: Any
+    if isinstance(meta, dict):
+        token = meta.get("next_token")
+    else:
+        getter = getattr(meta, "get", None)
+        if callable(getter):
+            token = getter("next_token")
+        else:
+            token = getattr(meta, "next_token", None)
+    if not token:
+        return None
+    token_str = str(token).strip()
+    return token_str or None
+
+
+def fetch_twitter_sentiment(
+    keywords: Sequence[str],
+    *,
+    start: datetime | pd.Timestamp | None = None,
+    end: datetime | pd.Timestamp | None = None,
+    bearer_token: str | None = None,
+    max_tweets: int = 300,
+    max_results: int = 100,
+    interval: str = "1H",
+    client: Any | None = None,
+    analyzer: SentimentIntensityAnalyzer | None = None,
+    backoff_seconds: int = 900,
+    sleep: Callable[[float], None] = time.sleep,
+) -> pd.DataFrame:
+    """Fetch recent tweets for *keywords* and aggregate sentiment scores by interval."""
+
+    query = _build_twitter_query(keywords)
+
+    api_client = client
+    if api_client is None:
+        if tweepy is None:
+            LOGGER.warning("tweepy is not installed; skipping Twitter sentiment fetch")
+            return _empty_twitter_frame()
+        if not bearer_token:
+            LOGGER.warning("Twitter bearer token missing; skipping Twitter sentiment fetch")
+            return _empty_twitter_frame()
+        try:
+            api_client = tweepy.Client(bearer_token=bearer_token, wait_on_rate_limit=False)  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - defensive, tweepy may raise configuration errors
+            LOGGER.warning("Failed to initialise Twitter client", exc_info=exc)
+            return _empty_twitter_frame()
+
+    start_ts = _normalise_datetime(start) if start is not None else None
+    end_ts = _normalise_datetime(end) if end is not None else None
+    if start_ts is not None and end_ts is not None and start_ts > end_ts:
+        raise ValueError("start must be earlier than or equal to end")
+
+    if max_tweets <= 0:
+        return _empty_twitter_frame()
+    max_results = max(10, min(max_results, 100))
+
+    analyser = analyzer or SentimentIntensityAnalyzer()
+    fetched = 0
+    next_token: str | None = None
+    rows: list[dict[str, Any]] = []
+
+    while fetched < max_tweets:
+        params: dict[str, Any] = {
+            "query": query,
+            "max_results": max_results,
+            "tweet_fields": ["created_at", "lang"],
+        }
+        if start_ts is not None:
+            params["start_time"] = _format_twitter_time(start_ts)
+        if end_ts is not None:
+            params["end_time"] = _format_twitter_time(end_ts)
+        if next_token:
+            params["next_token"] = next_token
+
+        try:
+            response = api_client.search_recent_tweets(**params)  # type: ignore[call-arg]
+        except Exception as exc:  # pragma: no cover - tweepy raises its own hierarchy
+            if _isinstance_of_tweepy_error(exc, "TooManyRequests"):
+                LOGGER.warning(
+                    "Twitter rate limit reached; backing off",
+                    extra={"backoff_seconds": backoff_seconds},
+                    exc_info=exc,
+                )
+                if backoff_seconds > 0:
+                    try:
+                        sleep(float(backoff_seconds))
+                    except Exception:  # pragma: no cover - defensive, sleep should rarely fail
+                        pass
+                return _empty_twitter_frame()
+            if _isinstance_of_tweepy_error(exc, "TweepyException"):
+                LOGGER.warning("Twitter API error when fetching sentiment", exc_info=exc)
+                return _empty_twitter_frame()
+            raise
+
+        tweets = getattr(response, "data", None) or []
+        if not tweets:
+            break
+
+        for tweet in tweets:
+            if fetched >= max_tweets:
+                break
+            text = getattr(tweet, "text", None)
+            if text is None:
+                continue
+            text_value = str(text).strip()
+            if not text_value:
+                continue
+            created_raw = getattr(tweet, "created_at", None)
+            if created_raw is None:
+                continue
+            try:
+                created_ts = _normalise_datetime(created_raw)
+            except (TypeError, ValueError):  # pragma: no cover - skip unexpected values
+                continue
+            try:
+                scores = analyser.polarity_scores(text_value)
+            except Exception as exc:  # pragma: no cover - ensure a single failure doesn't abort loop
+                LOGGER.warning("Failed to compute tweet sentiment", exc_info=exc)
+                continue
+            compound = float(scores.get("compound", 0.0))
+            rows.append(
+                {
+                    "timestamp": created_ts,
+                    "compound": compound,
+                    "is_positive": compound > 0.05,
+                    "is_negative": compound < -0.05,
+                }
+            )
+            fetched += 1
+
+        next_token = _extract_next_token(getattr(response, "meta", None))
+        if not next_token:
+            break
+
+    if not rows:
+        LOGGER.info(
+            "No tweets matched sentiment query",
+            extra={"query": query, "tweets_processed": 0},
+        )
+        return _empty_twitter_frame()
+
+    frame = pd.DataFrame(rows)
+    freq = interval.lower() if isinstance(interval, str) else interval
+    try:
+        frame["bucket"] = frame["timestamp"].dt.floor(freq)
+    except ValueError:
+        LOGGER.warning("Invalid interval '%s' supplied; defaulting to 1H", interval)
+        frame["bucket"] = frame["timestamp"].dt.floor("1H")
+
+    grouped = frame.groupby("bucket", dropna=False)
+    summary = grouped.agg(
+        twitter_score=("compound", "mean"),
+        positive_count=("is_positive", "sum"),
+        negative_count=("is_negative", "sum"),
+    )
+    summary["mentions"] = (summary["positive_count"] + summary["negative_count"]).astype(int)
+
+    result = summary.reset_index().rename(columns={"bucket": "timestamp"})
+    result["timestamp"] = pd.to_datetime(result["timestamp"], utc=True, errors="coerce")
+    result = result.dropna(subset=["timestamp"]).reset_index(drop=True)
+    result["twitter_score"] = result["twitter_score"].astype(float)
+    result["positive_count"] = result["positive_count"].astype(int)
+    result["negative_count"] = result["negative_count"].astype(int)
+    result["mentions"] = result["mentions"].astype(int)
+    result = result.sort_values("timestamp").reset_index(drop=True)
+
+    positives = int(frame["is_positive"].sum())
+    negatives = int(frame["is_negative"].sum())
+    neutrals = len(frame) - positives - negatives
+    LOGGER.info(
+        "Fetched twitter sentiment",
+        extra={
+            "query": query,
+            "tweets_processed": len(frame),
+            "positives": positives,
+            "negatives": negatives,
+            "neutrals": neutrals,
+            "buckets": len(result),
+        },
+    )
+
+    return result
 
 
 def _normalise_pushshift_time(value: Any) -> Any:
@@ -169,4 +420,4 @@ def fetch_reddit_sentiment(
     return frame
 
 
-__all__ = ["fetch_reddit_sentiment"]
+__all__ = ["fetch_reddit_sentiment", "fetch_twitter_sentiment"]
