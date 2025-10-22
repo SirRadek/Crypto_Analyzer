@@ -340,15 +340,26 @@ def save_social_sentiment(
         mentions = _coerce_int(record.get("mentions"), field="mentions")
         if mentions is not None and mentions < 0:
             raise ValueError("Mentions count cannot be negative")
-        payload.append((ts, reddit_score, twitter_score, mentions))
+        pos_value = record.get("twitter_positive_count", record.get("positive_count"))
+        neg_value = record.get("twitter_negative_count", record.get("negative_count"))
+        twitter_positive = _coerce_int(pos_value, field="twitter_positive_count")
+        twitter_negative = _coerce_int(neg_value, field="twitter_negative_count")
+        if twitter_positive is not None and twitter_positive < 0:
+            raise ValueError("Twitter positive count cannot be negative")
+        if twitter_negative is not None and twitter_negative < 0:
+            raise ValueError("Twitter negative count cannot be negative")
+        payload.append((ts, reddit_score, twitter_score, mentions, twitter_positive, twitter_negative))
 
     sql = (
-        "INSERT INTO social_sentiment (timestamp, reddit_score, twitter_score, mentions) "
-        "VALUES (%s, %s, %s, %s) "
+        "INSERT INTO social_sentiment (timestamp, reddit_score, twitter_score, mentions, "
+        "twitter_positive_count, twitter_negative_count) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (timestamp) DO UPDATE SET "
         "reddit_score = EXCLUDED.reddit_score, "
         "twitter_score = EXCLUDED.twitter_score, "
-        "mentions = EXCLUDED.mentions"
+        "mentions = EXCLUDED.mentions, "
+        "twitter_positive_count = EXCLUDED.twitter_positive_count, "
+        "twitter_negative_count = EXCLUDED.twitter_negative_count"
     )
 
     with _managed_connection(connection, connect_kwargs) as conn:
