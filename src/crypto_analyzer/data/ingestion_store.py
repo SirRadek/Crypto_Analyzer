@@ -36,6 +36,7 @@ DERIVATIVES_TABLE = Table(
     Column("symbol", String(20), nullable=False),
     Column("funding_rate", Float),
     Column("open_interest", Float),
+    Column("basis", Float),
     Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
     UniqueConstraint("timestamp", "symbol", name="ux_derivatives_intraday"),
 )
@@ -173,7 +174,14 @@ def _prepare_records(frame: pd.DataFrame, *, extra: dict[str, object] | None = N
     return records
 
 
-def _upsert(table: Table, records: Iterable[dict[str, object]], engine: Engine, conflict_cols: tuple[str, ...]) -> int:
+def _upsert(
+    table: Table,
+    records: Iterable[dict[str, object]],
+    engine: Engine,
+    conflict_cols: tuple[str, ...],
+    *,
+    update_columns: Iterable[str] | None = None,
+) -> int:
     payload = list(records)
     if not payload:
         return 0
@@ -181,10 +189,12 @@ def _upsert(table: Table, records: Iterable[dict[str, object]], engine: Engine, 
     dialect = engine.dialect.name
 
     def _build_update_cols(insert_stmt):
+        allowed = set(update_columns) if update_columns is not None else None
         return {
             col.name: getattr(insert_stmt.excluded, col.name)
             for col in table.c
             if col.name not in conflict_cols and not col.primary_key
+            and (allowed is None or col.name in allowed)
         }
 
     if dialect == "postgresql":
@@ -243,6 +253,7 @@ def latest_fear_greed_timestamp(engine: Engine) -> pd.Timestamp | None:
 def store_derivatives(
     funding: pd.DataFrame,
     open_interest: pd.DataFrame,
+    basis: pd.DataFrame | None = None,
     *,
     engine: Engine,
     symbol: str,
@@ -254,6 +265,16 @@ def store_derivatives(
         frames.append(frame)
     if not open_interest.empty:
         frame = open_interest.loc[:, ["timestamp", "open_interest"]].copy()
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+        frames.append(frame)
+    if basis is not None and not basis.empty:
+        frame = basis.copy()
+        if "basis" not in frame.columns and "basis_bp" in frame.columns:
+            frame = frame.rename(columns={"basis_bp": "basis"})
+        missing = {"timestamp", "basis"} - set(frame.columns)
+        if missing:
+            raise KeyError(f"Basis frame missing required columns: {sorted(missing)}")
+        frame = frame.loc[:, ["timestamp", "basis"]]
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
         frames.append(frame)
 
@@ -271,7 +292,39 @@ def store_derivatives(
     merged = merged.sort_values("timestamp").reset_index(drop=True)
 
     records = _prepare_records(merged)
-    inserted = _upsert(DERIVATIVES_TABLE, records, engine, ("timestamp", "symbol"))
+    if not records:
+        return StoreResult(0)
+
+    records_with_basis: list[dict[str, object]] = []
+    records_without_basis: list[dict[str, object]] = []
+
+    for record in records:
+        if "basis" in record:
+            if record["basis"] is None:
+                trimmed = {key: value for key, value in record.items() if key != "basis"}
+                records_without_basis.append(trimmed)
+            else:
+                records_with_basis.append(record)
+        else:
+            records_without_basis.append(record)
+
+    inserted = 0
+    if records_without_basis:
+        update_columns = sorted({key for record in records_without_basis for key in record})
+        inserted += _upsert(
+            DERIVATIVES_TABLE,
+            records_without_basis,
+            engine,
+            ("timestamp", "symbol"),
+            update_columns=update_columns,
+        )
+    if records_with_basis:
+        inserted += _upsert(
+            DERIVATIVES_TABLE,
+            records_with_basis,
+            engine,
+            ("timestamp", "symbol"),
+        )
     return StoreResult(inserted)
 
 
