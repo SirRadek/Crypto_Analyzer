@@ -1,14 +1,18 @@
 """Utilities for fitting simple probability calibrators and visualising calibration."""
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Protocol
+from typing import Protocol
+
 import numpy as np
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss, log_loss as _sk_log_loss
+from sklearn.metrics import brier_score_loss
+from sklearn.metrics import log_loss as _sk_log_loss
 
 
 class Calibrator(Protocol):
@@ -63,7 +67,7 @@ def fit_platt(logits_or_p: Iterable[float], y: Iterable[float]) -> Calibrator:
 
     raw_arr = np.asarray(list(logits_or_p), dtype=float)
     use_logit = False
-    if np.all(np.isfinite(raw_arr)) and np.all((0.0 <= raw_arr) & (raw_arr <= 1.0)):
+    if np.all(np.isfinite(raw_arr)) and np.all((raw_arr >= 0.0) & (raw_arr <= 1.0)):
         use_logit = True
         raw_arr = np.clip(raw_arr, 1e-6, 1 - 1e-6)
         odds = raw_arr / (1 - raw_arr)
@@ -90,9 +94,7 @@ def reliability_curve(
     p_arr = np.asarray(list(probs), dtype=float)
     p_arr = np.clip(p_arr, 1e-6, 1 - 1e-6)
 
-    frac_pos, mean_pred = calibration_curve(
-        y_arr, p_arr, n_bins=n_bins, strategy=strategy
-    )
+    frac_pos, mean_pred = calibration_curve(y_arr, p_arr, n_bins=n_bins, strategy=strategy)
 
     # Align with manual bin centres for plotting clarity
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
@@ -136,7 +138,7 @@ def log_loss(y_true: Iterable[float], probs: Iterable[float]) -> float:
 
 def plot_reliability(
     y_true: Iterable[float],
-    prob_series: Dict[str, Iterable[float]] | Iterable[float],
+    prob_series: dict[str, Iterable[float]] | Iterable[float],
     path_png: str | Path,
     *,
     n_bins: int = 10,
@@ -156,9 +158,7 @@ def plot_reliability(
     plt.plot([0, 1], [0, 1], "--", color="gray", label="Perfect calibration")
 
     for label, probs in prob_series.items():
-        bins, obs, exp, _, _ = reliability_curve(
-            y_true, probs, n_bins=n_bins, strategy="uniform"
-        )
+        bins, obs, exp, _, _ = reliability_curve(y_true, probs, n_bins=n_bins, strategy="uniform")
         mask = ~np.isnan(obs) & ~np.isnan(exp)
         if not np.any(mask):
             continue

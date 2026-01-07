@@ -1,8 +1,9 @@
 """Utility helpers for constructing derivative market features."""
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -37,10 +38,10 @@ def _infer_frequency(index: pd.DatetimeIndex) -> str:
     if inferred is not None:
         return inferred
     if len(index) <= 1:
-        return "5T"
+        return "5min"
     diffs = index.sort_values().to_series().diff().dropna()
     if diffs.empty:
-        return "5T"
+        return "5min"
     return diffs.mode().iloc[0]
 
 

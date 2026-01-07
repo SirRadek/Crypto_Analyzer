@@ -102,9 +102,7 @@ def fit_incremental_forest(
             break
 
     if log_path:
-        data = json.dumps({"params": model.get_params(), "oob_scores": oob_scores}).encode(
-            "utf-8"
-        )
+        data = json.dumps({"params": model.get_params(), "oob_scores": oob_scores}).encode("utf-8")
         from crypto_analyzer.model_manager import atomic_write
 
         atomic_write(Path(log_path), data)

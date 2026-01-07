@@ -58,7 +58,7 @@ def train_classifier(
     params: dict[str, Any] | None = None,
     use_gpu: bool = False,
     train_window: int | None = None,
-) -> "xgb.XGBClassifier":
+) -> xgb.XGBClassifier:
     """Train an XGBoost classifier with optional GPU acceleration."""
 
     import xgboost as xgb

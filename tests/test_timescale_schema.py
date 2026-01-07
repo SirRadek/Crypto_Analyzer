@@ -31,9 +31,7 @@ _psycopg2_stub = SimpleNamespace(
 
 sys.modules.setdefault("psycopg2", _psycopg2_stub)
 sys.modules.setdefault("psycopg2.sql", _psycopg2_stub.sql)
-sys.modules.setdefault(
-    "psycopg2.extensions", SimpleNamespace(connection=object)
-)
+sys.modules.setdefault("psycopg2.extensions", SimpleNamespace(connection=object))
 
 _config_module = ModuleType("crypto_analyzer.utils.config")
 _config_module.CONFIG = SimpleNamespace(
@@ -42,7 +40,7 @@ _config_module.CONFIG = SimpleNamespace(
 )
 sys.modules.setdefault("crypto_analyzer.utils.config", _config_module)
 
-from crypto_analyzer.data import db
+from crypto_analyzer.data import db  # noqa: E402
 
 
 def _mock_cursor(conn: MagicMock) -> MagicMock:
@@ -83,7 +81,7 @@ def test_create_materialized_view_runs_all_statements(monkeypatch) -> None:
 
 def test_refresh_combined_features_concurrently() -> None:
     class _CursorStub:
-        def __init__(self, conn: "_ConnectionStub") -> None:
+        def __init__(self, conn: _ConnectionStub) -> None:
             self._conn = conn
             self.executed: list[str] = []
 
@@ -91,7 +89,7 @@ def test_refresh_combined_features_concurrently() -> None:
             assert self._conn.autocommit, "autocommit should be enabled for concurrent refresh"
             self.executed.append(statement)
 
-        def __enter__(self) -> "_CursorStub":
+        def __enter__(self) -> _CursorStub:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - no cleanup required
@@ -111,9 +109,7 @@ def test_refresh_combined_features_concurrently() -> None:
 
     db.refresh_combined_features(conn, concurrently=True)
 
-    assert conn._cursor.executed == [
-        "REFRESH MATERIALIZED VIEW CONCURRENTLY combined_features"
-    ]
+    assert conn._cursor.executed == ["REFRESH MATERIALIZED VIEW CONCURRENTLY combined_features"]
     conn.commit.assert_not_called()
     assert conn.autocommit is False
 

@@ -302,14 +302,14 @@ def train_sequence_classifier(
         net.train()
         train_loss = 0.0
         for batch_x, batch_y in train_loader:
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
+            batch_x_tensor = batch_x.to(device)
+            batch_y_tensor = batch_y.to(device)
             optimizer.zero_grad()
-            logits = net(batch_x)
-            loss = criterion(logits, batch_y)
+            logits = net(batch_x_tensor)
+            loss = criterion(logits, batch_y_tensor)
             loss.backward()
             optimizer.step()
-            train_loss += float(loss.detach().cpu()) * len(batch_x)
+            train_loss += float(loss.detach().cpu()) * len(batch_x_tensor)
         train_loss /= len(train_loader.dataset)
 
         net.eval()
@@ -318,14 +318,14 @@ def train_sequence_classifier(
         total = 0
         with torch.no_grad():
             for batch_x, batch_y in val_loader:
-                batch_x = batch_x.to(device)
-                batch_y = batch_y.to(device)
-                logits = net(batch_x)
-                loss = criterion(logits, batch_y)
-                val_loss += float(loss.cpu()) * len(batch_x)
+                batch_x_tensor = batch_x.to(device)
+                batch_y_tensor = batch_y.to(device)
+                logits = net(batch_x_tensor)
+                loss = criterion(logits, batch_y_tensor)
+                val_loss += float(loss.cpu()) * len(batch_x_tensor)
                 preds = torch.sigmoid(logits) >= 0.5
-                correct += int((preds == (batch_y >= 0.5)).sum().cpu())
-                total += len(batch_x)
+                correct += int((preds == (batch_y_tensor >= 0.5)).sum().cpu())
+                total += len(batch_x_tensor)
         val_loss /= len(val_loader.dataset)
         metrics[f"epoch_{epoch+1}_train_loss"] = train_loss
         metrics[f"epoch_{epoch+1}_val_loss"] = val_loss

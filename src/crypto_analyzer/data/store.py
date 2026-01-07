@@ -132,4 +132,3 @@ __all__ = [
     "TimescaleDataStore",
     "resolve_data_store",
 ]
-

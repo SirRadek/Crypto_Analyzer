@@ -58,11 +58,13 @@ def test_train_cli_conformal_parse():
     )
     assert args.conformal == {"alpha": 0.05}
 
-    args_default = train_module.parse_args([
-        "--task",
-        "clf",
-        "--horizon",
-        "1440",
-        "--conformal",
-    ])
+    args_default = train_module.parse_args(
+        [
+            "--task",
+            "clf",
+            "--horizon",
+            "1440",
+            "--conformal",
+        ]
+    )
     assert args_default.conformal == {"alpha": 0.1}

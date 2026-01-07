@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
 import requests
@@ -15,7 +16,9 @@ from crypto_analyzer.utils.logging import get_logger
 
 try:  # pragma: no cover - optional dependency during some tests
     import tweepy
-except ModuleNotFoundError:  # pragma: no cover - allow fetch_twitter_sentiment to degrade gracefully
+except (
+    ModuleNotFoundError
+):  # pragma: no cover - allow fetch_twitter_sentiment to degrade gracefully
     tweepy = None  # type: ignore[assignment]
 
 LOGGER = get_logger(__name__)
@@ -128,7 +131,9 @@ def fetch_twitter_sentiment(
             return _empty_twitter_frame()
         try:
             api_client = tweepy.Client(bearer_token=bearer_token, wait_on_rate_limit=False)  # type: ignore[attr-defined]
-        except Exception as exc:  # pragma: no cover - defensive, tweepy may raise configuration errors
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive, tweepy may raise configuration errors
             LOGGER.warning("Failed to initialise Twitter client", exc_info=exc)
             return _empty_twitter_frame()
 
@@ -169,10 +174,8 @@ def fetch_twitter_sentiment(
                     exc_info=exc,
                 )
                 if backoff_seconds > 0:
-                    try:
+                    with contextlib.suppress(Exception):  # pragma: no cover - defensive
                         sleep(float(backoff_seconds))
-                    except Exception:  # pragma: no cover - defensive, sleep should rarely fail
-                        pass
                 return _empty_twitter_frame()
             if _isinstance_of_tweepy_error(exc, "TweepyException"):
                 LOGGER.warning("Twitter API error when fetching sentiment", exc_info=exc)
@@ -201,7 +204,9 @@ def fetch_twitter_sentiment(
                 continue
             try:
                 scores = analyser.polarity_scores(text_value)
-            except Exception as exc:  # pragma: no cover - ensure a single failure doesn't abort loop
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - ensure a single failure doesn't abort loop
                 LOGGER.warning("Failed to compute tweet sentiment", exc_info=exc)
                 continue
             compound = float(scores.get("compound", 0.0))

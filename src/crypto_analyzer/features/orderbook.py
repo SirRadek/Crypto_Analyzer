@@ -1,4 +1,5 @@
 """Feature helpers for computing basic order book statistics."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -89,9 +90,7 @@ def _prepare_event_index(events: pd.DataFrame) -> pd.Index:
     return index
 
 
-def _aggregate_sizes(
-    frame: pd.DataFrame, mask: pd.Series, key: pd.Series | pd.Index
-) -> pd.Series:
+def _aggregate_sizes(frame: pd.DataFrame, mask: pd.Series, key: pd.Series | pd.Index) -> pd.Series:
     if not mask.any():
         return pd.Series(dtype=float)
 
@@ -151,4 +150,3 @@ def order_flow_imbalance(events: pd.DataFrame | None) -> pd.Series:
     imbalance = imbalance.astype(float)
     imbalance.name = None
     return imbalance
-

@@ -24,7 +24,9 @@ class DummySession:
         self._payloads = list(payloads)
         self.calls: list[dict[str, Any]] = []
 
-    def get(self, url: str, params: dict[str, Any] | None = None, timeout: int | None = None) -> DummyResponse:
+    def get(
+        self, url: str, params: dict[str, Any] | None = None, timeout: int | None = None
+    ) -> DummyResponse:
         if not self._payloads:
             raise RuntimeError("No more responses queued")
         self.calls.append({"url": url, "params": params, "timeout": timeout})

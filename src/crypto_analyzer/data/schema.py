@@ -82,4 +82,3 @@ FEATURE_FRAME_SCHEMA = DataFrameSchema(
     coerce=True,
     checks=[Check(_left_label_check, name="left_label_no_leak")],
 )
-

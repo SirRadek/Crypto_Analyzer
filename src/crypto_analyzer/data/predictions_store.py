@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sqlite3
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from pathlib import Path
 
 DB_PATH = Path("data/crypto_data.sqlite")  # same DB like prices
 TABLE_NAME = "predictions"
@@ -18,9 +18,7 @@ def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
     return {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})")}
 
 
-def create_predictions_table(
-    db_path: Path | str = DB_PATH, table_name: str = TABLE_NAME
-) -> None:
+def create_predictions_table(db_path: Path | str = DB_PATH, table_name: str = TABLE_NAME) -> None:
     _ensure_dir(db_path)
     with sqlite3.connect(str(db_path)) as conn:
         cursor = conn.cursor()
@@ -81,9 +79,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_{table_name} ON {table_name}_new(symbol, in
             cursor.execute(
                 f"INSERT OR IGNORE INTO {table_name}_new("
                 "symbol, interval, target_time_ms, p_hat, prob_move_ge_05, y_true_hat, abs_error"
-                ") SELECT "
-                + ", ".join(select_cols)
-                + f" FROM {table_name}"
+                ") SELECT " + ", ".join(select_cols) + f" FROM {table_name}"
             )
             cursor.execute(f"ALTER TABLE {table_name} RENAME TO {table_name}_backup")
         cursor.execute(f"ALTER TABLE {table_name}_new RENAME TO {table_name}")

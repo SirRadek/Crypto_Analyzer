@@ -20,7 +20,9 @@ def mock_connection() -> MagicMock:
     return conn
 
 
-def test_save_market_data_upserts_valid_rows(mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_save_market_data_upserts_valid_rows(
+    mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     captured: dict[str, object] = {}
 
     def fake_execute_batch(cursor, sql, params, page_size=None):  # type: ignore[no-untyped-def]
@@ -69,7 +71,9 @@ def test_save_market_data_upserts_valid_rows(mock_connection: MagicMock, monkeyp
     mock_connection.rollback.assert_not_called()
 
 
-def test_save_market_data_requires_symbol(mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_save_market_data_requires_symbol(
+    mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(writer, "execute_batch", MagicMock())
 
     frame = pd.DataFrame(
@@ -125,7 +129,9 @@ def test_save_derivatives_data_accepts_basis_bp(
     assert row[4] == pytest.approx(150.5)
 
 
-def test_save_sentiment_index_validates_range(mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_save_sentiment_index_validates_range(
+    mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(writer, "execute_batch", MagicMock())
 
     payload = [{"timestamp": "2024-01-01T00:00:00Z", "value": 150}]
@@ -136,7 +142,9 @@ def test_save_sentiment_index_validates_range(mock_connection: MagicMock, monkey
     writer.execute_batch.assert_not_called()  # type: ignore[attr-defined]
 
 
-def test_save_news_strips_optional_fields(mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_save_news_strips_optional_fields(
+    mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     captured: dict[str, object] = {}
 
     def fake_execute_batch(cursor, sql, params, page_size=None):  # type: ignore[no-untyped-def]
@@ -165,7 +173,9 @@ def test_save_news_strips_optional_fields(mock_connection: MagicMock, monkeypatc
     assert row[3] == "Coindesk"
 
 
-def test_save_whale_transactions_upserts(mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_save_whale_transactions_upserts(
+    mock_connection: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     captured: dict[str, object] = {}
 
     def fake_execute_batch(cursor, sql, params, page_size=None):  # type: ignore[no-untyped-def]
@@ -225,4 +235,3 @@ def test_save_whale_transactions_validates_required_fields(
         writer.save_whale_transactions(payload, connection=mock_connection)
 
     writer.execute_batch.assert_not_called()  # type: ignore[attr-defined]
-

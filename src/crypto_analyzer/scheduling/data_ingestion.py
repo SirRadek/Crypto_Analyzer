@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
-
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import BaseScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -40,6 +40,7 @@ from crypto_analyzer.data.ingestion_store import (
 from crypto_analyzer.data.news_fetcher import fetch_cryptopanic_news
 from crypto_analyzer.data.onchain_fetcher import (
     fetch_coinmetrics_exchange_flows,
+    fetch_coinmetrics_active_addresses,
     fetch_whale_alert_transactions,
 )
 from crypto_analyzer.data.sentiment_index_fetcher import fetch_fear_greed_index
@@ -67,6 +68,7 @@ class SchedulerConfig:
     """Settings controlling job cadence and API parameters."""
 
     binance_interval_minutes: int = 15
+    orderbook_interval_minutes: int = 1
     news_interval_minutes: int = 15
     reddit_interval_minutes: int = 60
     daily_run_time: time = time(hour=0, minute=33)
@@ -147,8 +149,21 @@ class DataIngestionScheduler:
     def configure_jobs(self) -> None:
         """Register recurring jobs according to :class:`SchedulerConfig`."""
 
+        runtime_cfg = getattr(self._config, "runtime", None)
+        if runtime_cfg is not None:
+            if getattr(runtime_cfg, "binance_interval_minutes", None) is not None:
+                self.settings.binance_interval_minutes = int(
+                    getattr(runtime_cfg, "binance_interval_minutes")
+                )
+            if getattr(runtime_cfg, "orderbook_interval_minutes", None) is not None:
+                self.settings.orderbook_interval_minutes = int(
+                    getattr(runtime_cfg, "orderbook_interval_minutes")
+                )
+
         if self.settings.binance_interval_minutes > 0:
-            trigger = IntervalTrigger(minutes=self.settings.binance_interval_minutes, timezone=self.timezone)
+            trigger = IntervalTrigger(
+                minutes=self.settings.binance_interval_minutes, timezone=self.timezone
+            )
             self.scheduler.add_job(
                 self._wrap_job(self._run_binance_job, job_id="binance"),
                 trigger,
@@ -160,8 +175,32 @@ class DataIngestionScheduler:
         else:
             self.logger.info("Binance job disabled via configuration", extra={"job_id": "binance"})
 
+        if self.settings.orderbook_interval_minutes > 0:
+            trigger = IntervalTrigger(
+                minutes=self.settings.orderbook_interval_minutes, timezone=self.timezone
+            )
+            job = self.scheduler.add_job(
+                self._wrap_job(self._run_orderbook_job, job_id="orderbook"),
+                trigger,
+                id="orderbook_job",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now(tz=self.timezone),
+                kwargs={"attempt": 1},
+            )
+            self.logger.info(
+                "Scheduled orderbook job",
+                extra={"job_id": "orderbook", "next_run_time": str(job.next_run_time)},
+            )
+        else:
+            self.logger.info(
+                "Orderbook job disabled via configuration", extra={"job_id": "orderbook"}
+            )
+
         if self.settings.news_interval_minutes > 0:
-            trigger = IntervalTrigger(minutes=self.settings.news_interval_minutes, timezone=self.timezone)
+            trigger = IntervalTrigger(
+                minutes=self.settings.news_interval_minutes, timezone=self.timezone
+            )
             self.scheduler.add_job(
                 self._wrap_job(self._run_news_job, job_id="news"),
                 trigger,
@@ -174,7 +213,9 @@ class DataIngestionScheduler:
         if self.settings.reddit_interval_minutes > 0 and (
             self.settings.reddit_subreddit or self.settings.reddit_query
         ):
-            trigger = IntervalTrigger(minutes=self.settings.reddit_interval_minutes, timezone=self.timezone)
+            trigger = IntervalTrigger(
+                minutes=self.settings.reddit_interval_minutes, timezone=self.timezone
+            )
             self.scheduler.add_job(
                 self._wrap_job(self._run_reddit_job, job_id="reddit"),
                 trigger,
@@ -190,7 +231,9 @@ class DataIngestionScheduler:
             )
 
         daily_time = self.settings.daily_run_time
-        daily_cron = CronTrigger(hour=daily_time.hour, minute=daily_time.minute, timezone=self.timezone)
+        daily_cron = CronTrigger(
+            hour=daily_time.hour, minute=daily_time.minute, timezone=self.timezone
+        )
         self.scheduler.add_job(
             self._wrap_job(self._run_daily_job, job_id="daily"),
             daily_cron,
@@ -223,7 +266,9 @@ class DataIngestionScheduler:
     def start(self) -> None:
         """Start the underlying APScheduler instance."""
 
-        self.logger.info("Starting data ingestion scheduler", extra={"timezone": str(self.timezone)})
+        self.logger.info(
+            "Starting data ingestion scheduler", extra={"timezone": str(self.timezone)}
+        )
         self.scheduler.start()
 
     def shutdown(self, *, wait: bool = True) -> None:
@@ -247,9 +292,15 @@ class DataIngestionScheduler:
                 if attempt > self.settings.max_retries:
                     self.logger.error("Maximum retry attempts reached", extra=extra)
                     return
-                run_time = datetime.now(tz=self.timezone) + timedelta(seconds=self.settings.retry_delay_seconds)
+                run_time = datetime.now(tz=self.timezone) + timedelta(
+                    seconds=self.settings.retry_delay_seconds
+                )
                 retry_id = f"{job_id}_retry_{attempt}"
-                retry_extra = {"job_id": job_id, "attempt": attempt + 1, "run_time": run_time.isoformat()}
+                retry_extra = {
+                    "job_id": job_id,
+                    "attempt": attempt + 1,
+                    "run_time": run_time.isoformat(),
+                }
                 self.logger.info("Scheduling retry", extra=retry_extra)
                 self.scheduler.add_job(
                     runner,
@@ -307,67 +358,99 @@ class DataIngestionScheduler:
         return pd.DataFrame()
 
     def _run_binance_job(self) -> None:
-        symbol = self._config.symbol
+        symbols = self._symbols()
         now = datetime.now(tz=UTC)
-        latest = latest_derivatives_timestamp(self.engine, symbol=symbol)
-        if latest is not None:
-            start = latest.tz_convert("UTC") - timedelta(hours=max(1, self.settings.derivatives_overlap_hours))
-        else:
-            start = pd.Timestamp(now - timedelta(days=max(1, self.settings.derivatives_initial_lookback_days)), tz="UTC")
-        if start > pd.Timestamp(now):
-            start = pd.Timestamp(now - timedelta(minutes=5), tz="UTC")
-        start_dt = start.to_pydatetime()
+        for symbol in symbols:
+            latest = latest_derivatives_timestamp(self.engine, symbol=symbol)
+            if latest is not None:
+                start = latest.tz_convert("UTC") - timedelta(
+                    hours=max(1, self.settings.derivatives_overlap_hours)
+                )
+            else:
+                start = pd.Timestamp(
+                    now - timedelta(days=max(1, self.settings.derivatives_initial_lookback_days)),
+                    tz="UTC",
+                )
+            if start > pd.Timestamp(now):
+                start = pd.Timestamp(now - timedelta(minutes=5), tz="UTC")
+            start_dt = start.to_pydatetime()
 
-        self.logger.info(
-            "Fetching Binance metrics",
-            extra={"job_id": "binance", "symbol": symbol, "start": start_dt.isoformat(), "end": now.isoformat()},
-        )
+            self.logger.info(
+                "Fetching Binance metrics",
+                extra={
+                    "job_id": "binance",
+                    "symbol": symbol,
+                    "start": start_dt.isoformat(),
+                    "end": now.isoformat(),
+                },
+            )
 
-        funding = self._fetch_with_retries(
-            fetch_binance_funding_rates,
-            description="funding rates",
-            job_id="binance",
-            symbol=symbol,
-            start=start_dt,
-            end=now,
-        )
-        open_interest = self._fetch_with_retries(
-            fetch_binance_open_interest,
-            description="open interest",
-            job_id="binance",
-            symbol=symbol,
-            start=start_dt,
-            end=now,
-        )
-        basis = self._fetch_with_retries(
-            fetch_binance_basis,
-            description="basis",
-            job_id="binance",
-            symbol=symbol,
-        )
-        derivatives_result = store_derivatives(
-            funding,
-            open_interest,
-            basis,
-            engine=self.engine,
-            symbol=symbol,
-        )
+            funding = self._fetch_with_retries(
+                fetch_binance_funding_rates,
+                description="funding rates",
+                job_id="binance",
+                symbol=symbol,
+                start=start_dt,
+                end=now,
+            )
+            open_interest = self._fetch_with_retries(
+                fetch_binance_open_interest,
+                description="open interest",
+                job_id="binance",
+                symbol=symbol,
+                start=start_dt,
+                end=now,
+            )
+            basis = self._fetch_with_retries(
+                fetch_binance_basis,
+                description="basis",
+                job_id="binance",
+                symbol=symbol,
+            )
+            derivatives_result = store_derivatives(
+                funding,
+                open_interest,
+                basis,
+                engine=self.engine,
+                symbol=symbol,
+            )
 
-        orderbook = fetch_binance_order_book(symbol, depth=self.settings.binance_depth)
-        orderbook_result = store_orderbook(orderbook, engine=self.engine, symbol=symbol)
+            self._log_store_result(
+                "binance",
+                {
+                    "symbol": symbol,
+                    "derivative_rows": derivatives_result.inserted,
+                    "basis_rows": 0 if basis.empty else len(basis),
+                },
+            )
 
-        self._log_store_result(
-            "binance",
-            {
-                "derivative_rows": derivatives_result.inserted,
-                "basis_rows": 0 if basis.empty else len(basis),
-                "orderbook_rows": orderbook_result.inserted,
-            },
-        )
+    def _run_orderbook_job(self) -> None:
+        symbols = self._symbols()
+        for symbol in symbols:
+            try:
+                orderbook = fetch_binance_order_book(symbol, depth=self.settings.binance_depth)
+                orderbook_result = store_orderbook(orderbook, engine=self.engine, symbol=symbol)
+                self._log_store_result(
+                    "orderbook",
+                    {"symbol": symbol, "orderbook_rows": orderbook_result.inserted},
+                )
+            except Exception as exc:  # pragma: no cover - best effort
+                self.logger.warning(
+                    "Orderbook fetch failed",
+                    extra={"job_id": "orderbook", "symbol": symbol, "error": str(exc)},
+                )
+
+    def _symbols(self) -> list[str]:
+        universe = list(getattr(self._config, "live_universe", ()) or [])
+        if universe:
+            return universe
+        return [self._config.symbol]
 
     def _run_news_job(self) -> None:
         if not self._cryptopanic_token:
-            self.logger.warning("CryptoPanic token missing; skipping news job", extra={"job_id": "news"})
+            self.logger.warning(
+                "CryptoPanic token missing; skipping news job", extra={"job_id": "news"}
+            )
             return
 
         currencies = [code for code in self.settings.cryptopanic_currencies if code]
@@ -378,7 +461,9 @@ class DataIngestionScheduler:
             "filter": self.settings.cryptopanic_filter,
             "kind": self.settings.cryptopanic_kind,
         }
-        self.logger.info("Fetching CryptoPanic news", extra={"job_id": "news", "limit": kwargs["limit"]})
+        self.logger.info(
+            "Fetching CryptoPanic news", extra={"job_id": "news", "limit": kwargs["limit"]}
+        )
         news_frame = fetch_cryptopanic_news(self._cryptopanic_token, **kwargs)
         result = store_news(news_frame, engine=self.engine)
         self._log_store_result("news", {"records": result.inserted})
@@ -396,7 +481,9 @@ class DataIngestionScheduler:
             query=query or None,
             size=size,
         )
-        result = store_reddit_sentiment(sentiment, engine=self.engine, subreddit=subreddit, query=query)
+        result = store_reddit_sentiment(
+            sentiment, engine=self.engine, subreddit=subreddit, query=query
+        )
         self._log_store_result("reddit", {"records": result.inserted})
 
     def _run_daily_job(self) -> None:
@@ -409,11 +496,18 @@ class DataIngestionScheduler:
             if latest_glassnode is not None:
                 start_glassnode = latest_glassnode.tz_convert("UTC") - timedelta(days=7)
             else:
-                start_glassnode = pd.Timestamp(now - timedelta(days=self.settings.daily_lookback_days), tz="UTC")
+                start_glassnode = pd.Timestamp(
+                    now - timedelta(days=self.settings.daily_lookback_days), tz="UTC"
+                )
             start_glassnode = min(start_glassnode, pd.Timestamp(now))
             self.logger.info(
                 "Fetching Glassnode active addresses",
-                extra={"job_id": "daily", "asset": asset_glassnode, "start": start_glassnode.isoformat(), "end": now.isoformat()},
+                extra={
+                    "job_id": "daily",
+                    "asset": asset_glassnode,
+                    "start": start_glassnode.isoformat(),
+                    "end": now.isoformat(),
+                },
             )
             glassnode = fetch_glassnode_active_addresses(
                 start=start_glassnode.to_pydatetime(),
@@ -426,29 +520,69 @@ class DataIngestionScheduler:
             )
         else:
             self.logger.warning(
-                "Glassnode API key missing; skipping active address download",
+                "Glassnode API key missing; using CoinMetrics active addresses",
                 extra={"job_id": "daily"},
             )
-            glassnode_result = StoreResult(0)
+            active_rows = 0
+            coinmetrics_assets = sorted({asset_coinmetrics, "btc", "eth"})
+            for asset in coinmetrics_assets:
+                latest_glassnode = latest_glassnode_timestamp(self.engine, asset=asset.upper())
+                if latest_glassnode is not None:
+                    start_glassnode = latest_glassnode.tz_convert("UTC") - timedelta(days=7)
+                else:
+                    start_glassnode = pd.Timestamp(
+                        now - timedelta(days=self.settings.daily_lookback_days), tz="UTC"
+                    )
+                start_glassnode = min(start_glassnode, pd.Timestamp(now))
+                self.logger.info(
+                    "Fetching CoinMetrics active addresses",
+                    extra={
+                        "job_id": "daily",
+                        "asset": asset,
+                        "start": start_glassnode.isoformat(),
+                        "end": now.isoformat(),
+                    },
+                )
+                active = fetch_coinmetrics_active_addresses(
+                    asset=asset,
+                    start=start_glassnode,
+                    end=pd.Timestamp(now, tz="UTC"),
+                )
+                result = store_glassnode_active_addresses(
+                    active, engine=self.engine, asset=asset.upper()
+                )
+                active_rows += result.inserted
+            glassnode_result = StoreResult(active_rows)
 
-        latest_coinmetrics = latest_coinmetrics_timestamp(self.engine, asset=asset_coinmetrics)
-        if latest_coinmetrics is not None:
-            start_coinmetrics = latest_coinmetrics.tz_convert("UTC") - timedelta(days=7)
-        else:
-            start_coinmetrics = pd.Timestamp(now - timedelta(days=self.settings.daily_lookback_days), tz="UTC")
-        start_coinmetrics = min(start_coinmetrics, pd.Timestamp(now))
-        self.logger.info(
-            "Fetching CoinMetrics flows",
-            extra={"job_id": "daily", "asset": asset_coinmetrics, "start": start_coinmetrics.isoformat(), "end": now.isoformat()},
-        )
-        coinmetrics = fetch_coinmetrics_exchange_flows(
-            asset=asset_coinmetrics,
-            start=start_coinmetrics,
-            end=pd.Timestamp(now, tz="UTC"),
-        )
-        coinmetrics_result = store_coinmetrics_flows(
-            coinmetrics, engine=self.engine, asset=asset_coinmetrics
-        )
+        coinmetrics_assets = sorted({asset_coinmetrics, "btc", "eth"})
+        total_coinmetrics_rows = 0
+        for asset in coinmetrics_assets:
+            latest_coinmetrics = latest_coinmetrics_timestamp(self.engine, asset=asset)
+            if latest_coinmetrics is not None:
+                start_coinmetrics = latest_coinmetrics.tz_convert("UTC") - timedelta(days=7)
+            else:
+                start_coinmetrics = pd.Timestamp(
+                    now - timedelta(days=self.settings.daily_lookback_days), tz="UTC"
+                )
+            start_coinmetrics = min(start_coinmetrics, pd.Timestamp(now))
+            self.logger.info(
+                "Fetching CoinMetrics flows",
+                extra={
+                    "job_id": "daily",
+                    "asset": asset,
+                    "start": start_coinmetrics.isoformat(),
+                    "end": now.isoformat(),
+                },
+            )
+            coinmetrics = fetch_coinmetrics_exchange_flows(
+                asset=asset,
+                start=start_coinmetrics,
+                end=pd.Timestamp(now, tz="UTC"),
+            )
+            coinmetrics_result = store_coinmetrics_flows(
+                coinmetrics, engine=self.engine, asset=asset
+            )
+            total_coinmetrics_rows += coinmetrics_result.inserted
 
         self.logger.info(
             "Fetching Fear & Greed index",
@@ -464,7 +598,7 @@ class DataIngestionScheduler:
             "daily",
             {
                 "glassnode_rows": glassnode_result.inserted,
-                "coinmetrics_rows": coinmetrics_result.inserted,
+                "coinmetrics_rows": total_coinmetrics_rows,
                 "fear_greed_rows": fear_greed_result.inserted,
             },
         )

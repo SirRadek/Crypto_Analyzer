@@ -32,8 +32,7 @@ class MetricFunc(Protocol):
         y_true: np.ndarray,
         y_pred: np.ndarray,
         y_proba: np.ndarray | None = None,
-    ) -> float:
-        ...
+    ) -> float: ...
 
 
 def _ensure_array(values: np.ndarray | list | tuple) -> np.ndarray:
@@ -106,9 +105,7 @@ def f1(y_true: np.ndarray, y_pred: np.ndarray, y_proba: np.ndarray | None = None
     )
 
 
-def roc_auc(
-    y_true: np.ndarray, y_pred: np.ndarray, y_proba: np.ndarray | None = None
-) -> float:
+def roc_auc(y_true: np.ndarray, y_pred: np.ndarray, y_proba: np.ndarray | None = None) -> float:
     """Return the ROC-AUC score.
 
     This metric requires probability estimates.  The helper extracts the
@@ -147,5 +144,13 @@ METRICS: dict[str, MetricFunc] = {
 }
 
 
-__all__ = ["METRICS", "MetricFunc", "accuracy", "precision", "recall", "f1", "roc_auc", "log_loss_metric"]
-
+__all__ = [
+    "METRICS",
+    "MetricFunc",
+    "accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "roc_auc",
+    "log_loss_metric",
+]

@@ -8,9 +8,7 @@ def test_walkforward_split_preserves_temporal_order():
     ts = pd.date_range("2024-01-01", periods=96, freq="h", tz="UTC")
     df = pd.DataFrame({"timestamp": ts})
 
-    splitter = WalkForwardSplit(
-        train_span_days=2, test_span_days=1, step_days=1, min_train_days=2
-    )
+    splitter = WalkForwardSplit(train_span_days=2, test_span_days=1, step_days=1, min_train_days=2)
 
     folds = list(splitter.split(df))
     assert folds, "Expected at least one fold to be generated"

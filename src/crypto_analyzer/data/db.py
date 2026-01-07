@@ -22,8 +22,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from typing import Iterable, Iterator
 
 import psycopg2
 from psycopg2 import OperationalError, sql
@@ -326,7 +326,7 @@ def _ensure_combined_features_dependencies(conn: PGConnection) -> None:
     if missing:
         joined = ", ".join(sorted(missing))
         raise RuntimeError(
-            "Cannot create combined_features materialized view; missing tables: %s" % joined
+            f"Cannot create combined_features materialized view; missing tables: {joined}"
         )
 
 
@@ -391,6 +391,15 @@ def refresh_combined_features(
         if not concurrently and not original_autocommit:
             conn.rollback()
         LOGGER.error("Failed to refresh combined_features materialized view: %s", exc)
+        parent = getattr(LOGGER, "parent", None)
+        if (
+            parent is not None
+            and getattr(parent, "name", "") == "crypto_analyzer"
+            and not getattr(parent, "propagate", True)
+        ):
+            logging.getLogger().error(
+                "Failed to refresh combined_features materialized view: %s", exc
+            )
         raise
     finally:
         if autocommit_enabled:
@@ -495,4 +504,3 @@ def main() -> None:  # pragma: no cover - CLI wrapper
 
 if __name__ == "__main__":  # pragma: no cover - CLI wrapper
     main()
-

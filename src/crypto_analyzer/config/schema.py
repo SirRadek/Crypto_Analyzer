@@ -40,6 +40,8 @@ class RuntimeSettings(_BaseModel):
     data_dir: Path = Path("data")
     cache_dir: Path = Path("data/cache")
     tmp_dir: Path = Path("data/tmp")
+    orderbook_interval_minutes: int = Field(default=1, ge=0)
+    binance_interval_minutes: int = Field(default=15, ge=0)
 
 
 class FeatureSettings(_BaseModel):
@@ -65,6 +67,12 @@ class BacktestSettings(_BaseModel):
     validation_fraction: float = Field(default=0.2, ge=0.0, le=1.0)
     walkforward_window_days: int = Field(default=30, ge=1)
     metrics: tuple[str, ...] = ("accuracy", "precision", "recall")
+    p_up_threshold: float | None = Field(default=0.65, ge=0.0, le=1.0)
+    position_size: float = Field(default=0.10, ge=0.0, le=1.0)
+    max_leverage: float = Field(default=2.0, ge=0.0)
+    max_trade_loss: float | None = Field(default=0.06, ge=0.0)
+    max_trade_gain: float | None = Field(default=0.30, ge=0.0)
+    compound: bool = False
 
 
 class OnChainSettings(_BaseModel):
@@ -125,6 +133,7 @@ class AppConfig(_BaseModel):
     database: DatabaseSettings
     runtime: RuntimeSettings
     features: FeatureSettings
+    live: FeatureSettings
     sentiment: SentimentSettings
     models: ModelSettings
     backtest: BacktestSettings
@@ -136,6 +145,14 @@ class AppConfig(_BaseModel):
     pct_threshold: float
     derivatives: DerivativeDataSettings
     orderbook: OrderbookSettings
+    live_universe: tuple[str, ...] = ()
+    live_asset_limits: dict[str, dict[str, float]] = Field(default_factory=dict)
+    live_initial_equity: float = 10_000.0
+    live_initial_cash: float = 10_000.0
+    live_position_size: float = 0.01
+    live_target_volatility: float = 0.02
+    live_min_position_size: float = 0.001
+    live_max_position_size: float = 0.05
     config_path: Path | None = None
 
     @field_validator("horizons", mode="before")
@@ -145,10 +162,10 @@ class AppConfig(_BaseModel):
             return tuple()
         if isinstance(value, (list, tuple, set)):
             return tuple(int(v) for v in value)
-        return (int(value),)
+        return (int(str(value)),)
 
     @model_validator(mode="after")
-    def _validate_ranges(self) -> "AppConfig":
+    def _validate_ranges(self) -> AppConfig:
         if not (0 < self.pct_threshold < 0.1):
             raise ValueError("pct_threshold must be between 0 and 0.1")
         if self.horizons:
@@ -208,4 +225,3 @@ __all__ = [
     "OrderbookSettings",
     "RuntimeSettings",
 ]
-

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pandas as pd
 import pytest
@@ -56,7 +56,7 @@ def test_store_derivatives_upserts_and_tracks_latest_timestamp() -> None:
 
     latest = ingestion_store.latest_derivatives_timestamp(engine, symbol="BTCUSDT")
     assert latest is not None
-    assert latest.tz_convert("UTC").to_pydatetime() == datetime(2024, 1, 1, 16, tzinfo=timezone.utc)
+    assert latest.tz_convert("UTC").to_pydatetime() == datetime(2024, 1, 1, 16, tzinfo=UTC)
 
     updated_funding = pd.DataFrame(
         {
@@ -64,7 +64,9 @@ def test_store_derivatives_upserts_and_tracks_latest_timestamp() -> None:
             "funding_rate": [0.05],
         }
     )
-    ingestion_store.store_derivatives(updated_funding, pd.DataFrame(), engine=engine, symbol="BTCUSDT")
+    ingestion_store.store_derivatives(
+        updated_funding, pd.DataFrame(), engine=engine, symbol="BTCUSDT"
+    )
 
     query = select(ingestion_store.DERIVATIVES_TABLE.c.funding_rate).where(
         ingestion_store.DERIVATIVES_TABLE.c.timestamp == pd.Timestamp("2024-01-01T08:00:00Z"),
@@ -200,7 +202,7 @@ def test_store_whale_transactions_upserts_latest_timestamp() -> None:
 
     latest = ingestion_store.latest_whale_transaction_timestamp(engine)
     assert latest is not None
-    assert latest.tz_convert("UTC").to_pydatetime() == datetime(2024, 3, 1, 6, tzinfo=timezone.utc)
+    assert latest.tz_convert("UTC").to_pydatetime() == datetime(2024, 3, 1, 6, tzinfo=UTC)
 
     update = transactions.iloc[[1]].assign(amount_usd=[475_000.0])
     ingestion_store.store_whale_transactions(update, engine=engine)

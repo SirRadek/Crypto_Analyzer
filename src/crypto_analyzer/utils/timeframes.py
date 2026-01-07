@@ -1,4 +1,5 @@
 """Utilities for working with Binance-style interval strings."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -54,8 +55,7 @@ def steps_for_minutes(minutes: int, interval: str) -> int:
     base = interval_to_minutes(interval)
     if minutes % base != 0:
         raise ValueError(
-            "Interval must evenly divide the requested minutes: "
-            f"{minutes}m mod {interval} != 0",
+            "Interval must evenly divide the requested minutes: " f"{minutes}m mod {interval} != 0",
         )
     return minutes // base
 

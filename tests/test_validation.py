@@ -10,9 +10,7 @@ from crypto_analyzer.utils.validation import validate_features, validate_price_d
 
 
 def _build_price_frame() -> pd.DataFrame:
-    timestamps = pd.date_range(
-        "2024-01-01", periods=4, freq=CONFIG.interval, tz="UTC"
-    )
+    timestamps = pd.date_range("2024-01-01", periods=4, freq=CONFIG.interval, tz="UTC")
     return pd.DataFrame(
         {
             "timestamp": timestamps,

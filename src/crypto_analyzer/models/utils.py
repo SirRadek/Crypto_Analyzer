@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, List
+from typing import Any
 
 import joblib
 import numpy as np
@@ -31,7 +31,7 @@ def load_model(path: str) -> Any:
 # ---------------------------------------------------------------------
 
 
-def _expected_feature_names(model: Any) -> List[str]:
+def _expected_feature_names(model: Any) -> list[str]:
     """
     Derive the feature-name contract of a fitted model.
 

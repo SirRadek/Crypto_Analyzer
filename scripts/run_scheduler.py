@@ -24,6 +24,11 @@ def _parse_args() -> SchedulerConfig:
         help="Minutes between Binance market data refreshes",
     )
     parser.add_argument(
+        "--orderbook-interval",
+        type=int,
+        help="Minutes between orderbook snapshot refreshes",
+    )
+    parser.add_argument(
         "--news-interval",
         type=int,
         help="Minutes between CryptoPanic news refreshes",
@@ -54,6 +59,8 @@ def _parse_args() -> SchedulerConfig:
         settings.timezone = args.timezone
     if args.binance_interval:
         settings.binance_interval_minutes = max(1, args.binance_interval)
+    if args.orderbook_interval:
+        settings.orderbook_interval_minutes = max(1, args.orderbook_interval)
     if args.news_interval:
         settings.news_interval_minutes = max(1, args.news_interval)
     if args.reddit_interval:

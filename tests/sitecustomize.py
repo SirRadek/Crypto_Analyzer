@@ -1,4 +1,5 @@
 """Ensure the project root is importable when tests change the working directory."""
+
 from __future__ import annotations
 
 import sys

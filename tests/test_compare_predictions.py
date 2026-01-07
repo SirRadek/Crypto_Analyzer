@@ -14,9 +14,7 @@ def test_backfill_updates_predictions(tmp_path):
             " VALUES (?, ?, ?, ?)",
             ("BTCUSDT", "1d", 123, 10.0),
         )
-        conn.execute(
-            "CREATE TABLE prices (symbol TEXT, open_time INTEGER, close REAL)"
-        )
+        conn.execute("CREATE TABLE prices (symbol TEXT, open_time INTEGER, close REAL)")
         conn.execute(
             "INSERT INTO prices (symbol, open_time, close) VALUES (?, ?, ?)",
             ("BTCUSDT", 123, 9.5),

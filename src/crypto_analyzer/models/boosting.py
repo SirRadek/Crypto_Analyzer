@@ -18,8 +18,9 @@ surface area stable for the automated tests that guard the training CLI.
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, MutableMapping, Sequence
+from typing import Any, Literal
 
 import numpy as np
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
@@ -146,9 +147,7 @@ def _merge_params(defaults: dict[str, Any], overrides: MutableMapping[str, Any])
     return merged
 
 
-def _compute_xgb_scale_pos_weight(
-    y: np.ndarray, sample_weight: np.ndarray | None
-) -> float | None:
+def _compute_xgb_scale_pos_weight(y: np.ndarray, sample_weight: np.ndarray | None) -> float | None:
     if sample_weight is None:
         return None
     sw_arr = np.asarray(sample_weight, dtype=np.float32)
@@ -227,7 +226,9 @@ def train_gradient_boosting(
                 params["scale_pos_weight"] = scale_pos_weight
 
         model = xgb.XGBClassifier(**params)
-        model.fit(X_train, y_train, sample_weight=sw_train, eval_set=[(X_val, y_val)], verbose=False)
+        model.fit(
+            X_train, y_train, sample_weight=sw_train, eval_set=[(X_val, y_val)], verbose=False
+        )
     elif cfg.booster == "lightgbm":
         try:
             import lightgbm as lgb  # type: ignore[import]  # pragma: no cover - optional dependency
@@ -264,4 +265,3 @@ def train_gradient_boosting(
         metrics=metrics,
         feature_names=names,
     )
-

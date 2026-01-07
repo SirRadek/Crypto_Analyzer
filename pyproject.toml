@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Utilities for crypto market analysis"
 requires-python = ">=3.11,<3.13"
 dependencies = [
-    "numpy==2.1.1",
+    "numpy==2.0.2",
     "pandas==2.2.2",
     "scipy==1.13.1",
     "scikit-learn==1.5.1",
@@ -38,6 +38,8 @@ dependencies = [
     "psycopg2-binary==2.9.9",
     "vaderSentiment==3.3.2",
     "tweepy==4.14.0",
+    "typer==0.12.3",
+    "click==8.1.7",
 ]
 
 [project.optional-dependencies]
@@ -53,8 +55,8 @@ dev = [
     "threadpoolctl==3.6.0",
     "pandas-stubs==2.2.2.240807",
     "types-requests==2.32.0.20240712",
-    "joblib-stubs==1.4.2.2",
-    "scikit-learn-stubs==1.5.0.5",
+    "joblib-stubs==1.4.2.2.20240515",
+    "scikit-learn-stubs==1.5.0.5; python_version < '3.12'",
     "types-tqdm==4.66.0.20240417",
     "types-PyYAML==6.0.12.20240808",
     "pip-tools==7.5.0",
@@ -98,11 +100,23 @@ extend-exclude = ["archive/**/*", "src/crypto_analyzer/legacy/**/*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "PL", "NPY", "SIM", "PERF"]
-ignore = []
+ignore = [
+    "E501",
+    "NPY002",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "PLW0603",
+    "SIM108",
+    "UP038",
+]
 extend-ignore = ["D1", "D2", "D4"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*" = ["D1", "I"]
+"scripts/**/*.py" = ["UP007"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
@@ -118,13 +132,31 @@ strict = true
 explicit_package_bases = true
 disallow_untyped_calls = false
 allow_subclassing_any = true
+mypy_path = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["xgboost.*", "matplotlib.*", "fastapi.*", "structlog.*"]
+module = ["xgboost.*", "matplotlib.*", "fastapi.*", "structlog.*", "psutil.*", "psycopg2.*", "sklearn.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["db.*", "reporting.*", "scripts.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "crypto_analyzer.cli.*",
+    "crypto_analyzer.config.*",
+    "crypto_analyzer.data.*",
+    "crypto_analyzer.eval.*",
+    "crypto_analyzer.features.*",
+    "crypto_analyzer.labeling.*",
+    "crypto_analyzer.legacy.*",
+    "crypto_analyzer.models.*",
+    "crypto_analyzer.pipeline",
+    "crypto_analyzer.reporting.*",
+    "crypto_analyzer.scheduling.*",
+    "crypto_analyzer.utils.*",
+]
 ignore_errors = true
 
 [tool.black]

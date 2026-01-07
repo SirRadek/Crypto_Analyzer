@@ -23,7 +23,8 @@ database:
   predictions_table: predictions
   # Table containing on-chain metrics aligned to the candle grid
   onchain_table: onchain_1d
-  # Optional feature store path (set to null to disable)
+  # Optional feature cache directory; enables --use-cache by default in CLIs
+  # (set to null to disable feature caching)
   feature_store: null
   # Chunk size used when streaming large tables from disk
   read_chunksize: 100000
@@ -44,6 +45,10 @@ runtime:
   cache_dir: data/cache
   # Directory for transient files (e.g., training checkpoints)
   tmp_dir: data/tmp
+  # Minutes between Binance derivatives refreshes (0 disables)
+  binance_interval_minutes: 15
+  # Minutes between orderbook snapshots (0 disables)
+  orderbook_interval_minutes: 1
 
 features:
   # Toggle inclusion of optional feature families
@@ -54,6 +59,15 @@ features:
   # Maximum number of forward-fill steps for sparse series
   forward_fill_limit: 12
   # Value used to replace remaining NaNs after preprocessing
+  fillna_value: 0.0
+
+live:
+  # Feature set used by live/paper trading loops
+  include_onchain: false
+  include_orderbook: false
+  include_derivatives: true
+  include_sentiment: false
+  forward_fill_limit: 0
   fillna_value: 0.0
 
 sentiment:
@@ -88,6 +102,18 @@ backtest:
     - accuracy
     - precision
     - recall
+  # Default directional probability threshold for backtests
+  p_up_threshold: 0.65
+  # Position size per trade as fraction of equity
+  position_size: 0.10
+  # Max leverage applied to the position size
+  max_leverage: 2.0
+  # Clamp worst-case per-trade loss as fraction of equity
+  max_trade_loss: 0.06
+  # Clamp best-case per-trade gain as fraction of equity
+  max_trade_gain: 0.30
+  # Whether to compound equity during backtests
+  compound: false
 
 onchain:
   # Enable/disable individual data providers
@@ -105,3 +131,47 @@ onchain:
   # Network request configuration
   request_timeout: 10
   request_retries: 5
+
+orderbook:
+  depth_levels: 5
+
+live_universe:
+  - BTCUSDC
+  - ETHUSDC
+  - BNBUSDC
+  - SOLUSDC
+  - XRPUSDC
+
+live_asset_limits:
+  BTCUSDC:
+    max_leverage: 50
+    max_exposure_pct: 0.15
+    fee_bps: 10
+    slippage_bps: 10
+  ETHUSDC:
+    max_leverage: 50
+    max_exposure_pct: 0.15
+    fee_bps: 10
+    slippage_bps: 10
+  BNBUSDC:
+    max_leverage: 25
+    max_exposure_pct: 0.12
+    fee_bps: 12
+    slippage_bps: 12
+  SOLUSDC:
+    max_leverage: 25
+    max_exposure_pct: 0.12
+    fee_bps: 12
+    slippage_bps: 12
+  XRPUSDC:
+    max_leverage: 20
+    max_exposure_pct: 0.10
+    fee_bps: 12
+    slippage_bps: 12
+
+live_initial_equity: 10000
+live_initial_cash: 10000
+live_position_size: 0.01
+live_target_volatility: 0.02
+live_min_position_size: 0.001
+live_max_position_size: 0.05

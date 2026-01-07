@@ -20,4 +20,3 @@ class ModelError(CryptoAnalyzerError):
 
 
 __all__ = ["ConfigError", "CryptoAnalyzerError", "DataValidationError", "ModelError"]
-

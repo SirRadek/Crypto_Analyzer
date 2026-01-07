@@ -142,6 +142,9 @@ def make_targets(
 
     if triple_barrier_horizons_min is None:
         triple_barrier_horizons_min = [120, 240, 360]
+        for horizon in horizons_min:
+            if horizon not in triple_barrier_horizons_min:
+                triple_barrier_horizons_min.append(horizon)
 
     tb_multipliers: dict[int, tuple[float, float]] = {}
     if triple_barrier_multipliers is not None:
@@ -172,8 +175,21 @@ def make_targets(
         df[f"beyond_costs_{horizon}m"] = bc.astype(np.int8)
 
     default_tb_multiplier = float(triple_barrier_default)
+    empty_decision = pd.Series(pd.NA, index=df.index, dtype="Int8")
+    empty_touch_label = pd.Series(pd.NA, index=df.index, dtype="string")
+    empty_flag = pd.Series(pd.NA, index=df.index, dtype="Int8")
+    used_periods: set[int] = set()
     for horizon in triple_barrier_horizons_min:
         periods = max(1, int(round(horizon / step_minutes)))
+        if horizon < step_minutes and periods in used_periods:
+            df[f"triple_barrier_{horizon}m"] = empty_decision
+            df[f"triple_barrier_touch_{horizon}m"] = empty_touch_label
+            df[f"triple_barrier_touched_{horizon}m"] = empty_flag
+            df[f"triple_barrier_touch_up_{horizon}m"] = empty_flag
+            df[f"triple_barrier_touch_down_{horizon}m"] = empty_flag
+            continue
+        if horizon < step_minutes:
+            used_periods.add(periods)
         up_mult, down_mult = tb_multipliers.get(
             horizon, (default_tb_multiplier, default_tb_multiplier)
         )
@@ -184,9 +200,7 @@ def make_targets(
             lower_mult=down_mult,
         )
         df[f"triple_barrier_{horizon}m"] = outcomes["decision"]
-        df[f"triple_barrier_touch_{horizon}m"] = outcomes["touch_label"].astype(
-            "string"
-        )
+        df[f"triple_barrier_touch_{horizon}m"] = outcomes["touch_label"].astype("string")
         df[f"triple_barrier_touched_{horizon}m"] = outcomes["touched"]
         df[f"triple_barrier_touch_up_{horizon}m"] = outcomes["touch_up"]
         df[f"triple_barrier_touch_down_{horizon}m"] = outcomes["touch_down"]

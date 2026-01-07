@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
-
-from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -101,7 +99,9 @@ def _find_horizon_column(df: pd.DataFrame, preferred: str | None) -> str | None:
     return None
 
 
-def _iter_groups(df: pd.DataFrame, column: str | None) -> Iterable[tuple[str | int | float | None, pd.DataFrame]]:
+def _iter_groups(
+    df: pd.DataFrame, column: str | None
+) -> Iterable[tuple[str | int | float | None, pd.DataFrame]]:
     if column is None or column not in df.columns:
         yield None, df
         return
@@ -137,7 +137,7 @@ def _run_sweep(
     p_up_min: float,
     p_up_max: float,
     p_up_step: float,
-    run_id: Optional[str],
+    run_id: str | None,
     dry_run: bool,
 ) -> tuple[Path, Path]:
     df = _read_predictions(predictions)
@@ -324,7 +324,9 @@ def main(
     p_up_min: float = typer.Option(0.5, help="Minimum p_up threshold evaluated."),
     p_up_max: float = typer.Option(0.7, help="Maximum p_up threshold evaluated."),
     p_up_step: float = typer.Option(0.05, help="Step size between p_up thresholds."),
-    run_id: Optional[str] = typer.Option(None, help="Optional identifier used when storing reports."),
+    run_id: Optional[str] = typer.Option(
+        None, help="Optional identifier used when storing reports."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
 ) -> None:
     if fee_bps < 0 or slip_bps < 0:
@@ -358,4 +360,3 @@ def main(
 
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour
     run_cli(app)
-

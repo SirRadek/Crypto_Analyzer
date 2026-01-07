@@ -18,7 +18,7 @@ def test_vulture_clean():
         "--min-confidence",
         "90",
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     # Vulture vrací 0 i s nálezy; filtruj šum a whitelist řádek.
     lines = [
         ln

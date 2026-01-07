@@ -1,8 +1,8 @@
 core:
-  symbol: BTCUSDT
-  interval: 1d
+  symbol: BTCUSDC
+  interval: 5m
   forward_steps: 8
-  history_days: 1825
+  history_days: 365
   timezone: UTC
 
 database:
@@ -22,6 +22,8 @@ runtime:
   data_dir: data
   cache_dir: data/cache
   tmp_dir: data/tmp
+  binance_interval_minutes: 15
+  orderbook_interval_minutes: 1
 
 features:
   include_onchain: true
@@ -29,6 +31,14 @@ features:
   include_derivatives: true
   include_sentiment: false
   forward_fill_limit: 12
+  fillna_value: 0.0
+
+live:
+  include_onchain: false
+  include_orderbook: false
+  include_derivatives: true
+  include_sentiment: false
+  forward_fill_limit: 0
   fillna_value: 0.0
 
 sentiment:
@@ -52,6 +62,12 @@ backtest:
     - accuracy
     - precision
     - recall
+  p_up_threshold: 0.65
+  position_size: 0.10
+  max_leverage: 2.0
+  max_trade_loss: 0.06
+  max_trade_gain: 0.30
+  compound: false
 
 onchain:
   use_mempool: true
@@ -79,8 +95,8 @@ execution:
   latency_min: 1
 
 horizons:
-  - 120
   - 240
+  - 120
   - 360
 
 pct_threshold: 0.005
@@ -93,3 +109,44 @@ derivatives:
 
 orderbook:
   depth_levels: 5
+
+live_universe:
+  - BTCUSDC
+  - ETHUSDC
+  - BNBUSDC
+  - SOLUSDC
+  - XRPUSDC
+
+live_asset_limits:
+  BTCUSDC:
+    max_leverage: 50
+    max_exposure_pct: 0.15
+    fee_bps: 10
+    slippage_bps: 10
+  ETHUSDC:
+    max_leverage: 50
+    max_exposure_pct: 0.15
+    fee_bps: 10
+    slippage_bps: 10
+  BNBUSDC:
+    max_leverage: 25
+    max_exposure_pct: 0.12
+    fee_bps: 12
+    slippage_bps: 12
+  SOLUSDC:
+    max_leverage: 25
+    max_exposure_pct: 0.12
+    fee_bps: 12
+    slippage_bps: 12
+  XRPUSDC:
+    max_leverage: 20
+    max_exposure_pct: 0.10
+    fee_bps: 12
+    slippage_bps: 12
+
+live_initial_equity: 10000
+live_initial_cash: 10000
+live_position_size: 0.01
+live_target_volatility: 0.02
+live_min_position_size: 0.001
+live_max_position_size: 0.05

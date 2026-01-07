@@ -23,7 +23,9 @@ def test_population_stability_index_and_ks():
 def test_monitor_feature_drift_flags_alerts():
     ref = pd.DataFrame({"f": np.linspace(0, 1, 50)})
     cur = pd.DataFrame({"f": np.linspace(0.5, 1.5, 50)})
-    table = monitor_feature_drift(ref, cur, features=["f"], thresholds=DriftThresholds(psi_alert=0.0, ks_alert=0.0))
+    table = monitor_feature_drift(
+        ref, cur, features=["f"], thresholds=DriftThresholds(psi_alert=0.0, ks_alert=0.0)
+    )
     assert table.loc[0, "psi_alert"]
     assert table.loc[0, "ks_alert"]
 
@@ -37,4 +39,3 @@ def test_rolling_recalibration_returns_estimators():
     assert 0 < len(calibrators) <= len(index) - 10 + 1
     last = list(calibrators.values())[-1]
     assert hasattr(last, "predict_proba") or hasattr(last, "predict")
-

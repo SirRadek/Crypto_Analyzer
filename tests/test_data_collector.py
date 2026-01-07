@@ -71,9 +71,7 @@ def test_fetch_binance_order_book_extracts_top_of_book():
     }
     session = _DummySession(payload)
 
-    frame = data_collector.fetch_binance_order_book(
-        "BTCUSDT", depth=20, session=session
-    )
+    frame = data_collector.fetch_binance_order_book("BTCUSDT", depth=20, session=session)
 
     assert list(frame.columns) == [
         "timestamp",
@@ -222,8 +220,12 @@ def test_load_enriched_market_data_aligns_daily_series(monkeypatch):
 
     assert {"onch_active_addresses", "funding_rate", "open_interest"}.issubset(enriched.columns)
 
-    first_day = enriched[enriched["timestamp"].dt.floor("D") == pd.Timestamp("2021-01-01", tz="UTC")]
-    second_day = enriched[enriched["timestamp"].dt.floor("D") == pd.Timestamp("2021-01-02", tz="UTC")]
+    first_day = enriched[
+        enriched["timestamp"].dt.floor("D") == pd.Timestamp("2021-01-01", tz="UTC")
+    ]
+    second_day = enriched[
+        enriched["timestamp"].dt.floor("D") == pd.Timestamp("2021-01-02", tz="UTC")
+    ]
 
     assert (first_day["onch_active_addresses"] == 1000).all()
     assert (second_day["onch_active_addresses"] == 1100).all()

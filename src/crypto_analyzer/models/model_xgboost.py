@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict
+from typing import Any
 
 try:  # pragma: no cover - optional dependency
     import xgboost as xgb
@@ -32,7 +32,7 @@ class XGBoostConfig:
     random_state: int = 42
     verbosity: int = 0
 
-    def as_kwargs(self) -> Dict[str, Any]:
+    def as_kwargs(self) -> dict[str, Any]:
         """Return a shallow copy of the configuration as keyword arguments."""
 
         return asdict(self)
@@ -44,6 +44,7 @@ if xgb is not None:  # pragma: no branch - executed when dependency available
         """Thin subclass wiring :class:`XGBoostConfig` into the constructor."""
 
         def __init__(self, config: XGBoostConfig):
+            self.config = config
             super().__init__(**config.as_kwargs())
 
 else:  # pragma: no cover - fallback only hit when optional dependency missing

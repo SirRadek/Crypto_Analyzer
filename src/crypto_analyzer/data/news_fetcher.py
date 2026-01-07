@@ -121,12 +121,7 @@ def fetch_cryptopanic_news(
             currencies_serialised = ""
 
         source_info = entry.get("source") or {}
-        source = (
-            source_info.get("title")
-            or source_info.get("name")
-            or entry.get("domain")
-            or ""
-        )
+        source = source_info.get("title") or source_info.get("name") or entry.get("domain") or ""
 
         sentiment_score = float(positive or 0) - float(negative or 0)
         if isinstance(tags, list):

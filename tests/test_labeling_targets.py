@@ -1,8 +1,6 @@
 import numpy as np
 import pandas as pd
 
-import numpy as np
-import pandas as pd
 
 from crypto_analyzer.labeling.targets import (
     make_targets,
@@ -29,9 +27,7 @@ def test_make_targets_creates_binary_labels_without_leakage():
     expected_bc = pd.Series([1, 1, 0, 0, 0, 0], dtype="int8")
 
     pd.testing.assert_series_equal(labeled["cls_sign_1440m"], expected_cls, check_names=False)
-    pd.testing.assert_series_equal(
-        labeled["beyond_costs_1440m"], expected_bc, check_names=False
-    )
+    pd.testing.assert_series_equal(labeled["beyond_costs_1440m"], expected_bc, check_names=False)
     assert labeled["timestamp"].dt.tz is not None
 
 
@@ -97,9 +93,7 @@ def test_make_targets_adds_triple_barrier_labels():
         [1, -1, 1, -1, -1, -1, 1, 1, -1, -1, -1, pd.NA],
         dtype="Int8",
     )
-    pd.testing.assert_series_equal(
-        labeled["triple_barrier_120m"], expected, check_names=False
-    )
+    pd.testing.assert_series_equal(labeled["triple_barrier_120m"], expected, check_names=False)
     touch_labels = labeled["triple_barrier_touch_120m"].astype(str).tolist()
     assert touch_labels[:4] == ["UP", "DOWN", "NO_TOUCH", "NO_TOUCH"]
     touched = labeled["triple_barrier_touched_120m"].astype("float32")

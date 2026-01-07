@@ -1,37 +1,40 @@
 #!/usr/bin/env python
 """Train entry point for the gradient boosted meta-classifier."""
+
 from __future__ import annotations
 
-#!/usr/bin/env python
-"""Training entry-point with optional calibration and conformal outputs."""
-from __future__ import annotations
-
+import json
+from enum import Enum
+import inspect
+import re
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 import joblib
 import numpy as np
 import pandas as pd
+import typer
 import xgboost as xgb
 from sklearn import metrics
 
-import typer
-
 from crypto_analyzer.data.store import PriceDataStore, resolve_data_store
+from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.features.engineering import (
     FEATURE_COLUMNS,
+    FEATURE_GROUPS,
     create_features,
     get_feature_columns,
 )
 from crypto_analyzer.features.engineering import make_targets as make_default_targets
-from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.models.calibration import (
     brier_score,
     fit_isotonic,
     fit_platt,
-    log_loss as log_loss_metric,
     plot_reliability,
     reliability_curve,
+)
+from crypto_analyzer.models.calibration import (
+    log_loss as log_loss_metric,
 )
 from crypto_analyzer.models.conformal import conformal_interval
 from crypto_analyzer.utils.cli import run_cli
@@ -44,10 +47,72 @@ from crypto_analyzer.utils.io import (
     save_model,
 )
 from crypto_analyzer.utils.logging import get_logger
+from crypto_analyzer.utils.feature_cache import (
+    build_cache_key,
+    build_cache_payload,
+    cache_paths,
+    default_cache_dir,
+)
+from crypto_analyzer.utils.profiling import profile_section
+
+
+class StoreChoice(str, Enum):
+    auto = "auto"
+    sqlite = "sqlite"
+    timescale = "timescale"
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 logger = get_logger(__name__)
+
+
+def _predict_proba(
+    model: xgb.XGBClassifier,
+    X: pd.DataFrame,
+    *,
+    use_gpu: bool,
+) -> np.ndarray:
+    """Predict class probabilities, preferring GPU-backed inference when possible."""
+
+    if use_gpu:
+        try:
+            booster = model.get_booster()
+            try:
+                proba = booster.inplace_predict(X, predict_type="probability", device="cuda")
+            except TypeError:
+                proba = booster.inplace_predict(X, device="cuda")
+            arr = np.asarray(proba)
+            if arr.ndim == 1:
+                arr = np.column_stack([1.0 - arr, arr])
+            return arr
+        except Exception:
+            pass
+
+    proba = model.predict_proba(X) if hasattr(model, "predict_proba") else model.predict(X)
+    arr = np.asarray(proba)
+    if arr.ndim == 1:
+        arr = np.column_stack([1.0 - arr, arr])
+    return arr
+
+
+def _match_columns(columns: list[str], patterns: list[str]) -> set[str]:
+    matched: set[str] = set()
+    for pattern in patterns:
+        regex = re.compile(pattern)
+        matched.update([col for col in columns if regex.search(col)])
+    return matched
+
+
+def _apply_feature_group_drops(feature_cols: list[str], drop_groups: list[str]) -> list[str]:
+    if not drop_groups:
+        return feature_cols
+    unknown = [group for group in drop_groups if group not in FEATURE_GROUPS]
+    if unknown:
+        raise DataValidationError("Unknown feature groups: " + ", ".join(sorted(unknown)))
+    to_drop: set[str] = set()
+    for group in drop_groups:
+        to_drop.update(_match_columns(feature_cols, FEATURE_GROUPS.get(group, [])))
+    return [col for col in feature_cols if col not in to_drop]
 
 
 def _read_table(path: Path) -> pd.DataFrame:
@@ -58,14 +123,30 @@ def _read_table(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _load_feature_list(path: Path) -> list[str]:
+    if not path.exists():
+        raise DataValidationError(f"Feature list file '{path}' does not exist")
+    if path.suffix.lower() == ".json":
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise DataValidationError("Feature list JSON must be an array of strings")
+        return [str(item) for item in raw]
+    frame = pd.read_csv(path)
+    if "feature" in frame.columns:
+        return frame["feature"].dropna().astype(str).tolist()
+    if frame.shape[1] == 1:
+        return frame.iloc[:, 0].dropna().astype(str).tolist()
+    raise DataValidationError("Feature list CSV must have a 'feature' column or a single column")
+
+
 def _prepare_settings(
     *,
-    include_onchain: Optional[bool],
-    include_orderbook: Optional[bool],
-    include_derivatives: Optional[bool],
-    include_sentiment: Optional[bool],
-    forward_fill_limit: Optional[int],
-    fillna_value: Optional[float],
+    include_onchain: bool | None,
+    include_orderbook: bool | None,
+    include_derivatives: bool | None,
+    include_sentiment: bool | None,
+    forward_fill_limit: int | None,
+    fillna_value: float | None,
 ) -> FeatureSettings:
     settings = CONFIG.features
     overrides: dict[str, Any] = {}
@@ -91,19 +172,20 @@ def _prepare_settings(
                 if forward_fill_limit is not None
                 else settings.forward_fill_limit
             ),
-            fillna_value=(
-                fillna_value if fillna_value is not None else settings.fillna_value
-            ),
+            fillna_value=(fillna_value if fillna_value is not None else settings.fillna_value),
         )
     return settings
 
 
 def _load_features(
     *,
-    features: Optional[Path],
+    features: Path | None,
     symbol: str,
     data_store: PriceDataStore | None,
     settings: FeatureSettings,
+    use_cache: bool,
+    cache_dir: Path | None,
+    dry_run: bool,
 ) -> pd.DataFrame:
     if features is not None:
         df = _read_table(features)
@@ -113,8 +195,60 @@ def _load_features(
 
     if data_store is None:
         raise DataValidationError("Database store is required when --features is not provided")
+
+    if not use_cache:
+        cache_root = None
+    else:
+        cache_root = cache_dir if cache_dir is not None else default_cache_dir()
+    cache_parquet: Path | None = None
+    cache_meta: Path | None = None
+    cache_payload: dict[str, Any] | None = None
+
+    if cache_root is not None:
+        store_label = getattr(data_store, "label", None)
+        store_location = None
+        location = getattr(data_store, "path", None) or getattr(data_store, "url", None)
+        if location is not None:
+            store_location = str(location)
+
+        latest_open = None
+        try:
+            latest_open = data_store.latest_open_time(symbol=symbol, interval=CONFIG.interval)
+        except Exception:  # pragma: no cover - cache is best-effort
+            latest_open = None
+
+        cache_payload = build_cache_payload(
+            source="db",
+            symbol=symbol,
+            input_path=None,
+            settings=settings,
+            store_label=store_label,
+            store_location=store_location,
+            latest_open_time=latest_open,
+        )
+        cache_key = build_cache_key(cache_payload)
+        cache_parquet, cache_meta = cache_paths(cache_root, cache_key)
+        if cache_parquet.exists():
+            logger.info(
+                "Loaded features from cache",
+                extra={"event": "cache_hit", "path": str(cache_parquet)},
+            )
+            df = pd.read_parquet(cache_parquet)
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            return df
+
     raw = data_store.fetch_prices(symbol)
-    return create_features(raw, settings=settings)
+    df = create_features(raw, settings=settings)
+
+    if cache_parquet is not None and not dry_run:
+        df.to_parquet(cache_parquet, index=False)
+        if cache_meta is not None and cache_payload is not None:
+            cache_payload["output_path"] = str(cache_parquet)
+            cache_payload["rows"] = int(len(df))
+            cache_meta.write_text(json.dumps(cache_payload, indent=2), encoding="utf-8")
+
+    return df
 
 
 def _ensure_label(df: pd.DataFrame, horizon: int, label: str) -> tuple[pd.DataFrame, str]:
@@ -140,9 +274,7 @@ def _compute_realized_volatility(df: pd.DataFrame) -> pd.Series:
         realized = pd.to_numeric(df["vol_realized_1d"], errors="coerce")
     else:
         if "close" not in df.columns:
-            raise KeyError(
-                "close price column missing; unable to compute realized volatility"
-            )
+            raise KeyError("close price column missing; unable to compute realized volatility")
         close_prices = pd.to_numeric(df["close"], errors="coerce")
         log_returns = np.log(close_prices).diff()
         realized = log_returns.pow(2).rolling(window=60, min_periods=10).sum().pow(0.5)
@@ -340,58 +472,141 @@ def _fit_model(
     *,
     use_gpu: bool,
     random_state: int,
+    scale_pos_weight: float | None,
+    eval_set: tuple[pd.DataFrame, pd.Series] | None,
+    early_stopping_rounds: int | None,
+    n_estimators: int,
+    max_depth: int,
+    learning_rate: float,
+    subsample: float,
+    colsample_bytree: float,
+    max_bin: int | None,
+    min_child_weight: float,
+    reg_lambda: float,
+    reg_alpha: float,
+    gamma: float,
+    tree_method: str | None,
+    predictor: str | None,
+    eval_metric: str,
 ) -> xgb.XGBClassifier:
+    resolved_tree = tree_method or ("gpu_hist" if use_gpu else "hist")
     params = dict(
-        n_estimators=400,
-        max_depth=6,
-        learning_rate=0.08,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        tree_method="gpu_hist" if use_gpu else "hist",
-        predictor="gpu_predictor" if use_gpu else "cpu_predictor",
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        subsample=subsample,
+        colsample_bytree=colsample_bytree,
+        tree_method=resolved_tree,
+        device="cuda" if use_gpu else "cpu",
         n_jobs=-1,
-        eval_metric="logloss",
+        eval_metric=eval_metric,
         random_state=random_state,
-        use_label_encoder=False,
+        min_child_weight=min_child_weight,
+        reg_lambda=reg_lambda,
+        reg_alpha=reg_alpha,
+        gamma=gamma,
     )
+    if max_bin is not None:
+        params["max_bin"] = max_bin
+    if predictor:
+        params["predictor"] = predictor
+    if scale_pos_weight is not None:
+        params["scale_pos_weight"] = float(scale_pos_weight)
     model = xgb.XGBClassifier(**params)
+    fit_kwargs: dict[str, object] = {}
+    callbacks: list[object] = []
+    if eval_set is not None:
+        fit_kwargs["eval_set"] = [eval_set]
+        fit_kwargs["verbose"] = False
+
+    fit_sig = inspect.signature(model.fit)
+    supports_callbacks = "callbacks" in fit_sig.parameters
+    supports_early = "early_stopping_rounds" in fit_sig.parameters
+
+    if early_stopping_rounds and early_stopping_rounds > 0:
+        if supports_callbacks:
+            callbacks.append(
+                xgb.callback.EarlyStopping(
+                    rounds=int(early_stopping_rounds),
+                    save_best=True,
+                    maximize=False,
+                    data_name="validation_0",
+                    metric_name="logloss",
+                )
+            )
+        elif supports_early:
+            fit_kwargs["early_stopping_rounds"] = int(early_stopping_rounds)
+
+    if callbacks and supports_callbacks:
+        fit_kwargs["callbacks"] = callbacks
+
     try:
-        model.fit(X_train, y_train)
-    except xgb.core.XGBoostError:
+        model.fit(X_train, y_train, **fit_kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument" in str(exc) and fit_kwargs:
+            fit_kwargs.pop("callbacks", None)
+            fit_kwargs.pop("early_stopping_rounds", None)
+            model.fit(X_train, y_train, **fit_kwargs)
+        else:
+            raise
+    except (ValueError, xgb.core.XGBoostError):
         if use_gpu:
-            model.set_params(tree_method="hist", predictor="cpu_predictor")
-            model.fit(X_train, y_train)
+            fallback = {"device": "cpu", "tree_method": "hist"}
+            if predictor and predictor.startswith("gpu"):
+                fallback["predictor"] = "cpu_predictor"
+            model.set_params(**fallback)
+            model.fit(X_train, y_train, **fit_kwargs)
         else:
             raise
     return model
 
 
 DEFAULT_MODEL_PATH = Path("artifacts/meta_model.joblib")
+DEFAULT_HORIZON = CONFIG.horizons[0] if CONFIG.horizons else 120
 
 
 def _run_training(
     *,
-    features: Optional[Path],
+    features: Path | None,
     symbol: str,
     data_store: PriceDataStore | None,
     horizon: int,
-    label: Optional[str],
+    label: str | None,
     model_path: Path,
     split: str,
     test_size: float,
     random_state: int,
     use_gpu: bool,
-    include_onchain: Optional[bool],
-    include_orderbook: Optional[bool],
-    include_derivatives: Optional[bool],
-    include_sentiment: Optional[bool],
-    forward_fill_limit: Optional[int],
-    fillna_value: Optional[float],
-    cv_strategy: Optional[str],
+    include_onchain: bool | None,
+    include_orderbook: bool | None,
+    include_derivatives: bool | None,
+    include_sentiment: bool | None,
+    forward_fill_limit: int | None,
+    fillna_value: float | None,
+    feature_drop_groups: list[str],
+    feature_list: Path | None,
+    use_cache: bool,
+    cache_dir: Path | None,
+    cv_strategy: str | None,
     embargo_min: int,
     calibration: str,
-    conformal_alpha: Optional[float],
-    run_id: Optional[str],
+    conformal_alpha: float | None,
+    early_stopping_rounds: int | None,
+    scale_pos_weight: float | None,
+    n_estimators: int,
+    max_depth: int,
+    learning_rate: float,
+    subsample: float,
+    colsample_bytree: float,
+    max_bin: int | None,
+    min_child_weight: float,
+    reg_lambda: float,
+    reg_alpha: float,
+    gamma: float,
+    tree_method: str | None,
+    predictor: str | None,
+    eval_metric: str,
+    run_id: str | None,
     dump_cv: bool,
     by_vol_bins: int,
     dry_run: bool,
@@ -406,6 +621,30 @@ def _run_training(
         raise DataValidationError("--conformal-alpha must lie in (0, 1)")
     if by_vol_bins <= 0:
         raise DataValidationError("--by-vol-bins must be a positive integer")
+    if early_stopping_rounds is not None and early_stopping_rounds < 0:
+        raise DataValidationError("--early-stopping-rounds must be non-negative")
+    if scale_pos_weight is not None and scale_pos_weight <= 0:
+        raise DataValidationError("--scale-pos-weight must be positive")
+    if n_estimators <= 0:
+        raise DataValidationError("--n-estimators must be positive")
+    if max_depth <= 0:
+        raise DataValidationError("--max-depth must be positive")
+    if learning_rate <= 0:
+        raise DataValidationError("--learning-rate must be positive")
+    if not (0 < subsample <= 1):
+        raise DataValidationError("--subsample must be in (0, 1]")
+    if not (0 < colsample_bytree <= 1):
+        raise DataValidationError("--colsample-bytree must be in (0, 1]")
+    if max_bin is not None and max_bin < 2:
+        raise DataValidationError("--max-bin must be >= 2")
+    if min_child_weight < 0:
+        raise DataValidationError("--min-child-weight must be non-negative")
+    if reg_lambda < 0:
+        raise DataValidationError("--reg-lambda must be non-negative")
+    if reg_alpha < 0:
+        raise DataValidationError("--reg-alpha must be non-negative")
+    if gamma < 0:
+        raise DataValidationError("--gamma must be non-negative")
 
     settings = _prepare_settings(
         include_onchain=include_onchain,
@@ -420,6 +659,9 @@ def _run_training(
         symbol=symbol,
         data_store=data_store,
         settings=settings,
+        use_cache=use_cache,
+        cache_dir=cache_dir,
+        dry_run=dry_run,
     )
 
     label_name = label or f"cls_sign_{horizon}m"
@@ -427,6 +669,27 @@ def _run_training(
     df = df.dropna(subset=[label_col]).sort_values("timestamp")
 
     feature_cols = get_feature_columns(settings) or FEATURE_COLUMNS
+    if feature_drop_groups:
+        feature_cols = _apply_feature_group_drops(feature_cols, feature_drop_groups)
+        logger.info(
+            "Dropped feature groups for training",
+            extra={
+                "event": "feature_groups_dropped",
+                "groups": feature_drop_groups,
+                "remaining_features": len(feature_cols),
+            },
+        )
+    if feature_list is not None:
+        chosen = set(_load_feature_list(feature_list))
+        feature_cols = [col for col in feature_cols if col in chosen]
+        logger.info(
+            "Applied explicit feature list",
+            extra={
+                "event": "feature_list",
+                "path": str(feature_list),
+                "remaining_features": len(feature_cols),
+            },
+        )
     missing = [col for col in feature_cols if col not in df.columns]
     if missing:
         joined = ", ".join(sorted(missing))
@@ -470,8 +733,41 @@ def _run_training(
     default_model_target = run_dir / "model.joblib"
     model_output = model_path if model_path != DEFAULT_MODEL_PATH else default_model_target
 
+    if scale_pos_weight is None:
+        positives = int(y_train.sum())
+        negatives = int(len(y_train) - positives)
+        if positives > 0 and negatives > 0:
+            ratio = negatives / positives
+            if ratio >= 1.2:
+                scale_pos_weight = ratio
+
+    eval_set = None
+    if X_cal is not None and y_cal is not None and len(X_cal):
+        eval_set = (X_cal, y_cal)
+
     try:
-        model = _fit_model(X_train, y_train, use_gpu=use_gpu, random_state=random_state)
+        model = _fit_model(
+            X_train,
+            y_train,
+            use_gpu=use_gpu,
+            random_state=random_state,
+            scale_pos_weight=scale_pos_weight,
+            eval_set=eval_set,
+            early_stopping_rounds=early_stopping_rounds,
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            max_bin=max_bin,
+            min_child_weight=min_child_weight,
+            reg_lambda=reg_lambda,
+            reg_alpha=reg_alpha,
+            gamma=gamma,
+            tree_method=tree_method,
+            predictor=predictor,
+            eval_metric=eval_metric,
+        )
     except xgb.core.XGBoostError as exc:  # pragma: no cover - defensive
         raise ModelError(f"Training failed: {exc}") from exc
 
@@ -484,7 +780,7 @@ def _run_training(
         else:
             model_output = run_model_path
 
-    proba_test = model.predict_proba(X_test)[:, 1]
+    proba_test = _predict_proba(model, X_test, use_gpu=use_gpu)[:, 1]
     labels_test = (proba_test >= 0.5).astype(int)
 
     metrics_raw = {
@@ -506,7 +802,7 @@ def _run_training(
     if calibration_method not in {"none", "isotonic", "platt"}:
         raise DataValidationError("Unsupported calibration method")
     if calibration_method != "none" and X_cal is not None and len(X_cal) > 0:
-        cal_probs = model.predict_proba(X_cal)[:, 1]
+        cal_probs = _predict_proba(model, X_cal, use_gpu=use_gpu)[:, 1]
         if calibration_method == "isotonic":
             calibrator = fit_isotonic(cal_probs, y_cal)
         else:
@@ -555,7 +851,7 @@ def _run_training(
         )
 
         if conformal_alpha is not None and X_cal is not None and len(X_cal) > 0:
-            cal_probs = model.predict_proba(X_cal)[:, 1]
+            cal_probs = _predict_proba(model, X_cal, use_gpu=use_gpu)[:, 1]
             conformal = conformal_interval(
                 y_cal,
                 cal_probs,
@@ -630,6 +926,8 @@ def _run_training(
             "include_orderbook": include_orderbook,
             "include_derivatives": include_derivatives,
             "include_sentiment": include_sentiment,
+            "feature_drop_groups": feature_drop_groups,
+            "feature_list": feature_list,
             "forward_fill_limit": forward_fill_limit,
             "fillna_value": fillna_value,
             "cv_strategy": cv_strategy,
@@ -673,13 +971,15 @@ def main(
         resolve_path=True,
         help="Optional engineered feature table (CSV/Parquet).",
     ),
-    symbol: str = typer.Option(CONFIG.symbol, "--symbol", help="Trading symbol used when sourcing data."),
-    store_choice: Literal["auto", "sqlite", "timescale"] = typer.Option(
-        "auto",
+    symbol: str = typer.Option(
+        CONFIG.symbol, "--symbol", help="Trading symbol used when sourcing data."
+    ),
+    store_choice: StoreChoice = typer.Option(
+        StoreChoice.auto,
         "--store",
         help="Database backend to use when sourcing raw candles (auto follows config).",
     ),
-    db_path: Path | None = typer.Option(
+    db_path: Optional[Path] = typer.Option(
         CONFIG.db_path,
         "--db-path",
         exists=False,
@@ -688,12 +988,16 @@ def main(
         resolve_path=True,
         help="Override SQLite database path when using the local store.",
     ),
-    db_url: str | None = typer.Option(
+    db_url: Optional[str] = typer.Option(
         CONFIG.db_url,
         "--db-url",
         help="Override SQLAlchemy URL when using Timescale/PostgreSQL.",
     ),
-    horizon: int = typer.Option(120, "--horizon", help="Target horizon in minutes for label generation."),
+    horizon: int = typer.Option(
+        DEFAULT_HORIZON,
+        "--horizon",
+        help="Target horizon in minutes for label generation.",
+    ),
     label: Optional[str] = typer.Option(None, "--label", help="Existing label column to use."),
     model_path: Path = typer.Option(
         DEFAULT_MODEL_PATH,
@@ -702,34 +1006,64 @@ def main(
         help="Output path for the trained model.",
     ),
     split: str = typer.Option("holdout", "--split", help="Evaluation split used during training."),
-    test_size: float = typer.Option(0.2, "--test-size", help="Hold-out fraction used for the validation split."),
-    random_state: int = typer.Option(42, "--random-state", help="Random seed used for model training."),
+    test_size: float = typer.Option(
+        0.2, "--test-size", help="Hold-out fraction used for the validation split."
+    ),
+    random_state: int = typer.Option(
+        42, "--random-state", help="Random seed used for model training."
+    ),
     use_gpu: bool = typer.Option(True, "--use-gpu/--no-gpu", help="Toggle GPU acceleration."),
-    include_onchain: Optional[bool] = typer.Option(
+    include_onchain: bool = typer.Option(
         None,
         "--include-onchain/--exclude-onchain",
         help="Override on-chain features regardless of config defaults.",
+        flag_value=True,
     ),
-    include_orderbook: Optional[bool] = typer.Option(
+    include_orderbook: bool = typer.Option(
         None,
         "--include-orderbook/--exclude-orderbook",
         help="Override orderbook features regardless of config defaults.",
+        flag_value=True,
     ),
-    include_derivatives: Optional[bool] = typer.Option(
+    include_derivatives: bool = typer.Option(
         None,
         "--include-derivatives/--exclude-derivatives",
         help="Override derivative features regardless of config defaults.",
+        flag_value=True,
     ),
-    include_sentiment: Optional[bool] = typer.Option(
+    include_sentiment: bool = typer.Option(
         None,
         "--include-sentiment/--exclude-sentiment",
         help="Override sentiment features regardless of config defaults.",
+        flag_value=True,
+    ),
+    feature_drop_groups: Optional[str] = typer.Option(
+        None,
+        "--feature-drop-groups",
+        help="Comma-separated feature group names to drop (e.g. lob,derivatives).",
+    ),
+    feature_list: Optional[Path] = typer.Option(
+        None,
+        "--feature-list",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+        help="Optional JSON/CSV list of feature names to keep.",
     ),
     forward_fill_limit: Optional[int] = typer.Option(
         None, "--forward-fill-limit", help="Override forward-fill window for NaN handling."
     ),
     fillna_value: Optional[float] = typer.Option(
         None, "--fillna-value", help="Override fallback value used when forward fill runs out."
+    ),
+    use_cache: bool = typer.Option(
+        CONFIG.database.feature_store is not None,
+        "--use-cache/--no-cache",
+        help="Cache engineered features to speed up reruns.",
+    ),
+    cache_dir: Optional[Path] = typer.Option(
+        None, "--cache-dir", help="Override feature cache directory."
     ),
     cv_strategy: Optional[str] = typer.Option(
         None, "--cv", help="Optional cross-validation strategy to evaluate during training."
@@ -745,53 +1079,159 @@ def main(
         help="Probability calibration method applied on the validation split.",
     ),
     conformal_alpha: Optional[float] = typer.Option(
-        0.1, "--conformal-alpha", help="Enable conformal prediction intervals at the specified miscoverage level."
+        0.1,
+        "--conformal-alpha",
+        help="Enable conformal prediction intervals at the specified miscoverage level.",
+    ),
+    early_stopping_rounds: Optional[int] = typer.Option(
+        50,
+        "--early-stopping-rounds",
+        help="Enable early stopping using the calibration split (0 to disable).",
+    ),
+    scale_pos_weight: Optional[float] = typer.Option(
+        None,
+        "--scale-pos-weight",
+        help="Override class imbalance weight (auto when omitted).",
+    ),
+    n_estimators: int = typer.Option(
+        400,
+        "--n-estimators",
+        help="Number of boosting rounds.",
+    ),
+    max_depth: int = typer.Option(
+        6,
+        "--max-depth",
+        help="Maximum tree depth.",
+    ),
+    learning_rate: float = typer.Option(
+        0.08,
+        "--learning-rate",
+        help="Boosting learning rate.",
+    ),
+    subsample: float = typer.Option(
+        0.8,
+        "--subsample",
+        help="Subsample ratio of training instances.",
+    ),
+    colsample_bytree: float = typer.Option(
+        0.8,
+        "--colsample-bytree",
+        help="Subsample ratio of columns per tree.",
+    ),
+    max_bin: Optional[int] = typer.Option(
+        None,
+        "--max-bin",
+        help="Optional maximum number of bins (GPU hist tuning).",
+    ),
+    min_child_weight: float = typer.Option(
+        1.0,
+        "--min-child-weight",
+        help="Minimum sum of instance weight needed in a child.",
+    ),
+    reg_lambda: float = typer.Option(
+        1.0,
+        "--reg-lambda",
+        help="L2 regularization term on weights.",
+    ),
+    reg_alpha: float = typer.Option(
+        0.0,
+        "--reg-alpha",
+        help="L1 regularization term on weights.",
+    ),
+    gamma: float = typer.Option(
+        0.0,
+        "--gamma",
+        help="Minimum loss reduction required to make a split.",
+    ),
+    tree_method: Optional[str] = typer.Option(
+        None,
+        "--tree-method",
+        help="Override tree method (defaults to gpu_hist when GPU is enabled).",
+    ),
+    predictor: Optional[str] = typer.Option(
+        None,
+        "--predictor",
+        help="Optional predictor override (e.g., gpu_predictor).",
+    ),
+    eval_metric: str = typer.Option(
+        "logloss",
+        "--eval-metric",
+        help="Evaluation metric for XGBoost.",
     ),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Optional run identifier."),
     dump_cv: bool = typer.Option(
         False, "--dump-cv", help="Export purged walk-forward CV splits to reports/cv_<run_id>.json."
     ),
     by_vol_bins: int = typer.Option(
-        5, "--by-vol-bins", help="Number of realised volatility quantiles used for metrics by regime."
+        5,
+        "--by-vol-bins",
+        help="Number of realised volatility quantiles used for metrics by regime.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
+    profile: bool = typer.Option(False, "--profile", help="Enable cProfile output."),
+    profile_path: Optional[Path] = typer.Option(
+        None, "--profile-path", help="Optional path for cProfile output."
+    ),
 ) -> None:
     cv_normalised = cv_strategy.lower() if cv_strategy else None
     calibration_normalised = calibration.lower()
+    drop_groups: list[str] = []
+    if feature_drop_groups:
+        drop_groups = [g.strip() for g in feature_drop_groups.split(",") if g.strip()]
     data_store: PriceDataStore | None = None
     if features is None:
         data_store = resolve_data_store(
-            store_choice,
+            store_choice.value,
             sqlite_path=db_path,
             timescale_url=db_url,
         )
 
-    _run_training(
-        features=features,
-        symbol=symbol,
-        data_store=data_store,
-        horizon=horizon,
-        label=label,
-        model_path=model_path,
-        split=split,
-        test_size=test_size,
-        random_state=random_state,
-        use_gpu=use_gpu,
-        include_onchain=include_onchain,
-        include_orderbook=include_orderbook,
-        include_derivatives=include_derivatives,
-        include_sentiment=include_sentiment,
-        forward_fill_limit=forward_fill_limit,
-        fillna_value=fillna_value,
-        cv_strategy=cv_normalised,
-        embargo_min=embargo_min,
-        calibration=calibration_normalised,
-        conformal_alpha=conformal_alpha,
-        run_id=run_id,
-        dump_cv=dump_cv,
-        by_vol_bins=by_vol_bins,
-        dry_run=dry_run,
-    )
+    with profile_section(profile, output=profile_path):
+        _run_training(
+            features=features,
+            symbol=symbol,
+            data_store=data_store,
+            horizon=horizon,
+            label=label,
+            model_path=model_path,
+            split=split,
+            test_size=test_size,
+            random_state=random_state,
+            use_gpu=use_gpu,
+            include_onchain=include_onchain,
+            include_orderbook=include_orderbook,
+            include_derivatives=include_derivatives,
+            include_sentiment=include_sentiment,
+            forward_fill_limit=forward_fill_limit,
+            fillna_value=fillna_value,
+            feature_drop_groups=drop_groups,
+            feature_list=feature_list,
+            use_cache=use_cache,
+            cache_dir=cache_dir,
+            cv_strategy=cv_normalised,
+            embargo_min=embargo_min,
+            calibration=calibration_normalised,
+            conformal_alpha=conformal_alpha,
+            early_stopping_rounds=early_stopping_rounds,
+            scale_pos_weight=scale_pos_weight,
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            max_bin=max_bin,
+            min_child_weight=min_child_weight,
+            reg_lambda=reg_lambda,
+            reg_alpha=reg_alpha,
+            gamma=gamma,
+            tree_method=tree_method,
+            predictor=predictor,
+            eval_metric=eval_metric,
+            run_id=run_id,
+            dump_cv=dump_cv,
+            by_vol_bins=by_vol_bins,
+            dry_run=dry_run,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,6 @@ from sklearn.model_selection import train_test_split
 
 from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.model_manager import atomic_write
-from crypto_analyzer.models.core import XGBoostModel
 from crypto_analyzer.models.calibration import (
     fit_isotonic,
     fit_platt,
@@ -21,6 +21,7 @@ from crypto_analyzer.models.calibration import (
     reliability_curve,
 )
 from crypto_analyzer.models.conformal import generate_touch_conformal_report
+from crypto_analyzer.models.core import XGBoostModel
 from crypto_analyzer.models.utils import evaluate_model
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.splitting import WalkForwardSplit
@@ -34,6 +35,8 @@ def _to_f32(X) -> pd.DataFrame | np.ndarray:
     if isinstance(X, pd.DataFrame):
         return X.astype("float32", copy=False)
     return np.asarray(X, dtype=np.float32)
+
+
 def train_model(
     X,
     y,
@@ -113,8 +116,12 @@ def train_model(
         split_details: list[dict[str, Any]] = []
 
         for fold, (train_idx, test_idx) in enumerate(splits):
-            train_times = timestamps.iloc[train_idx] if len(train_idx) else pd.Series(dtype="datetime64[ns]")
-            test_times = timestamps.iloc[test_idx] if len(test_idx) else pd.Series(dtype="datetime64[ns]")
+            train_times = (
+                timestamps.iloc[train_idx] if len(train_idx) else pd.Series(dtype="datetime64[ns]")
+            )
+            test_times = (
+                timestamps.iloc[test_idx] if len(test_idx) else pd.Series(dtype="datetime64[ns]")
+            )
 
             detail = {
                 "fold": fold,
@@ -188,9 +195,7 @@ def train_model(
 
         X_full = _to_f32(features)
         y_full = y_series
-        final_model = XGBoostModel(
-            params=dict(base_params), use_gpu=use_gpu, model_path=model_path
-        )
+        final_model = XGBoostModel(params=dict(base_params), use_gpu=use_gpu, model_path=model_path)
         final_model.train(X_full, y_full)
         final_model.save(model_path)
         logger.info("Model saved to %s", model_path)
@@ -250,9 +255,7 @@ def train_model(
         # finální model natrénujeme na všech datech
         X_full = _to_f32(features)
         y_full = y_series
-        final_model = XGBoostModel(
-            params=dict(base_params), use_gpu=use_gpu, model_path=model_path
-        )
+        final_model = XGBoostModel(params=dict(base_params), use_gpu=use_gpu, model_path=model_path)
         final_model.train(X_full, y_full)
         final_model.save(model_path)
         logger.info("Model saved to %s", model_path)
@@ -439,9 +442,7 @@ def train_xgb(
         )
 
         labels = (preds >= class_threshold).astype(int)
-        raw_bins, raw_obs, raw_exp, raw_brier, raw_logloss = reliability_curve(
-            y_test, preds
-        )
+        raw_bins, raw_obs, raw_exp, raw_brier, raw_logloss = reliability_curve(y_test, preds)
         metrics_raw: dict[str, float] = {
             "accuracy": float(accuracy_score(y_test, labels)),
             "f1": float(f1_score(y_test, labels)),
@@ -537,11 +538,13 @@ def train_xgb(
         metrics_report["logloss_raw"] = float(raw_logloss)
         metrics_report["brier_cal"] = float(cal_brier) if calibration_applied else None
         metrics_report["logloss_cal"] = float(cal_logloss) if calibration_applied else None
-        if calibration_applied and cal_brier is not None and raw_brier is not None:
-            if float(cal_brier) > float(raw_brier):
-                raise ValueError(
-                    "Calibrated Brier score is worse than raw Brier score"
-                )
+        if (
+            calibration_applied
+            and cal_brier is not None
+            and raw_brier is not None
+            and float(cal_brier) > float(raw_brier)
+        ):
+            raise ValueError("Calibrated Brier score is worse than raw Brier score")
         if conformal_requested:
             conformal_path = reports_dir / f"conformal_{final_run_id}.json"
             if cal_probs is not None and y_cal is not None and len(y_cal) > 0:
@@ -586,9 +589,13 @@ def train_xgb(
         metrics_payload = {
             "horizon": int(horizon) if horizon is not None else None,
             "brier_raw": float(raw_brier),
-            "brier_cal": float(cal_brier) if calibration_applied and cal_brier is not None else None,
+            "brier_cal": float(cal_brier)
+            if calibration_applied and cal_brier is not None
+            else None,
             "auc": float(metrics_raw["roc_auc"]),
-            "logloss": float(cal_logloss) if calibration_applied and cal_logloss is not None else float(raw_logloss),
+            "logloss": float(cal_logloss)
+            if calibration_applied and cal_logloss is not None
+            else float(raw_logloss),
             "coverage": coverage_value,
             "ev": None,
         }
@@ -732,7 +739,7 @@ def parse_args(argv: Iterable[str] | None = None):
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", choices=["clf", "reg"], required=True)
-    parser.add_argument("--horizon", type=int, choices=[120, 240], required=True)
+    parser.add_argument("--horizon", type=int, required=True)
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--eval_metric", default="logloss")
@@ -762,6 +769,8 @@ def parse_args(argv: Iterable[str] | None = None):
     )
 
     args = parser.parse_args(argv)
+    if args.horizon <= 0:
+        parser.error("--horizon must be a positive integer")
 
     conformal_args = args.conformal
     if conformal_args is None:
@@ -792,8 +801,8 @@ def parse_args(argv: Iterable[str] | None = None):
 
 def main_cli(args) -> Path:
     from crypto_analyzer.features.engineering import FEATURE_COLUMNS, create_features
-    from db.db_connector import get_price_data
     from crypto_analyzer.utils.config import CONFIG
+    from db.db_connector import get_price_data
 
     run_id = args.run_id or pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
     out_dir = Path("outputs") / run_id

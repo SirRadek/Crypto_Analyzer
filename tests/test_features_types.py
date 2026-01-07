@@ -1,5 +1,4 @@
 import numpy as np
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -129,9 +128,7 @@ def test_create_features_includes_sentiment_when_enabled(monkeypatch: pytest.Mon
 
     sentiment_enabled = CONFIG.sentiment.model_copy(update={"use_sentiment": True})
     config_override = CONFIG.model_copy(update={"sentiment": sentiment_enabled})
-    monkeypatch.setattr(
-        "crypto_analyzer.features.engineering.CONFIG", config_override
-    )
+    monkeypatch.setattr("crypto_analyzer.features.engineering.CONFIG", config_override)
 
     feat_df = create_features(base, settings=settings)
     assert "sent_score" in feat_df.columns
@@ -167,9 +164,7 @@ def test_create_features_excludes_sentiment_when_disabled(monkeypatch: pytest.Mo
 
     sentiment_disabled = CONFIG.sentiment.model_copy(update={"use_sentiment": False})
     config_override = CONFIG.model_copy(update={"sentiment": sentiment_disabled})
-    monkeypatch.setattr(
-        "crypto_analyzer.features.engineering.CONFIG", config_override
-    )
+    monkeypatch.setattr("crypto_analyzer.features.engineering.CONFIG", config_override)
 
     feat_df = create_features(base, settings=settings)
     assert "sent_score" not in feat_df.columns
@@ -255,9 +250,12 @@ def test_create_features_computes_expected_core_metrics() -> None:
         feat_df["ofi_base_roll_7d"], expected_roll_7d, rtol=1e-6, atol=1e-6
     )
 
-    expected_ratio = (taker_buy_base / (volume - taker_buy_base)).astype(np.float32).reset_index(drop=True)
+    expected_ratio = (
+        (taker_buy_base / (volume - taker_buy_base)).astype(np.float32).reset_index(drop=True)
+    )
     expected_ratio.name = "taker_buy_sell_ratio"
     pd.testing.assert_series_equal(feat_df["taker_buy_sell_ratio"], expected_ratio)
+
 
 def test_create_features_rejects_missing_columns():
     ts = pd.date_range("2024-01-01", periods=10, freq="1D", tz="UTC")
@@ -346,12 +344,8 @@ def test_feature_generators_match_manual_expectations() -> None:
 
     log_close = np.log(close.replace(0.0, np.nan))
     expected_mom = log_close.diff(1).astype(np.float32).fillna(fill_value)
-    np.testing.assert_allclose(
-        feat_df["mom_log_ret_1d"].to_numpy(), expected_mom.to_numpy()
-    )
+    np.testing.assert_allclose(feat_df["mom_log_ret_1d"].to_numpy(), expected_mom.to_numpy())
 
     ret1 = log_close.diff().astype(np.float32)
     expected_vol = ret1.rolling(7).std().astype(np.float32).fillna(fill_value)
-    np.testing.assert_allclose(
-        feat_df["vol_realized_7d"].to_numpy(), expected_vol.to_numpy()
-    )
+    np.testing.assert_allclose(feat_df["vol_realized_7d"].to_numpy(), expected_vol.to_numpy())

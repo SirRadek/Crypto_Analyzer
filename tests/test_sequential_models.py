@@ -53,8 +53,9 @@ def test_train_transformer_classifier_cpu():
         targets,
         training=training,
         model="transformer",
-        transformer_config=sequential.TransformerConfig(input_dim=4, hidden_dim=16, num_layers=1, num_heads=2),
+        transformer_config=sequential.TransformerConfig(
+            input_dim=4, hidden_dim=16, num_layers=1, num_heads=2
+        ),
     )
     assert isinstance(model, torch.nn.Module)
     assert any(key.endswith("val_accuracy") for key in metrics)
-

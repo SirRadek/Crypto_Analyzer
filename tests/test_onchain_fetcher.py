@@ -168,12 +168,12 @@ def test_fetch_exchange_flows_returns_expected_series() -> None:
     assert list(frame.columns) == ["onch_exchange_inflow", "onch_exchange_outflow"]
     assert frame.index.name == "timestamp"
     assert frame.index.tz is not None
-    assert frame.loc[pd.Timestamp(1_700_000_000, unit="s", tz="UTC"), "onch_exchange_inflow"] == pytest.approx(
-        1.5
-    )
-    assert frame.loc[pd.Timestamp(1_700_086_400, unit="s", tz="UTC"), "onch_exchange_outflow"] == pytest.approx(
-        0.75
-    )
+    assert frame.loc[
+        pd.Timestamp(1_700_000_000, unit="s", tz="UTC"), "onch_exchange_inflow"
+    ] == pytest.approx(1.5)
+    assert frame.loc[
+        pd.Timestamp(1_700_086_400, unit="s", tz="UTC"), "onch_exchange_outflow"
+    ] == pytest.approx(0.75)
 
 
 def test_fetch_exchange_flows_handles_request_errors() -> None:

@@ -124,7 +124,7 @@ def save_csv(
 
 @overload
 def save_png(
-    image: "pd.Series | pd.DataFrame",
+    image: pd.Series | pd.DataFrame,
     filename: str,
     *,
     run_id: str,
@@ -137,7 +137,7 @@ def save_png(
 
 @overload
 def save_png(
-    image: "Any",
+    image: Any,
     filename: str,
     *,
     run_id: str,
@@ -205,4 +205,3 @@ def save_model(
     )
     joblib.dump(model, target)
     return target
-

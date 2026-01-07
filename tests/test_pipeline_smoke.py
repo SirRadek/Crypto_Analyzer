@@ -64,9 +64,7 @@ def _run_pipeline(tmp_path: Path, task: str) -> None:
     env["DB_PATH"] = str(db_path)
     src_dir = Path(__file__).resolve().parent.parent / "src"
     existing_path = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        f"{src_dir}{os.pathsep}{existing_path}" if existing_path else str(src_dir)
-    )
+    env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{existing_path}" if existing_path else str(src_dir)
     cmd = [
         "python",
         "-m",

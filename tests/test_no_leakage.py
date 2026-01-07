@@ -86,4 +86,3 @@ def test_validate_left_label_alignment_detects_future_features() -> None:
 
     with pytest.raises(pa.errors.SchemaErrors):
         FEATURE_FRAME_SCHEMA.validate(df, lazy=True)
-

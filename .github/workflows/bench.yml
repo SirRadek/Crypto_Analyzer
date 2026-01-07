@@ -40,23 +40,24 @@ for i in range(1,3):
 df = pd.DataFrame(cols)
 df.to_csv('synthetic.csv', index=False)
 PY
-      - name: Create config
-        run: |
-          cat <<'CFG' > cfg.yaml
-horizon_min: 120
-embargo: 24
-target_kind: log
-xgb_params:
-  reg: {}
-  quantile: {}
-quantiles: {low: 0.1, high: 0.9}
-fees: {taker: 0.0004}
-features: {path: src/crypto_analyzer/features/feature_list.json}
-n_jobs: 2
-CFG
       - name: Run benchmark
         run: |
-          /usr/bin/time -v python -m ml.train_price --config cfg.yaml --data synthetic.csv --outdir models/ci 2>&1 | tee time.log
+          python scripts/make_features.py \
+            --source file \
+            --input synthetic.csv \
+            --output features.parquet \
+            --exclude-onchain \
+            --exclude-orderbook \
+            --exclude-derivatives \
+            --exclude-sentiment
+          /usr/bin/time -v python scripts/train.py \
+            --features features.parquet \
+            --model-path models/ci/model.joblib \
+            --horizon 120 \
+            --exclude-onchain \
+            --exclude-orderbook \
+            --exclude-derivatives \
+            --exclude-sentiment 2>&1 | tee time.log
           tail -n 20 time.log
           peak=$(grep -oP 'Maximum resident set size \(kbytes\): \K\d+' time.log)
           if [ "$peak" -gt 16000000 ]; then echo "Memory limit exceeded: $peak"; exit 1; fi
@@ -64,5 +65,5 @@ CFG
         with:
           name: benchmark-metrics
           path: |
-            models/ci/model_meta.json
-            models/ci/metrics.json
+            outputs/
+            reports/

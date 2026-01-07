@@ -24,4 +24,3 @@ def run_cli(app: typer.Typer) -> None:
 
 
 __all__ = ["run_cli"]
-

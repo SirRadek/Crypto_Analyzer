@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -50,6 +50,10 @@ LIQUIDATION_SHORT_CANDIDATES: tuple[str, ...] = (
 )
 
 ONCHAIN_FEATURES = (
+    "onch_exchange_net_flow",
+    "onch_exchange_inflow",
+    "onch_exchange_outflow",
+    "onch_active_addresses",
     "onch_fee_fast_satvb",
     "onch_fee_30m_satvb",
     "onch_fee_60m_satvb",
@@ -306,9 +310,7 @@ def validate_feature_inputs(df: pd.DataFrame, settings: FeatureSettings) -> None
     prefixed = [col for col in df.columns if col.startswith("onch_")]
     extras = sorted(set(prefixed) - set(ONCHAIN_FEATURES))
     if extras:
-        raise ValueError(
-            "Unexpected on-chain columns present: " + ", ".join(extras)
-        )
+        raise ValueError("Unexpected on-chain columns present: " + ", ".join(extras))
 
 
 def _resolve_feature_settings(settings: FeatureSettings | None) -> FeatureSettings:
@@ -347,18 +349,14 @@ class FeatureGenerator(ABC):
         self.settings = settings
 
     @abstractmethod
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         """Mutate *df* by adding feature columns and return it."""
 
 
 class OnChainFeatureGenerator(FeatureGenerator):
     """Handle on-chain inputs and forward-filling logic."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         fill_value = context.fill_value
         if self.settings.include_onchain:
             for col in ONCHAIN_FEATURES:
@@ -386,23 +384,13 @@ class OnChainFeatureGenerator(FeatureGenerator):
 class SentimentFeatureGenerator(FeatureGenerator):
     """Normalize sentiment columns depending on configuration."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
-        include_sentiment = bool(
-            self.settings.include_sentiment and CONFIG.sentiment.use_sentiment
-        )
-        sentiment_cols = [
-            c for c in df.columns if c.startswith(SENTIMENT_COLUMN_PREFIXES)
-        ]
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
+        include_sentiment = bool(self.settings.include_sentiment and CONFIG.sentiment.use_sentiment)
+        sentiment_cols = [c for c in df.columns if c.startswith(SENTIMENT_COLUMN_PREFIXES)]
         if include_sentiment:
             if sentiment_cols:
-                numeric_sentiment = df[sentiment_cols].apply(
-                    pd.to_numeric, errors="coerce"
-                )
-                df[sentiment_cols] = (
-                    numeric_sentiment.fillna(context.fill_value).astype(np.float32)
-                )
+                numeric_sentiment = df[sentiment_cols].apply(pd.to_numeric, errors="coerce")
+                df[sentiment_cols] = numeric_sentiment.fillna(context.fill_value).astype(np.float32)
         elif sentiment_cols:
             df = df.drop(columns=sentiment_cols)
         return df
@@ -411,9 +399,7 @@ class SentimentFeatureGenerator(FeatureGenerator):
 class OrderflowFeatureGenerator(FeatureGenerator):
     """Compute order-flow and volume-derived features."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         fill_value = context.fill_value
         vol = df["volume"].replace(0.0, np.nan)
         qvol = df["quote_asset_volume"].replace(0.0, np.nan)
@@ -424,40 +410,28 @@ class OrderflowFeatureGenerator(FeatureGenerator):
         df["ofi_base"] = (2.0 * df["tbr_base"] - 1.0).astype(np.float32)
         df["ofi_quote"] = (2.0 * tbr_quote - 1.0).astype(np.float32)
         df["d_tbr_base"] = df["tbr_base"].diff().astype(np.float32)
-        df["ema12_tbr_base"] = (
-            df["tbr_base"].ewm(span=12, adjust=False).mean().astype(np.float32)
-        )
-        df["z_volume"] = (
-            (vol - vol.rolling(36).mean()) / vol.rolling(36).std()
-        ).astype(np.float32)
+        df["ema12_tbr_base"] = df["tbr_base"].ewm(span=12, adjust=False).mean().astype(np.float32)
+        df["z_volume"] = ((vol - vol.rolling(36).mean()) / vol.rolling(36).std()).astype(np.float32)
 
         for minutes in MULTI_TF_MINUTES:
-            label = context.timeframe_labels.get(
-                minutes, _format_minutes_label(minutes)
-            )
+            label = context.timeframe_labels.get(minutes, _format_minutes_label(minutes))
             if minutes not in context.supported_minutes:
                 df[f"ofi_base_roll_{label}"] = np.float32(fill_value)
                 df[f"ofi_quote_roll_{label}"] = np.float32(fill_value)
                 df[f"tbr_base_roll_{label}"] = np.float32(fill_value)
                 continue
             window = context.timeframe_windows[minutes]
-            df[f"ofi_base_roll_{label}"] = (
-                df["ofi_base"].rolling(window).mean().astype(np.float32)
-            )
+            df[f"ofi_base_roll_{label}"] = df["ofi_base"].rolling(window).mean().astype(np.float32)
             df[f"ofi_quote_roll_{label}"] = (
                 df["ofi_quote"].rolling(window).mean().astype(np.float32)
             )
-            df[f"tbr_base_roll_{label}"] = (
-                df["tbr_base"].rolling(window).mean().astype(np.float32)
-            )
+            df[f"tbr_base_roll_{label}"] = df["tbr_base"].rolling(window).mean().astype(np.float32)
 
         vwap = (qvol / vol).astype(np.float32)
         df["rel_close_vwap"] = ((df["close"] - vwap).abs() / vwap).astype(np.float32)
 
         denom = (df["volume"] - df["taker_buy_base"]).replace(0.0, np.nan)
-        df["taker_buy_sell_ratio"] = (
-            df["taker_buy_base"] / denom
-        ).astype(np.float32)
+        df["taker_buy_sell_ratio"] = (df["taker_buy_base"] / denom).astype(np.float32)
 
         return df
 
@@ -465,9 +439,7 @@ class OrderflowFeatureGenerator(FeatureGenerator):
 class TechnicalFeatureGenerator(FeatureGenerator):
     """Compute momentum, volatility, and range-based features."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         if context.log_close is None or context.ret1 is None:
             raise ValueError("Technical features require log returns in context")
         fill_value = context.fill_value
@@ -477,9 +449,7 @@ class TechnicalFeatureGenerator(FeatureGenerator):
         df["ret3"] = ret1.rolling(3).sum().astype(np.float32)
 
         for minutes in MULTI_TF_MINUTES:
-            label = context.timeframe_labels.get(
-                minutes, _format_minutes_label(minutes)
-            )
+            label = context.timeframe_labels.get(minutes, _format_minutes_label(minutes))
             if minutes not in context.supported_minutes:
                 df[f"mom_log_ret_{label}"] = np.float32(fill_value)
                 continue
@@ -487,9 +457,7 @@ class TechnicalFeatureGenerator(FeatureGenerator):
             df[f"mom_log_ret_{label}"] = log_close.diff(window).astype(np.float32)
 
         for minutes in MULTI_TF_MINUTES:
-            label = context.timeframe_labels.get(
-                minutes, _format_minutes_label(minutes)
-            )
+            label = context.timeframe_labels.get(minutes, _format_minutes_label(minutes))
             if minutes not in context.supported_minutes:
                 df[f"vol_realized_{label}"] = np.float32(fill_value)
                 df[f"vol_of_vol_{label}"] = np.float32(fill_value)
@@ -504,9 +472,7 @@ class TechnicalFeatureGenerator(FeatureGenerator):
         low = df["low"].replace(0.0, np.nan)
         log_range = np.log(high / low).pow(2)
         for minutes in MULTI_TF_MINUTES:
-            label = context.timeframe_labels.get(
-                minutes, _format_minutes_label(minutes)
-            )
+            label = context.timeframe_labels.get(minutes, _format_minutes_label(minutes))
             if minutes not in context.supported_minutes:
                 df[f"vol_range_parkinson_{label}"] = np.float32(fill_value)
                 continue
@@ -519,9 +485,7 @@ class TechnicalFeatureGenerator(FeatureGenerator):
         fast_ema = df["close"].ewm(span=fast_span, adjust=False).mean()
         slow_ema = df["close"].ewm(span=slow_span, adjust=False).mean()
         denom = df["close"].replace(0.0, np.nan)
-        df["mom_microtrend_ema_ratio"] = (
-            (fast_ema - slow_ema) / denom
-        ).astype(np.float32)
+        df["mom_microtrend_ema_ratio"] = ((fast_ema - slow_ema) / denom).astype(np.float32)
 
         df["volatility_12d"] = ret1.rolling(12).std().astype(np.float32)
 
@@ -541,9 +505,7 @@ class TechnicalFeatureGenerator(FeatureGenerator):
 class DerivativesFeatureGenerator(FeatureGenerator):
     """Compute derivatives-related features when enabled."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         fill_value = context.fill_value
         if not self.settings.include_derivatives:
             df = df.drop(columns=list(REGISTRY.derivatives), errors="ignore")
@@ -567,9 +529,7 @@ class DerivativesFeatureGenerator(FeatureGenerator):
         elif "deriv_funding_rate" not in df.columns:
             df["deriv_funding_rate"] = fill_value
 
-        df["deriv_funding_rate_change"] = (
-            df["deriv_funding_rate"].diff().astype(np.float32)
-        )
+        df["deriv_funding_rate_change"] = df["deriv_funding_rate"].diff().astype(np.float32)
         smooth_window = max(1, context.timeframe_windows.get(10080, 7))
         df["deriv_funding_rate_smooth"] = (
             df["deriv_funding_rate"].rolling(smooth_window).mean().astype(np.float32)
@@ -577,9 +537,7 @@ class DerivativesFeatureGenerator(FeatureGenerator):
 
         basis = df["basis_annualized"].astype(np.float32)
         basis_window = max(1, context.timeframe_windows.get(10080, 7))
-        df["deriv_basis_trend"] = (
-            (basis - basis.rolling(basis_window).mean()).astype(np.float32)
-        )
+        df["deriv_basis_trend"] = (basis - basis.rolling(basis_window).mean()).astype(np.float32)
         df["deriv_basis_slope"] = basis.diff(basis_window).astype(np.float32)
 
         if "open_interest" in df.columns:
@@ -614,9 +572,7 @@ class DerivativesFeatureGenerator(FeatureGenerator):
             df["deriv_liq_net"] = (long_vals - short_vals).astype(np.float32)
             if "open_interest" in df.columns:
                 oi_base = df["open_interest"].replace(0.0, np.nan)
-                df["deriv_liq_to_oi"] = (
-                    ((long_vals + short_vals) / oi_base).astype(np.float32)
-                )
+                df["deriv_liq_to_oi"] = ((long_vals + short_vals) / oi_base).astype(np.float32)
             else:
                 df["deriv_liq_to_oi"] = fill_value
         else:
@@ -639,7 +595,7 @@ class DerivativesFeatureGenerator(FeatureGenerator):
         deriv_cfg = CONFIG.derivatives
 
         try:
-            freq = f"{context.step_minutes}T"
+            freq = f"{context.step_minutes}min"
             extra = make_deriv_features(
                 deriv_subset,
                 freq=freq,
@@ -651,15 +607,17 @@ class DerivativesFeatureGenerator(FeatureGenerator):
                 oi_source=deriv_cfg.open_interest_source,
             )
         except Exception:  # pragma: no cover - defensive fallback
-            extra = pd.DataFrame(
-                columns=["timestamp", "funding_z", "basis_bp", "oi_change_rate"]
-            )
+            extra = pd.DataFrame(columns=["timestamp", "funding_z", "basis_bp", "oi_change_rate"])
 
         if not extra.empty:
             df = df.merge(extra, on="timestamp", how="left")
         else:
             for column in ("funding_z", "basis_bp", "oi_change_rate"):
-                df[column] = np.nan
+                df[column] = fill_value
+
+        for column in ("funding_z", "basis_bp", "oi_change_rate"):
+            if column in df.columns:
+                df[column] = df[column].fillna(fill_value).astype(np.float32)
 
         return df
 
@@ -667,17 +625,22 @@ class DerivativesFeatureGenerator(FeatureGenerator):
 class OrderbookFeatureGenerator(FeatureGenerator):
     """Compute order book derived features when order book data is available."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         fill_value = context.fill_value
         if not self.settings.include_orderbook:
-            drop_lob = [
-                c for c in df.columns if c.startswith("lob_") or c.startswith("wall_")
-            ]
+            drop_lob = [c for c in df.columns if c.startswith("lob_") or c.startswith("wall_")]
             if drop_lob:
                 df = df.drop(columns=drop_lob, errors="ignore")
             return df
+
+        if "bid_price" in df.columns and "lob_bid_price_1" not in df.columns:
+            df["lob_bid_price_1"] = df["bid_price"].astype(np.float32)
+        if "ask_price" in df.columns and "lob_ask_price_1" not in df.columns:
+            df["lob_ask_price_1"] = df["ask_price"].astype(np.float32)
+        if "bid_volume" in df.columns and "lob_bid_L1" not in df.columns:
+            df["lob_bid_L1"] = df["bid_volume"].astype(np.float32)
+        if "ask_volume" in df.columns and "lob_ask_L1" not in df.columns:
+            df["lob_ask_L1"] = df["ask_volume"].astype(np.float32)
 
         from crypto_analyzer.features.orderbook import (
             depth_imbalance,
@@ -796,9 +759,7 @@ class OrderbookFeatureGenerator(FeatureGenerator):
             best_bid = df[bid_px_cols[0]].astype(np.float32)
             best_ask = df[ask_px_cols[0]].astype(np.float32)
             mid = ((best_bid + best_ask) / 2.0).replace(0.0, np.nan)
-            df["lob_spread_bps"] = (
-                (best_ask - best_bid) / mid * 1e4
-            ).astype(np.float32)
+            df["lob_spread_bps"] = ((best_ask - best_bid) / mid * 1e4).astype(np.float32)
         else:
             df["lob_spread_bps"] = fill_value
 
@@ -806,9 +767,7 @@ class OrderbookFeatureGenerator(FeatureGenerator):
             total_bid = df[bid_sz_cols].sum(axis=1).astype(np.float32)
             total_ask = df[ask_sz_cols].sum(axis=1).astype(np.float32)
             depth_denom = (total_bid + total_ask).replace(0.0, np.nan)
-            df["lob_depth_imbalance"] = (
-                (total_bid - total_ask) / depth_denom
-            ).astype(np.float32)
+            df["lob_depth_imbalance"] = ((total_bid - total_ask) / depth_denom).astype(np.float32)
         else:
             df["lob_depth_imbalance"] = fill_value
 
@@ -854,9 +813,7 @@ class OrderbookFeatureGenerator(FeatureGenerator):
 class TimeFeatureGenerator(FeatureGenerator):
     """Add cyclical time-of-day and calendar features."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         ts = df["timestamp"]
         minute = ts.dt.hour * 60 + ts.dt.minute
         df["tod_sin"] = np.sin(2.0 * np.pi * minute / 1440.0).astype(np.float32)
@@ -877,9 +834,7 @@ class TimeFeatureGenerator(FeatureGenerator):
 class CrossAssetFeatureGenerator(FeatureGenerator):
     """Compute features derived from cross-asset relationships."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         if context.ret1 is None:
             raise ValueError("Cross-asset features require log returns in context")
         ret1 = context.ret1
@@ -888,9 +843,7 @@ class CrossAssetFeatureGenerator(FeatureGenerator):
         corr_window = context.timeframe_windows.get(
             corr_minutes, max(1, context.timeframe_windows.get(1440, 1))
         )
-        corr_label = context.timeframe_labels.get(
-            corr_minutes, _format_minutes_label(corr_minutes)
-        )
+        corr_label = context.timeframe_labels.get(corr_minutes, _format_minutes_label(corr_minutes))
         for asset, keywords in CROSS_ASSET_KEYWORDS.items():
             col_name = _match_column(df, keywords)
             ret_col = f"cross_{asset}_ret"
@@ -917,9 +870,7 @@ class CrossAssetFeatureGenerator(FeatureGenerator):
 class PrefixedFeatureGenerator(FeatureGenerator):
     """Duplicate select features with explicit prefixes for grouping."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         copy_map = {
             "basis_annualized": "deriv_basis_annualized",
             "oi_delta_1d": "deriv_oi_delta_1d",
@@ -950,9 +901,7 @@ class PrefixedFeatureGenerator(FeatureGenerator):
 class ZScoreFeatureGenerator(FeatureGenerator):
     """Compute z-scores and first differences for prefixed feature groups."""
 
-    def apply(
-        self, df: pd.DataFrame, context: FeatureComputationContext
-    ) -> pd.DataFrame:
+    def apply(self, df: pd.DataFrame, context: FeatureComputationContext) -> pd.DataFrame:
         prefixes = ["mom_", "vol_", "time_", "cross_"]
         if self.settings.include_onchain:
             prefixes.insert(0, "onch_")
@@ -971,9 +920,7 @@ class ZScoreFeatureGenerator(FeatureGenerator):
         return df
 
 
-def create_features(
-    df: pd.DataFrame, settings: FeatureSettings | None = None
-) -> pd.DataFrame:
+def create_features(df: pd.DataFrame, settings: FeatureSettings | None = None) -> pd.DataFrame:
     """Add technical and time-series features to ``df``.
 
     Parameters
@@ -993,6 +940,8 @@ def create_features(
     validate_price_data(df)
     df = df.copy()
     validate_feature_inputs(df, settings)
+    if "basis" in df.columns:
+        df["basis"] = pd.to_numeric(df["basis"], errors="coerce")
     fill_value = np.float32(settings.fillna_value)
     ffill_limit = settings.forward_fill_limit
     if ffill_limit < 0:
@@ -1021,7 +970,7 @@ def create_features(
     if len(numeric) > 0:
         df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce").astype(np.float32)
 
-    safe_close = df["close"].replace(0.0, np.nan)
+    safe_close = df["close"].replace(0.0, np.nan).astype(np.float64)
     context.log_close = np.log(safe_close)
     context.ret1 = context.log_close.diff().astype(np.float32)
 

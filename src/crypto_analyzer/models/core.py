@@ -11,9 +11,10 @@ simple averaging or a small logistic regression meta-model.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Sequence
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 import joblib
 import numpy as np
@@ -42,7 +43,7 @@ class BaseModel(ABC):
     # Life-cycle helpers
     # ------------------------------------------------------------------
 
-    def train(self, X: pd.DataFrame | np.ndarray, y: Iterable[Any]) -> "BaseModel":
+    def train(self, X: pd.DataFrame | np.ndarray, y: Iterable[Any]) -> BaseModel:
         """Fit the underlying estimator on the provided dataset."""
 
         features = self._prepare_features(X, record_names=True)
@@ -82,7 +83,7 @@ class BaseModel(ABC):
         return destination
 
     @classmethod
-    def load(cls, path: str | Path) -> "BaseModel":
+    def load(cls, path: str | Path) -> BaseModel:
         """Restore a model instance from *path*."""
 
         payload = joblib.load(path)
@@ -118,9 +119,7 @@ class BaseModel(ABC):
     # Internal utilities
     # ------------------------------------------------------------------
 
-    def _prepare_features(
-        self, X: pd.DataFrame | np.ndarray, *, record_names: bool
-    ) -> np.ndarray:
+    def _prepare_features(self, X: pd.DataFrame | np.ndarray, *, record_names: bool) -> np.ndarray:
         if isinstance(X, pd.DataFrame):
             if record_names:
                 self._feature_names = [str(c) for c in X.columns]
@@ -258,7 +257,7 @@ class EnsembleModel(BaseModel):
             self.meta_model = LogisticRegression(max_iter=1000)
         self._set_init_params(strategy=self.strategy)
 
-    def train(self, X: pd.DataFrame | np.ndarray, y: Iterable[Any]) -> "EnsembleModel":
+    def train(self, X: pd.DataFrame | np.ndarray, y: Iterable[Any]) -> EnsembleModel:
         if not self.base_models:
             raise ValueError("EnsembleModel requires at least one base model")
 

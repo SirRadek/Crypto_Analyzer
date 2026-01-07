@@ -5,11 +5,7 @@ import pandas as pd
 # Load model utilities without importing the full package to avoid heavy optional
 # dependencies such as xgboost during import.
 module_path = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "src"
-    / "crypto_analyzer"
-    / "models"
-    / "utils.py"
+    pathlib.Path(__file__).resolve().parents[1] / "src" / "crypto_analyzer" / "models" / "utils.py"
 )
 spec = importlib.util.spec_from_file_location("model_utils", module_path)
 model_utils = importlib.util.module_from_spec(spec)

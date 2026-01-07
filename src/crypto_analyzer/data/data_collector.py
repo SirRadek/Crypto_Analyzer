@@ -8,9 +8,10 @@ tests, or automated jobs without depending on CLI entrypoints.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 import requests
@@ -36,6 +37,7 @@ logger = get_logger(__name__)
 GLASSNODE_ENDPOINT = "https://api.glassnode.com/v1/metrics/addresses/active_count"
 BINANCE_FUNDING_ENDPOINT = "https://fapi.binance.com/fapi/v1/fundingRate"
 BINANCE_ORDERBOOK_ENDPOINT = "https://fapi.binance.com/fapi/v1/depth"
+BINANCE_SPOT_ORDERBOOK_ENDPOINT = "https://api.binance.com/api/v3/depth"
 BINANCE_OPEN_INTEREST_ENDPOINT = "https://fapi.binance.com/futures/data/openInterestHist"
 BINANCE_PREMIUM_INDEX_ENDPOINT = "https://fapi.binance.com/fapi/v1/premiumIndex"
 BINANCE_SPOT_TICKER_ENDPOINT = "https://api.binance.com/api/v3/ticker/price"
@@ -52,7 +54,7 @@ class _HTTPSettings:
 def _as_timestamp(value: datetime | pd.Timestamp | str) -> pd.Timestamp:
     """Return ``value`` as a timezone-aware ``Timestamp`` in UTC."""
 
-    ts = pd.Timestamp(value, tz="UTC")
+    ts = pd.Timestamp(value)
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
     return ts.tz_convert("UTC")
@@ -137,7 +139,6 @@ def _binance_paginated_get(
     sess = session or requests.Session()
     records: list[dict[str, object]] = []
 
-    start_time = int(params.get("startTime", 0))
     end_time = int(params.get("endTime", 0)) or None
 
     while True:
@@ -148,7 +149,16 @@ def _binance_paginated_get(
             break
         records.extend(chunk)
 
-        last_time = max(int(entry.get("time") or entry.get("fundingTime", 0)) for entry in chunk)
+        last_time = max(
+            int(
+                entry.get("time")
+                or entry.get("fundingTime")
+                or entry.get("timestamp")
+                or entry.get("closeTime")
+                or 0
+            )
+            for entry in chunk
+        )
         if end_time and last_time >= end_time:
             break
         if len(chunk) < limit:
@@ -230,14 +240,28 @@ def fetch_binance_order_book(
 
     sess = session or requests.Session()
     params = {"symbol": symbol, "limit": limit}
-    response = sess.get(BINANCE_ORDERBOOK_ENDPOINT, params=params, timeout=10)
-    response.raise_for_status()
-    payload = response.json() or {}
+
+    def _request(endpoint: str) -> dict[str, object]:
+        response = sess.get(endpoint, params=params, timeout=10)
+        response.raise_for_status()
+        payload = response.json() or {}
+        if isinstance(payload, dict) and payload.get("code") is not None:
+            raise ValueError(str(payload))
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected orderbook payload")
+        return payload
+
+    try:
+        payload = _request(BINANCE_ORDERBOOK_ENDPOINT)
+    except Exception:
+        payload = _request(BINANCE_SPOT_ORDERBOOK_ENDPOINT)
 
     bids = payload.get("bids") or []
     asks = payload.get("asks") or []
 
-    def _parse_side(levels: list[list[object]] | list[tuple[object, object]]) -> list[tuple[float, float]]:
+    def _parse_side(
+        levels: list[list[object]] | list[tuple[object, object]],
+    ) -> list[tuple[float, float]]:
         parsed: list[tuple[float, float]] = []
         for level in levels[:limit]:
             if not isinstance(level, (list, tuple)) or len(level) < 2:
@@ -426,7 +450,9 @@ def fetch_binance_basis(
             "Unable to compute Binance basis due to missing price data",
             extra={"symbol": symbol, "mark_price": mark_raw, "spot_price": spot_raw},
         )
-        return pd.DataFrame(columns=["timestamp", "basis", "basis_bp", "futures_price", "spot_price"])
+        return pd.DataFrame(
+            columns=["timestamp", "basis", "basis_bp", "futures_price", "spot_price"]
+        )
 
     basis_bp = (mark_price - spot_price) / spot_price * 10_000.0
 
@@ -483,7 +509,10 @@ def load_enriched_market_data(
 
     base = get_price_data(market_symbol, start_ts=start_ms, end_ts=end_ms, db_path=cfg.db_path)
     if base.empty:
-        logger.warning("Base OHLCV dataset is empty; returning without enrichment", extra={"symbol": market_symbol})
+        logger.warning(
+            "Base OHLCV dataset is empty; returning without enrichment",
+            extra={"symbol": market_symbol},
+        )
         return base
 
     timestamps = pd.to_datetime(base["timestamp"], utc=True)
@@ -537,12 +566,16 @@ def load_enriched_market_data(
         )
     if not open_interest.empty:
         open_interest = (
-            open_interest.assign(date=lambda df: pd.to_datetime(df["timestamp"], utc=True).dt.floor("D"))
+            open_interest.assign(
+                date=lambda df: pd.to_datetime(df["timestamp"], utc=True).dt.floor("D")
+            )
             .groupby("date", as_index=False)["open_interest"]
             .last()
         )
     if not glassnode.empty:
-        glassnode = glassnode.assign(date=lambda df: pd.to_datetime(df["timestamp"], utc=True).dt.floor("D"))
+        glassnode = glassnode.assign(
+            date=lambda df: pd.to_datetime(df["timestamp"], utc=True).dt.floor("D")
+        )
 
     if not mempool.empty:
         mempool = (
@@ -589,4 +622,3 @@ __all__ = [
     "fetch_mempool_stats",
     "load_enriched_market_data",
 ]
-

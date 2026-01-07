@@ -1,4 +1,5 @@
 """Backtesting utilities with cost-aware decision rules."""
+
 from __future__ import annotations
 
 from typing import TypedDict
@@ -26,6 +27,11 @@ def run_backtest(
     p_up_col: str | None = None,
     p_touch_threshold: float | None = None,
     p_up_threshold: float | None = None,
+    position_size: float = 0.15,
+    max_leverage: float = 3.0,
+    max_trade_loss: float = 0.06,
+    max_trade_gain: float = 0.30,
+    compound: bool = False,
 ) -> BacktestResult:
     """Run a cost-aware backtest using an expected value decision rule."""
 
@@ -86,45 +92,46 @@ def run_backtest(
             direction[up_probs >= p_up_threshold] = 1.0
             direction[up_probs <= (1.0 - p_up_threshold)] = -1.0
         else:
-            direction = np.where(
-                working["p_hat"] > working["last_price"], 1.0, -1.0
-            ).astype(np.float64)
+            direction = np.where(working["p_hat"] > working["last_price"], 1.0, -1.0).astype(
+                np.float64
+            )
 
         direction = np.where(gating_mask, direction, 0.0)
         trade_ret = direction * price_return.to_numpy() - fee_total * np.abs(direction)
-        ev = (
-            ((working["p_hat"] - working["last_price"]) / working["last_price"])
-            .astype(np.float64)
-            .to_numpy()
-            - fee_total * np.abs(direction)
-        )
+        ev = ((working["p_hat"] - working["last_price"]) / working["last_price"]).astype(
+            np.float64
+        ).to_numpy() - fee_total * np.abs(direction)
         trades = np.abs(direction) > 0
     else:
         probs = working[prob_col].astype(np.float64).clip(0.0, 1.0)
-
-        reward_series = (
-            working[reward_col]
-            if reward_col in working.columns
-            else price_return.clip(lower=0.0)
-        ).astype(np.float64).to_numpy()
-        risk_series = (
-            working[risk_col]
-            if risk_col in working.columns
-            else (-price_return).clip(lower=0.0)
-        ).astype(np.float64).to_numpy()
-
         prob_arr = probs.to_numpy()
-        ev = prob_arr * reward_series - (1.0 - prob_arr) * risk_series - fee_total
-        direction = np.where(ev > 0.0, 1.0, 0.0)
-        if p_up_threshold is not None and up_probs is not None:
-            long_mask = up_probs >= p_up_threshold
-            direction = np.where(long_mask, direction, 0.0)
-            gating_mask &= long_mask
-        direction = np.where(gating_mask, direction, 0.0)
-        trade_ret = direction * price_return.to_numpy() - fee_total * direction
-        trades = direction > 0
+        thr = p_up_threshold if p_up_threshold is not None else 0.5
 
-    equity = (1.0 + trade_ret).cumprod()
+        direction = np.zeros(len(working), dtype=np.float64)
+        direction[prob_arr >= thr] = 1.0
+        if thr > 0.5:
+            direction[prob_arr <= (1.0 - thr)] = -1.0
+        direction = np.where(gating_mask, direction, 0.0)
+
+        ev = prob_arr - 0.5
+        trade_ret = direction * price_return.to_numpy() - fee_total * np.abs(direction)
+        trades = direction != 0
+
+    exposure = float(np.clip(position_size, 0.0, 1.0)) * float(max(max_leverage, 0.0))
+    trade_ret = trade_ret * exposure
+    if max_trade_loss is not None or max_trade_gain is not None:
+        lower = -float(max_trade_loss) if max_trade_loss is not None else None
+        upper = float(max_trade_gain) if max_trade_gain is not None else None
+        trade_ret = np.clip(
+            trade_ret,
+            lower if lower is not None else trade_ret.min(),
+            upper if upper is not None else trade_ret.max(),
+        )
+
+    if compound:
+        equity = (1.0 + trade_ret).cumprod()
+    else:
+        equity = 1.0 + np.cumsum(trade_ret)
     pnl = float(equity[-1] - 1.0)
     sharpe = float(np.mean(trade_ret) / (np.std(trade_ret) + 1e-9) * np.sqrt(len(trade_ret)))
     executed = np.abs(direction) > 0
@@ -137,7 +144,7 @@ def run_backtest(
 
     running_max = np.maximum.accumulate(equity)
     drawdown = equity / running_max - 1.0
-    max_drawdown = float(drawdown.min()) if len(drawdown) else float(0.0)
+    max_drawdown = float(drawdown.min()) if len(drawdown) else 0.0
 
     metrics = {
         "pnl": pnl,

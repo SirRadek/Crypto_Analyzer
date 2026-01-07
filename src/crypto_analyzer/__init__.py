@@ -4,6 +4,7 @@ This module avoids heavy imports at import time. Submodules are lazily
 loaded via ``importlib`` when accessed. The public API remains stable and
 minimal to keep cold-start times fast.
 """
+
 from __future__ import annotations
 
 from importlib import import_module

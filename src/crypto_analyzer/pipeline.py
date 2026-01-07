@@ -9,6 +9,7 @@ pipeline into other applications.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import random
 from datetime import datetime
@@ -56,9 +57,7 @@ def _build_feature_matrix(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFra
     }
     target_columns = {target_col}
     target_columns.update(
-        c
-        for c in df.columns
-        if c.startswith(("cls_sign_", "beyond_costs_", "triple_barrier_"))
+        c for c in df.columns if c.startswith(("cls_sign_", "beyond_costs_", "triple_barrier_"))
     )
     feature_cols = [c for c in df.columns if c not in base_cols.union(target_columns)]
     X = df[feature_cols].astype(np.float32)
@@ -105,11 +104,7 @@ def prepare_targets(
         labeled = labeled.iloc[:-forward_steps, :].copy()
 
     labeled = labeled.dropna(subset=[target_col]).reset_index(drop=True)
-    drop_cols = [
-        c
-        for c in labeled.columns
-        if c.startswith(("beyond_costs_", "triple_barrier_"))
-    ]
+    drop_cols = [c for c in labeled.columns if c.startswith(("beyond_costs_", "triple_barrier_"))]
     if drop_cols:
         labeled = labeled.drop(columns=drop_cols)
     labeled = labeled.rename(columns={target_col: "target_cls"})
@@ -170,9 +165,7 @@ def run_pipeline(
 
     feature_settings = cfg.features
     if use_onchain is not None:
-        feature_settings = override_feature_settings(
-            feature_settings, include_onchain=use_onchain
-        )
+        feature_settings = override_feature_settings(feature_settings, include_onchain=use_onchain)
 
     interval_minutes = interval_to_minutes(cfg.interval)
     if horizon % interval_minutes != 0:
@@ -202,13 +195,7 @@ def run_pipeline(
     split_cfg["shuffle"] = False
     X_train, X_test, y_train, y_test = train_test_split(X, y, **split_cfg)
 
-    try:
-        import xgboost as xgb
-    except ModuleNotFoundError:  # pragma: no cover - optional dependency
-        xgboost_available = False
-        xgb = None  # type: ignore[assignment]
-    else:
-        xgboost_available = True
+    xgboost_available = importlib.util.find_spec("xgboost") is not None
 
     if xgboost_available:
         from crypto_analyzer.models.model_xgboost import ModelXGBoost, XGBoostConfig
@@ -277,13 +264,10 @@ def run_pipeline(
 
             explainer = shap.Explainer(model, X_train)
             shap_vals = explainer(X_test).values
-            shap_mean = (
-                np.abs(shap_vals)
-                .mean(axis=0)
+            shap_mean = np.abs(shap_vals).mean(axis=0)
+            shap_df = pd.DataFrame({"feature": X.columns, "mean_abs_shap": shap_mean}).sort_values(
+                "mean_abs_shap", ascending=False
             )
-            shap_df = pd.DataFrame(
-                {"feature": X.columns, "mean_abs_shap": shap_mean}
-            ).sort_values("mean_abs_shap", ascending=False)
             shap_df.to_csv(run_dir / "shap_values_clf.csv", index=False)
 
             shap_df["group"] = shap_df["feature"].map(groups)
@@ -293,9 +277,7 @@ def run_pipeline(
             shap_group.to_csv(run_dir / "shap_group_clf.csv")
 
             perm_df["group"] = perm_df["feature"].map(groups)
-            perm_group = (
-                perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
-            )
+            perm_group = perm_df.groupby("group")["importance"].sum().sort_values(ascending=False)
             perm_group.to_csv(run_dir / "perm_group_clf.csv")
 
             fig, ax = plt.subplots()

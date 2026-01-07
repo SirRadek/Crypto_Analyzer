@@ -73,10 +73,13 @@ def test_order_flow_imbalance_groups_by_timestamp():
             (2 - 2) / (2 + 2),
         ],
         index=pd.Index(
-            pd.to_datetime([
-                "2024-01-01T00:00:00Z",
-                "2024-01-01T00:01:00Z",
-            ], utc=True)
+            pd.to_datetime(
+                [
+                    "2024-01-01T00:00:00Z",
+                    "2024-01-01T00:01:00Z",
+                ],
+                utc=True,
+            )
         ),
         dtype=float,
     )
@@ -95,4 +98,3 @@ def test_missing_data_returns_nan():
     assert np.isnan(depth.iloc[0])
     assert np.isnan(book_spread.iloc[0])
     assert np.isnan(ofi.iloc[0])
-

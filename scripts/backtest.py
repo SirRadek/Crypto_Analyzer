@@ -16,6 +16,7 @@ from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.errors import DataValidationError
 from crypto_analyzer.utils.io import build_path, initialize_run, save_csv, save_json
 from crypto_analyzer.utils.logging import get_logger
+from crypto_analyzer.utils.profiling import profile_section
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 logger = get_logger(__name__)
@@ -91,13 +92,18 @@ def _run_backtest(
     prediction_column: str,
     target_column: str,
     price_column: str,
-    prob_column: Optional[str],
+    prob_column: str | None,
     fee_bps: float,
     slip_bps: float,
     latency_min: float,
-    p_touch_thr: Optional[float],
-    p_up_thr: Optional[float],
-    run_id: Optional[str],
+    p_touch_thr: float | None,
+    p_up_thr: float | None,
+    position_size: float,
+    max_leverage: float,
+    max_trade_loss: float | None,
+    max_trade_gain: float | None,
+    compound: bool,
+    run_id: str | None,
     optimize_thresholds: bool,
     dry_run: bool,
 ) -> tuple[Path, Path]:
@@ -112,7 +118,7 @@ def _run_backtest(
 
     latency_steps = _infer_latency_steps(normalised["timestamp"], latency_min)
 
-    prob_col: Optional[str] = prob_column or None
+    prob_col: str | None = prob_column or None
     if prob_col is not None and prob_col == prediction_column:
         prob_col = "p_hat"
     p_up_col = "p_up" if "p_up" in normalised.columns else None
@@ -143,7 +149,9 @@ def _run_backtest(
         preview = pd.concat(frames, ignore_index=True)
         top_preview = preview.sort_values("ev", ascending=False).head(5)
         typer.echo("Threshold sweep preview (top 5 by EV):")
-        typer.echo(top_preview[["horizon", "p_touch_thr", "p_up_thr", "ev", "pnl", "sharpe", "trades"]])
+        typer.echo(
+            top_preview[["horizon", "p_touch_thr", "p_up_thr", "ev", "pnl", "sharpe", "trades"]]
+        )
 
     result = run_backtest(
         normalised,
@@ -155,6 +163,11 @@ def _run_backtest(
         p_touch_threshold=p_touch_thr,
         p_up_col=p_up_col,
         p_up_threshold=p_up_thr,
+        position_size=position_size,
+        max_leverage=max_leverage,
+        max_trade_loss=max_trade_loss,
+        max_trade_gain=max_trade_gain,
+        compound=compound,
     )
 
     run_id_value, run_dir, reports_dir = initialize_run(run_id, deterministic_torch=False)
@@ -246,6 +259,11 @@ def _run_backtest(
             "latency_min": latency_min,
             "p_touch_thr": p_touch_thr,
             "p_up_thr": p_up_thr,
+            "position_size": position_size,
+            "max_leverage": max_leverage,
+            "max_trade_loss": max_trade_loss,
+            "max_trade_gain": max_trade_gain,
+            "compound": compound,
             "run_id": run_id_value,
         },
         "config": CONFIG.config_path.as_posix() if CONFIG.config_path else None,
@@ -290,21 +308,48 @@ def main(
     prob_column: Optional[str] = typer.Option(
         None, help="Optional probability column for EV-based backtest rules."
     ),
-    fee_bps: float = typer.Option(4.0, help="Proportional transaction cost in basis points."),
+    fee_bps: float = typer.Option(
+        4.0, help="Proportional transaction cost in basis points."
+    ),
     slip_bps: float = typer.Option(0.0, help="Slippage assumption in basis points."),
     latency_min: float = typer.Option(0.0, help="Execution latency in minutes."),
     p_touch_thr: Optional[float] = typer.Option(
         None, help="Minimum probability of touching the target required to open a trade."
     ),
     p_up_thr: Optional[float] = typer.Option(
-        None,
+        CONFIG.backtest.p_up_threshold,
         help="Directional probability threshold. Values above open longs, below (1-thr) open shorts.",
     ),
-    run_id: Optional[str] = typer.Option(None, help="Optional identifier used when storing reports."),
+    position_size: float = typer.Option(
+        CONFIG.backtest.position_size,
+        help="Position size as a fraction of equity per trade.",
+    ),
+    max_leverage: float = typer.Option(
+        CONFIG.backtest.max_leverage,
+        help="Maximum leverage applied to the position size.",
+    ),
+    max_trade_loss: Optional[float] = typer.Option(
+        CONFIG.backtest.max_trade_loss,
+        help="Clamp worst-case per-trade loss as fraction of equity.",
+    ),
+    max_trade_gain: Optional[float] = typer.Option(
+        CONFIG.backtest.max_trade_gain,
+        help="Clamp best-case per-trade gain as fraction of equity.",
+    ),
+    compound: bool = typer.Option(
+        CONFIG.backtest.compound, "--compound/--no-compound", help="Compound equity over time."
+    ),
+    run_id: Optional[str] = typer.Option(
+        None, help="Optional identifier used when storing reports."
+    ),
     optimize_thresholds: bool = typer.Option(
         False, help="Run an EV sweep before executing the backtest."
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
+    profile: bool = typer.Option(False, "--profile", help="Enable cProfile output."),
+    profile_path: Optional[Path] = typer.Option(
+        None, "--profile-path", help="Optional path for cProfile output."
+    ),
 ) -> None:
     if fee_bps < 0 or slip_bps < 0:
         raise DataValidationError("--fee-bps and --slip-bps must be non-negative")
@@ -312,25 +357,38 @@ def main(
         raise DataValidationError("--p-touch-thr must lie in [0, 1]")
     if p_up_thr is not None and not (0 <= p_up_thr <= 1):
         raise DataValidationError("--p-up-thr must lie in [0, 1]")
+    if position_size < 0:
+        raise DataValidationError("--position-size must be non-negative")
+    if max_leverage < 0:
+        raise DataValidationError("--max-leverage must be non-negative")
+    if max_trade_loss is not None and max_trade_loss < 0:
+        raise DataValidationError("--max-trade-loss must be non-negative")
+    if max_trade_gain is not None and max_trade_gain < 0:
+        raise DataValidationError("--max-trade-gain must be non-negative")
 
-    _run_backtest(
-        predictions=predictions,
-        timestamp_column=timestamp_column,
-        prediction_column=prediction_column,
-        target_column=target_column,
-        price_column=price_column,
-        prob_column=prob_column,
-        fee_bps=fee_bps,
-        slip_bps=slip_bps,
-        latency_min=latency_min,
-        p_touch_thr=p_touch_thr,
-        p_up_thr=p_up_thr,
-        run_id=run_id,
-        optimize_thresholds=optimize_thresholds,
-        dry_run=dry_run,
-    )
+    with profile_section(profile, output=profile_path):
+        _run_backtest(
+            predictions=predictions,
+            timestamp_column=timestamp_column,
+            prediction_column=prediction_column,
+            target_column=target_column,
+            price_column=price_column,
+            prob_column=prob_column,
+            fee_bps=fee_bps,
+            slip_bps=slip_bps,
+            latency_min=latency_min,
+            p_touch_thr=p_touch_thr,
+            p_up_thr=p_up_thr,
+            position_size=position_size,
+            max_leverage=max_leverage,
+            max_trade_loss=max_trade_loss,
+            max_trade_gain=max_trade_gain,
+            compound=compound,
+            run_id=run_id,
+            optimize_thresholds=optimize_thresholds,
+            dry_run=dry_run,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour
     run_cli(app)
-

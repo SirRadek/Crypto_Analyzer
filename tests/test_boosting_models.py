@@ -48,4 +48,3 @@ def test_train_gradient_boosting_uses_class_weights(monkeypatch):
     assert model._fit_called
     assert "scale_pos_weight" in model.params
     assert result.metrics["accuracy"] >= 0.0
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import random
@@ -31,11 +32,10 @@ def set_seeds(run_id: str, *, deterministic: bool = False) -> int:
     if torch is not None:
         torch.manual_seed(seed)
         if deterministic:
-            try:
+            with contextlib.suppress(
+                RuntimeError, AttributeError
+            ):  # pragma: no cover - env dependent
                 torch.use_deterministic_algorithms(True)
-            except (RuntimeError, AttributeError):  # pragma: no cover - env dependent
-                pass
 
     os.environ.setdefault("PYTHONHASHSEED", str(seed))
     return seed
-

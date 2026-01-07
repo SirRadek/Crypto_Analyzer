@@ -184,7 +184,7 @@ pip install -e .[dev]
 pip install pip-audit bandit detect-secrets
 ```
 
-Install the Git hooks so that Ruff, Black, isort, Pyupgrade and the formatting / secret
+Install the Git hooks so that Ruff, Pyupgrade and the formatting / secret
 checks run automatically before each commit:
 
 ```bash
@@ -197,8 +197,7 @@ Run the same commands as the CI workflow when preparing a change set:
 ```bash
 # Formatting & linting
 ruff check .
-black --check .
-isort . --check-only
+ruff format --check .
 
 # Typing
 mypy src
@@ -273,6 +272,24 @@ recent candles, engineers features and reports the probability of an upward
 move using the trained meta-model, making it convenient to embed in cron jobs
 or notebooks.
 
+Feature generation and training can optionally cache engineered features to
+speed up repeated runs. Enable it with `--use-cache`, or set
+`database.feature_store` in `config/app.yaml` to make caching the default. The
+cache directory can be overridden per run via `--cache-dir`.
+
+Example:
+
+```bash
+python scripts/make_features.py --use-cache --cache-dir data/cache/features
+python scripts/train.py --use-cache --cache-dir data/cache/features
+```
+
+To purge cached feature files safely, use:
+
+```bash
+python scripts/purge_feature_cache.py --all
+```
+
 Cost-aware backtest with latency and probability gates:
 
 ```bash
@@ -291,6 +308,29 @@ The CLI entry points can be combined with your own data source by pointing
 trained model stores calibrated probabilities for the default ±0.5 % "touch"
 target at the path provided via `--model-path` and the backtest command writes
 both metrics (`backtest_metrics.json`) and the equity curve to CSV.
+
+### Paper trading (skeleton)
+
+The repository includes a minimal offline paper-trading loop that reads recent
+prices from the configured data store, computes features, and simulates a
+conservative limit-order fill. The default universe targets USDC-margined
+futures pairs and falls back to USDT data when USDC is unavailable in the local
+store. Live feature toggles are read from the `live` section in
+`config/app.yaml`. The tradable universe and per-asset limits are configured
+via `live_universe` and `live_asset_limits`.
+Position sizing defaults to `live_position_size` and is volatility-scaled using
+`live_target_volatility` within the min/max bounds.
+
+```bash
+python scripts/paper_trade.py --dry-run
+python scripts/paper_trade.py --model-path artifacts/meta_model.joblib
+```
+
+You can loop the paper runner with delays and emit a summary JSON report:
+
+```bash
+python scripts/paper_trade.py --iterations 12 --sleep-seconds 300
+```
 
 ---
 
@@ -342,18 +382,26 @@ typical workflow for a 2‑hour classification horizon:
    python -m crypto_analyzer.data.binance_import
    ```
 
-2. **(Optional) Merge additional on-chain metrics** – mempool stats are
+2. **(Optional) Backfill futures + orderbook signals** – store funding rates,
+   open interest, basis, and a fresh orderbook snapshot (free Binance APIs):
+
+   ```bash
+   PYTHONPATH=src python -m scripts.import_binance_derivatives --days 7
+   PYTHONPATH=src python -m scripts.import_orderbook_snapshot
+   ```
+
+3. **(Optional) Merge additional on-chain metrics** – mempool stats are
    fetched automatically, but other metrics (e.g. exchange flows) can be
    retrieved via `api/onchain.py` and stored with the `onch_` prefix in the
    SQLite `prices` table.
 
-3. **Feature engineering** – export engineered features to disk:
+4. **Feature engineering** – export engineered features to disk:
 
    ```bash
    python scripts/make_features.py --output data/features.parquet
    ```
 
-4. **Model training** – train the gradient boosted classifier for the ±0.5 %
+5. **Model training** – train the gradient boosted classifier for the ±0.5 %
    target:
 
    ```bash
@@ -366,8 +414,36 @@ Walk-forward cross-validation with isotonic calibration:
 python scripts/train.py --features data/features.parquet --cv purged-wf --embargo_min 360 --calibration isotonic
 ```
 
-5. **Backtest predictions** – evaluate the resulting forecasts on a hold-out
+6. **Backtest predictions** – evaluate the resulting forecasts on a hold-out
    set or historical predictions:
+
+---
+
+## Scheduler (Binance derivatives + orderbook)
+
+Run the ingestion scheduler using the intervals configured in `config/app.yaml`:
+
+```bash
+make scheduler
+```
+
+Background mode (logs to `logs/scheduler.log`):
+
+```bash
+make scheduler-bg
+```
+
+Stop the scheduler:
+
+```bash
+pkill -f "scripts/run_scheduler.py"
+```
+
+Tail logs:
+
+```bash
+tail -n 50 logs/scheduler.log
+```
 
    ```bash
    python scripts/backtest.py data/predictions.csv --equity-output reports/equity.csv
@@ -383,7 +459,7 @@ python scripts/train.py --features data/features.parquet --cv purged-wf --embarg
 
 * Add or change features in `src/crypto_analyzer/features/engineering.py`.
 * Adjust or create new rules in `src/crypto_analyzer/labeling/rules.py`.
-* Tune ML models in `src/crypto_analyzer/models/train.py`.
+* Tune ML models with `scripts/train.py`.
 * Combine rule and ML signals in `src/crypto_analyzer/models/predictor.py`.
 
 ---
@@ -401,7 +477,8 @@ python scripts/train.py --features data/features.parquet --cv purged-wf --embarg
 Runtime secrets and optional overrides are loaded from a `.env` file using
 [`python-dotenv`](https://saurabh-kumar.com/python-dotenv/).  Copy
 [`/.env.example`](./.env.example) to `.env` and adjust the values to match your
-infrastructure.  Secrets such as API keys are never logged and can always be
+infrastructure.  Database URLs can be supplied via `DATABASE_URL` (preferred) or
+`DB_URL`.  Secrets such as API keys are never logged and can always be
 left blank when a data source is unused.
 
 Common management tasks are available via `make`:

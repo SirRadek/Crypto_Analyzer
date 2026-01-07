@@ -29,4 +29,3 @@ def test_train_stacking_meta_learner_and_predict():
     assert probs.shape == (len(base_preds),)
     labels = stack_predict(result.model, base_preds, proba=False)
     assert set(np.unique(labels)).issubset({0, 1})
-

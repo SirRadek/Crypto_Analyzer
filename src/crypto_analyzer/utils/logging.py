@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any
 
 __all__ = [
     "JsonLogFormatter",
@@ -20,8 +21,8 @@ __all__ = [
 
 
 _ROOT_LOGGER_NAME = "crypto_analyzer"
-_RUN_ID: ContextVar[Optional[str]] = ContextVar("crypto_run_id", default=None)
-_RUN_DIR: ContextVar[Optional[Path]] = ContextVar("crypto_run_dir", default=None)
+_RUN_ID: ContextVar[str | None] = ContextVar("crypto_run_id", default=None)
+_RUN_DIR: ContextVar[Path | None] = ContextVar("crypto_run_dir", default=None)
 _CONFIGURED: ContextVar[bool] = ContextVar("crypto_log_configured", default=False)
 
 
@@ -42,7 +43,7 @@ class JsonLogFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401 - inherited doc
         payload: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc)
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC)
             .isoformat()
             .replace("+00:00", "Z"),
             "level": record.levelname,
@@ -87,7 +88,10 @@ def _attach_file_handler(logger: logging.Logger, run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "run.log"
     for handler in logger.handlers:
-        if isinstance(handler, logging.FileHandler) and Path(getattr(handler, "baseFilename", "")) == log_path:
+        if (
+            isinstance(handler, logging.FileHandler)
+            and Path(getattr(handler, "baseFilename", "")) == log_path
+        ):
             return
 
     file_handler = logging.FileHandler(log_path)
@@ -146,4 +150,3 @@ def add_extra_handlers(handlers: Iterable[logging.Handler]) -> None:
     logger = _ensure_root_logger()
     for handler in handlers:
         logger.addHandler(handler)
-

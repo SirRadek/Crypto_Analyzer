@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
-
 from sqlalchemy import select, text
 
+from crypto_analyzer.data.db_connector import PRICES_TABLE, get_engine
 from crypto_analyzer.utils.config import CONFIG
 from crypto_analyzer.utils.helpers import get_logger
-from crypto_analyzer.data.db_connector import PRICES_TABLE, get_engine
 
 logger = get_logger(__name__)
 

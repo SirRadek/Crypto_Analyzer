@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 import threading
 import time
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import pandas as pd
@@ -36,6 +36,12 @@ _COINMETRICS_COLUMN_MAP = {
     "ExchgInflowVolume": "onch_exchange_inflow",
     "ExchgOutflowVolume": "onch_exchange_outflow",
 }
+_COINMETRICS_ACTIVE_MAP = {
+    "AdrActCnt": "onch_active_addresses",
+}
+_COINMETRICS_SUPPORTED_METRICS = {
+    "AdrActCnt",
+}
 
 
 def _empty_timestamp_frame(columns: list[str]) -> pd.DataFrame:
@@ -54,9 +60,7 @@ def _ensure_utc_timestamp(value: Any) -> pd.Timestamp:
     return ts.tz_convert("UTC")
 
 
-def _respect_whale_rate_limit(
-    min_interval: float, sleep: Callable[[float], None]
-) -> None:
+def _respect_whale_rate_limit(min_interval: float, sleep: Callable[[float], None]) -> None:
     """Ensure at least ``min_interval`` seconds elapsed since the previous call."""
 
     if min_interval <= 0:
@@ -172,10 +176,11 @@ def fetch_exchange_flows(
 
     sess = session or requests.Session()
 
-    end_ts = _ensure_utc_timestamp(end) if end is not None else pd.Timestamp.utcnow().tz_localize("UTC")
+    end_ts = (
+        _ensure_utc_timestamp(end) if end is not None else pd.Timestamp.utcnow().tz_localize("UTC")
+    )
     start_ts = _ensure_utc_timestamp(start) if start is not None else end_ts - pd.Timedelta(days=30)
-    if start_ts > end_ts:
-        start_ts = end_ts
+    start_ts = min(start_ts, end_ts)
 
     params = {
         "api_key": api_key,
@@ -231,6 +236,16 @@ def fetch_coinmetrics_exchange_flows(
     if not metrics:
         raise ValueError("At least one metric must be requested from CoinMetrics")
 
+    requested_metrics = metrics
+    metrics = tuple(metric for metric in requested_metrics if metric in _COINMETRICS_SUPPORTED_METRICS)
+    if not metrics:
+        logger.warning(
+            "CoinMetrics community API does not expose exchange flow metrics; returning empty frame",
+            extra={"asset": asset},
+        )
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in requested_metrics]
+        return _empty_timestamp_frame(target_cols)
+
     params: dict[str, Any] = {
         "assets": asset.lower(),
         "metrics": ",".join(metrics),
@@ -245,18 +260,38 @@ def fetch_coinmetrics_exchange_flows(
     collected: list[dict[str, Any]] = []
     next_token: str | None = None
 
+    def _request(request_params: dict[str, Any]) -> dict[str, Any]:
+        response = sess.get(
+            COINMETRICS_ASSET_METRICS_ENDPOINT,
+            params=request_params,
+            timeout=10,
+        )
+        if response.status_code == 400 and (
+            "start_time" in request_params or "end_time" in request_params
+        ):
+            retry_params = {
+                key: value
+                for key, value in request_params.items()
+                if key not in {"start_time", "end_time", "page_token"}
+            }
+            logger.warning(
+                "CoinMetrics request rejected; retrying without time bounds",
+                extra={"asset": asset},
+            )
+            response = sess.get(
+                COINMETRICS_ASSET_METRICS_ENDPOINT,
+                params=retry_params,
+                timeout=10,
+            )
+        response.raise_for_status()
+        return response.json() or {}
+
     try:
         for _ in range(16):  # defensive guard against endless pagination loops
             request_params = params.copy()
             if next_token:
                 request_params["page_token"] = next_token
-            response = sess.get(
-                COINMETRICS_ASSET_METRICS_ENDPOINT,
-                params=request_params,
-                timeout=10,
-            )
-            response.raise_for_status()
-            payload = response.json() or {}
+            payload = _request(request_params)
             data_chunk = payload.get("data", [])
             if data_chunk:
                 collected.extend(data_chunk)
@@ -267,16 +302,16 @@ def fetch_coinmetrics_exchange_flows(
             logger.warning("CoinMetrics pagination exceeded iteration guard; aborting fetch")
     except (requests.RequestException, ValueError) as exc:
         logger.warning("Failed to fetch CoinMetrics exchange flows", exc_info=exc)
-        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics]
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in requested_metrics]
         return _empty_timestamp_frame(target_cols)
 
     if not collected:
-        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics]
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in requested_metrics]
         return _empty_timestamp_frame(target_cols)
 
     frame = pd.DataFrame(collected)
     if frame.empty or "time" not in frame.columns:
-        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics]
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in requested_metrics]
         return _empty_timestamp_frame(target_cols)
 
     frame["timestamp"] = pd.to_datetime(frame["time"], utc=True, errors="coerce")
@@ -285,7 +320,7 @@ def fetch_coinmetrics_exchange_flows(
     rename_map = {metric: _COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in metrics}
     available_metrics = [metric for metric in metrics if metric in frame.columns]
     if not available_metrics:
-        target_cols = list(rename_map.values())
+        target_cols = [_COINMETRICS_COLUMN_MAP.get(metric, metric) for metric in requested_metrics]
         return _empty_timestamp_frame(target_cols)
 
     frame = frame.rename(columns=rename_map)
@@ -305,9 +340,109 @@ __all__ = [
     "fetch_mempool_stats",
     "fetch_exchange_flows",
     "fetch_coinmetrics_exchange_flows",
+    "fetch_coinmetrics_active_addresses",
     "fetch_whale_alert_transactions",
     "WHALE_ALERT_TRANSACTIONS_ENDPOINT",
 ]
+
+
+def fetch_coinmetrics_active_addresses(
+    *,
+    asset: str = "btc",
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+    session: requests.Session | None = None,
+) -> pd.DataFrame:
+    """Fetch active address counts from the CoinMetrics community API."""
+
+    params: dict[str, Any] = {
+        "assets": asset.lower(),
+        "metrics": ",".join(_COINMETRICS_ACTIVE_MAP.keys()),
+        "frequency": "1d",
+    }
+    if start is not None:
+        params["start_time"] = _format_coinmetrics_timestamp(start)
+    if end is not None:
+        params["end_time"] = _format_coinmetrics_timestamp(end)
+
+    sess = session or requests.Session()
+    collected: list[dict[str, Any]] = []
+    next_token: str | None = None
+
+    def _request(request_params: dict[str, Any]) -> dict[str, Any]:
+        response = sess.get(
+            COINMETRICS_ASSET_METRICS_ENDPOINT,
+            params=request_params,
+            timeout=10,
+        )
+        if response.status_code == 400 and (
+            "start_time" in request_params or "end_time" in request_params
+        ):
+            retry_params = {
+                key: value
+                for key, value in request_params.items()
+                if key not in {"start_time", "end_time", "page_token"}
+            }
+            logger.warning(
+                "CoinMetrics request rejected; retrying without time bounds",
+                extra={"asset": asset},
+            )
+            response = sess.get(
+                COINMETRICS_ASSET_METRICS_ENDPOINT,
+                params=retry_params,
+                timeout=10,
+            )
+        response.raise_for_status()
+        return response.json() or {}
+
+    try:
+        for _ in range(16):
+            request_params = params.copy()
+            if next_token:
+                request_params["page_token"] = next_token
+            payload = _request(request_params)
+            data_chunk = payload.get("data", [])
+            if data_chunk:
+                collected.extend(data_chunk)
+            next_token = payload.get("next_page_token")
+            if not next_token:
+                break
+        else:
+            logger.warning(
+                "CoinMetrics pagination exceeded iteration guard; aborting fetch"
+            )
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Failed to fetch CoinMetrics active addresses", exc_info=exc)
+        target_cols = list(_COINMETRICS_ACTIVE_MAP.values())
+        return _empty_timestamp_frame(target_cols)
+
+    if not collected:
+        target_cols = list(_COINMETRICS_ACTIVE_MAP.values())
+        return _empty_timestamp_frame(target_cols)
+
+    frame = pd.DataFrame(collected)
+    if frame.empty or "time" not in frame.columns:
+        target_cols = list(_COINMETRICS_ACTIVE_MAP.values())
+        return _empty_timestamp_frame(target_cols)
+
+    frame["timestamp"] = pd.to_datetime(frame["time"], utc=True, errors="coerce")
+    frame = frame.dropna(subset=["timestamp"])
+    rename_map = dict(_COINMETRICS_ACTIVE_MAP)
+    available_metrics = [metric for metric in rename_map if metric in frame.columns]
+    if not available_metrics:
+        target_cols = list(rename_map.values())
+        return _empty_timestamp_frame(target_cols)
+
+    frame = frame.rename(columns=rename_map)
+    for column in rename_map.values():
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    desired_columns = [rename_map[metric] for metric in available_metrics]
+    frame = frame.set_index("timestamp")
+    frame = frame.loc[:, desired_columns]
+    frame.index.name = "timestamp"
+    frame = frame.sort_index()
+    return frame
 
 
 def fetch_whale_alert_transactions(
@@ -455,7 +590,9 @@ def fetch_whale_alert_transactions(
                     amount_native = tx.get("amount")
                     amount_usd = tx.get("amount_usd")
                     try:
-                        amount_native_f = float(amount_native) if amount_native is not None else None
+                        amount_native_f = (
+                            float(amount_native) if amount_native is not None else None
+                        )
                     except (TypeError, ValueError):
                         amount_native_f = None
                     try:
@@ -473,9 +610,15 @@ def fetch_whale_alert_transactions(
                         "currency": currency_text,
                         "amount": amount_native_f,
                         "amount_usd": amount_usd_f,
-                        "from_address": from_info.get("address") if isinstance(from_info, Mapping) else None,
-                        "from_owner": from_info.get("owner") if isinstance(from_info, Mapping) else None,
-                        "to_address": to_info.get("address") if isinstance(to_info, Mapping) else None,
+                        "from_address": from_info.get("address")
+                        if isinstance(from_info, Mapping)
+                        else None,
+                        "from_owner": from_info.get("owner")
+                        if isinstance(from_info, Mapping)
+                        else None,
+                        "to_address": to_info.get("address")
+                        if isinstance(to_info, Mapping)
+                        else None,
                         "to_owner": to_info.get("owner") if isinstance(to_info, Mapping) else None,
                     }
                     records.append(record)

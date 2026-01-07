@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import traceback
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Iterable
 
 from crypto_analyzer.model_manager import MODELS_ROOT, PROJECT_ROOT, atomic_write
 

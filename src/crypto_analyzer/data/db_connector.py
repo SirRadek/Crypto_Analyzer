@@ -9,9 +9,9 @@ to prevent SQL injection.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Sequence
 from itertools import chain
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
 
 import pandas as pd
 from sqlalchemy import (
@@ -24,6 +24,7 @@ from sqlalchemy import (
     Table,
     create_engine,
     func,
+    inspect,
     select,
     text,
 )
@@ -44,8 +45,8 @@ PRICES_TABLE = Table(
     "prices",
     _METADATA,
     Column("open_time", BigInteger, primary_key=True),
-    Column("symbol", String(20), nullable=False),
-    Column("interval", String(10), nullable=False),
+    Column("symbol", String(20), primary_key=True, nullable=False),
+    Column("interval", String(10), primary_key=True, nullable=False),
     Column("open", Float, nullable=False),
     Column("high", Float, nullable=False),
     Column("low", Float, nullable=False),
@@ -172,12 +173,13 @@ def _build_insert(engine: Engine):
         stmt = PRICES_TABLE.insert()
         return stmt
 
+    key_cols = [PRICES_TABLE.c.open_time, PRICES_TABLE.c.symbol, PRICES_TABLE.c.interval]
     update_cols = {
         col.name: getattr(stmt.excluded, col.name)
         for col in PRICES_TABLE.c
-        if col.name != "open_time"
+        if col.name not in {"open_time", "symbol", "interval"}
     }
-    return stmt.on_conflict_do_update(index_elements=[PRICES_TABLE.c.open_time], set_=update_cols)
+    return stmt.on_conflict_do_update(index_elements=key_cols, set_=update_cols)
 
 
 def save_to_db(
@@ -218,12 +220,22 @@ def get_price_data(
     end = _normalise_timestamp(end_ts)
 
     engine = get_engine(db_path)
-    stmt = select(PRICES_TABLE).where(PRICES_TABLE.c.symbol == symbol)
-    if start is not None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    available = {col["name"] for col in inspector.get_columns(PRICES_TABLE.name)}
+    cols = [col for col in PRICES_TABLE.c if col.name in available]
+    if not cols:
+        raise RuntimeError("Price table has no readable columns")
+
+    stmt = select(*cols)
+    if "symbol" in available:
+        stmt = stmt.where(PRICES_TABLE.c.symbol == symbol)
+    if start is not None and "open_time" in available:
         stmt = stmt.where(PRICES_TABLE.c.open_time >= start)
-    if end is not None:
+    if end is not None and "open_time" in available:
         stmt = stmt.where(PRICES_TABLE.c.open_time <= end)
-    stmt = stmt.order_by(PRICES_TABLE.c.open_time)
+    if "open_time" in available:
+        stmt = stmt.order_by(PRICES_TABLE.c.open_time)
 
     with engine.connect() as conn:
         df = pd.read_sql(stmt, conn)
@@ -237,7 +249,154 @@ def get_price_data(
         df = df.drop(columns=drop_cols)
 
     df = df.sort_values("timestamp").reset_index(drop=True)
+
+    if "derivatives_intraday" in table_names:
+        df = _merge_derivatives(df, engine, symbol)
+    if "orderbook_snapshots" in table_names:
+        df = _merge_orderbook(df, engine, symbol)
+    if "coinmetrics_exchange_flows" in table_names:
+        df = _merge_coinmetrics(df, engine, symbol)
+    if "glassnode_active_addresses" in table_names:
+        df = _merge_glassnode_active_addresses(df, engine, symbol)
     return df
+
+
+def _merge_derivatives(df: pd.DataFrame, engine: Engine, symbol: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    start = (df["timestamp"].min() - pd.Timedelta(hours=12)).to_pydatetime()
+    end = (df["timestamp"].max() + pd.Timedelta(hours=1)).to_pydatetime()
+    query = text(
+        "SELECT timestamp, funding_rate, open_interest, basis "
+        "FROM derivatives_intraday "
+        "WHERE symbol = :symbol AND timestamp >= :start AND timestamp <= :end "
+        "ORDER BY timestamp"
+    )
+    with engine.connect() as conn:
+        deriv = pd.read_sql(
+            query,
+            conn,
+            params={"symbol": symbol, "start": start, "end": end},
+        )
+    if deriv.empty:
+        return df
+    deriv["timestamp"] = pd.to_datetime(deriv["timestamp"], utc=True, errors="coerce")
+    deriv = deriv.dropna(subset=["timestamp"]).sort_values("timestamp")
+    merged = pd.merge_asof(
+        df.sort_values("timestamp"),
+        deriv,
+        on="timestamp",
+        direction="backward",
+    )
+    if "basis" in merged.columns:
+        merged["basis_annualized"] = pd.to_numeric(merged["basis"], errors="coerce") / 10_000.0
+    return merged
+
+
+def _merge_orderbook(df: pd.DataFrame, engine: Engine, symbol: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    start = (df["timestamp"].min() - pd.Timedelta(hours=1)).to_pydatetime()
+    end = (df["timestamp"].max() + pd.Timedelta(hours=1)).to_pydatetime()
+    query = text(
+        "SELECT timestamp, bid_price, bid_volume, ask_price, ask_volume, "
+        "spread, mid_price, bid_volume_total, ask_volume_total, "
+        "bid_notional_total, ask_notional_total, depth_imbalance "
+        "FROM orderbook_snapshots "
+        "WHERE symbol = :symbol AND timestamp >= :start AND timestamp <= :end "
+        "ORDER BY timestamp"
+    )
+    with engine.connect() as conn:
+        lob = pd.read_sql(
+            query,
+            conn,
+            params={"symbol": symbol, "start": start, "end": end},
+        )
+    if lob.empty:
+        return df
+    lob["timestamp"] = pd.to_datetime(lob["timestamp"], utc=True, errors="coerce")
+    lob = lob.dropna(subset=["timestamp"]).sort_values("timestamp")
+    merged = pd.merge_asof(
+        df.sort_values("timestamp"),
+        lob,
+        on="timestamp",
+        direction="backward",
+    )
+    return merged
+
+
+def _coinmetrics_asset(symbol: str) -> str | None:
+    base = symbol.replace("USDC", "").replace("USDT", "").replace("USD", "")
+    if not base:
+        return None
+    return base.lower()
+
+
+def _merge_coinmetrics(df: pd.DataFrame, engine: Engine, symbol: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    asset = _coinmetrics_asset(symbol)
+    if asset is None:
+        return df
+    start = (df["timestamp"].min() - pd.Timedelta(days=2)).to_pydatetime()
+    end = (df["timestamp"].max() + pd.Timedelta(days=1)).to_pydatetime()
+    query = text(
+        "SELECT timestamp, onch_exchange_net_flow, onch_exchange_inflow, "
+        "onch_exchange_outflow "
+        "FROM coinmetrics_exchange_flows "
+        "WHERE asset = :asset AND timestamp >= :start AND timestamp <= :end "
+        "ORDER BY timestamp"
+    )
+    with engine.connect() as conn:
+        flows = pd.read_sql(
+            query,
+            conn,
+            params={"asset": asset, "start": start, "end": end},
+        )
+    if flows.empty:
+        return df
+    flows["timestamp"] = pd.to_datetime(flows["timestamp"], utc=True, errors="coerce")
+    flows = flows.dropna(subset=["timestamp"]).sort_values("timestamp")
+    merged = pd.merge_asof(
+        df.sort_values("timestamp"),
+        flows,
+        on="timestamp",
+        direction="backward",
+    )
+    return merged
+
+
+def _merge_glassnode_active_addresses(df: pd.DataFrame, engine: Engine, symbol: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    asset = symbol.replace("USDC", "").replace("USDT", "").replace("USD", "")
+    if not asset:
+        return df
+    start = (df["timestamp"].min() - pd.Timedelta(days=2)).to_pydatetime()
+    end = (df["timestamp"].max() + pd.Timedelta(days=1)).to_pydatetime()
+    query = text(
+        "SELECT timestamp, onch_active_addresses "
+        "FROM glassnode_active_addresses "
+        "WHERE asset = :asset AND timestamp >= :start AND timestamp <= :end "
+        "ORDER BY timestamp"
+    )
+    with engine.connect() as conn:
+        active = pd.read_sql(
+            query,
+            conn,
+            params={"asset": asset, "start": start, "end": end},
+        )
+    if active.empty:
+        return df
+    active["timestamp"] = pd.to_datetime(active["timestamp"], utc=True, errors="coerce")
+    active = active.dropna(subset=["timestamp"]).sort_values("timestamp")
+    merged = pd.merge_asof(
+        df.sort_values("timestamp"),
+        active,
+        on="timestamp",
+        direction="backward",
+    )
+    return merged
 
 
 def get_latest_open_time(
@@ -266,4 +425,3 @@ __all__ = [
     "init_timescale",
     "save_to_db",
 ]
-

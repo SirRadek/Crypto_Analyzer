@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import pandas as pd
 
@@ -24,9 +24,7 @@ def validate_left_label_alignment(
     if feature_ts_col not in df.columns:
         raise KeyError(f"Column '{feature_ts_col}' missing from dataframe")
 
-    assert_no_future_leak(
-        df, target_time_col=target_ts_col, feature_time_col=feature_ts_col
-    )
+    assert_no_future_leak(df, target_time_col=target_ts_col, feature_time_col=feature_ts_col)
 
 
 def merge_left_labeled(
@@ -83,4 +81,3 @@ def merge_left_labeled(
     )
 
     return merged
-

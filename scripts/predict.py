@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Literal, Optional
-
 import json
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -22,18 +23,24 @@ from crypto_analyzer.utils.io import initialize_run, save_json
 from crypto_analyzer.utils.logging import get_logger
 
 
+class StoreChoice(str, Enum):
+    auto = "auto"
+    sqlite = "sqlite"
+    timescale = "timescale"
+
+
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 logger = get_logger(__name__)
 
 
 def _prepare_settings(
     *,
-    include_onchain: Optional[bool],
-    include_orderbook: Optional[bool],
-    include_derivatives: Optional[bool],
-    include_sentiment: Optional[bool],
-    forward_fill_limit: Optional[int],
-    fillna_value: Optional[float],
+    include_onchain: bool | None,
+    include_orderbook: bool | None,
+    include_derivatives: bool | None,
+    include_sentiment: bool | None,
+    forward_fill_limit: int | None,
+    fillna_value: float | None,
 ) -> FeatureSettings:
     settings = CONFIG.features
     overrides: dict[str, bool] = {}
@@ -55,11 +62,29 @@ def _prepare_settings(
             include_derivatives=settings.include_derivatives,
             include_sentiment=settings.include_sentiment,
             forward_fill_limit=(
-                forward_fill_limit if forward_fill_limit is not None else settings.forward_fill_limit
+                forward_fill_limit
+                if forward_fill_limit is not None
+                else settings.forward_fill_limit
             ),
             fillna_value=fillna_value if fillna_value is not None else settings.fillna_value,
         )
     return settings
+
+
+def _load_feature_list(path: Path) -> list[str]:
+    if not path.exists():
+        raise DataValidationError(f"Feature list file '{path}' does not exist")
+    if path.suffix.lower() == ".json":
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise DataValidationError("Feature list JSON must be an array of strings")
+        return [str(item) for item in raw]
+    frame = pd.read_csv(path)
+    if "feature" in frame.columns:
+        return frame["feature"].dropna().astype(str).tolist()
+    if frame.shape[1] == 1:
+        return frame.iloc[:, 0].dropna().astype(str).tolist()
+    raise DataValidationError("Feature list CSV must have a 'feature' column or a single column")
 
 
 def _predict_probability(model: object, X: pd.DataFrame) -> float:
@@ -88,12 +113,12 @@ def _store_metadata(data_store: PriceDataStore) -> dict[str, str | None]:
 @app.command()
 def main(
     symbol: str = typer.Option(CONFIG.symbol, "--symbol", help="Trading symbol to score."),
-    store_choice: Literal["auto", "sqlite", "timescale"] = typer.Option(
-        "auto",
+    store_choice: StoreChoice = typer.Option(
+        StoreChoice.auto,
         "--store",
         help="Database backend used to fetch candles (auto follows configuration).",
     ),
-    db_path: Path | None = typer.Option(
+    db_path: Optional[Path] = typer.Option(
         CONFIG.db_path,
         "--db-path",
         exists=False,
@@ -102,7 +127,7 @@ def main(
         resolve_path=True,
         help="Override SQLite database path when using the local store.",
     ),
-    db_url: str | None = typer.Option(
+    db_url: Optional[str] = typer.Option(
         CONFIG.db_url,
         "--db-url",
         help="Override SQLAlchemy URL when using Timescale/PostgreSQL.",
@@ -119,32 +144,47 @@ def main(
         resolve_path=True,
         help="Model artefact used for prediction.",
     ),
-    threshold: float = typer.Option(0.5, "--threshold", help="Decision threshold for the positive class."),
-    output: Path | None = typer.Option(
+    threshold: float = typer.Option(
+        0.5, "--threshold", help="Decision threshold for the positive class."
+    ),
+    output: Optional[Path] = typer.Option(
         None,
         "--output",
         resolve_path=True,
         help="Optional JSON file receiving the prediction result.",
     ),
-    include_onchain: Optional[bool] = typer.Option(
+    include_onchain: bool = typer.Option(
         None,
         "--include-onchain/--exclude-onchain",
         help="Override on-chain feature toggle before scoring.",
+        flag_value=True,
     ),
-    include_orderbook: Optional[bool] = typer.Option(
+    include_orderbook: bool = typer.Option(
         None,
         "--include-orderbook/--exclude-orderbook",
         help="Override orderbook feature toggle before scoring.",
+        flag_value=True,
     ),
-    include_derivatives: Optional[bool] = typer.Option(
+    include_derivatives: bool = typer.Option(
         None,
         "--include-derivatives/--exclude-derivatives",
         help="Override derivative feature toggle before scoring.",
+        flag_value=True,
     ),
-    include_sentiment: Optional[bool] = typer.Option(
+    include_sentiment: bool = typer.Option(
         None,
         "--include-sentiment/--exclude-sentiment",
         help="Override sentiment feature toggle before scoring.",
+        flag_value=True,
+    ),
+    feature_list: Optional[Path] = typer.Option(
+        None,
+        "--feature-list",
+        exists=False,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+        help="Optional JSON/CSV list of feature names to keep.",
     ),
     forward_fill_limit: Optional[int] = typer.Option(
         None,
@@ -157,14 +197,18 @@ def main(
         "--fillna-value",
         help="Override fillna fallback applied after forward fills.",
     ),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Optional run identifier for artefact storage."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Compute the prediction without writing artefacts."),
+    run_id: Optional[str] = typer.Option(
+        None, "--run-id", help="Optional run identifier for artefact storage."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Compute the prediction without writing artefacts."
+    ),
 ) -> None:
     if threshold <= 0 or threshold >= 1:
         raise DataValidationError("--threshold must lie in (0, 1)")
 
     data_store = resolve_data_store(
-        store_choice,
+        store_choice.value,
         sqlite_path=db_path,
         timescale_url=db_url,
     )
@@ -193,6 +237,11 @@ def main(
         feature_frame.drop(columns=["timestamp"], errors="ignore"),
         model,
     )
+    if feature_list is not None:
+        keep = set(_load_feature_list(feature_list))
+        feature_payload = feature_payload.loc[
+            :, [col for col in feature_payload.columns if col in keep]
+        ]
     latest_features = feature_payload.tail(1)
     probability = _predict_probability(model, latest_features)
     prediction = int(probability >= threshold)
@@ -226,4 +275,3 @@ def main(
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     run_cli(app)
-

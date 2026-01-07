@@ -22,8 +22,8 @@ from crypto_analyzer.config.schema import (
     ModelSettings,
     OnChainSettings,
     OrderbookSettings,
-    SentimentSettings,
     RuntimeSettings,
+    SentimentSettings,
 )
 from crypto_analyzer.utils.errors import ConfigError
 from crypto_analyzer.utils.secrets import get_secret, load_environment
@@ -59,7 +59,7 @@ def _as_str(value: Any, default: str) -> str:
     if value is None:
         return default
     text = str(value).strip()
-    return default if not text else text
+    return text if text else default
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -150,7 +150,9 @@ def _build_core_settings(data: dict[str, Any]) -> CoreSettings:
 def _build_database_settings(data: dict[str, Any]) -> DatabaseSettings:
     defaults = DatabaseSettings()
     db_path = os.getenv("DB_PATH") or _as_str(data.get("price_store"), str(defaults.price_store))
-    db_url = os.getenv("DATABASE_URL") or _as_str(data.get("url"), defaults.url)
+    db_url = (
+        os.getenv("DATABASE_URL") or os.getenv("DB_URL") or _as_str(data.get("url"), defaults.url)
+    )
     table_pred = os.getenv("TABLE_PRED") or _as_str(
         data.get("predictions_table"), defaults.predictions_table
     )
@@ -190,6 +192,12 @@ def _build_runtime_settings(data: dict[str, Any]) -> RuntimeSettings:
     data_dir = Path(_as_str(data.get("data_dir"), str(defaults.data_dir)))
     cache_dir = Path(_as_str(data.get("cache_dir"), str(defaults.cache_dir)))
     tmp_dir = Path(_as_str(data.get("tmp_dir"), str(defaults.tmp_dir)))
+    orderbook_interval = _as_int(
+        data.get("orderbook_interval_minutes"), defaults.orderbook_interval_minutes
+    )
+    binance_interval = _as_int(
+        data.get("binance_interval_minutes"), defaults.binance_interval_minutes
+    )
     return RuntimeSettings(
         cpu_limit=cpu_limit,
         repeat_count=repeat_count,
@@ -197,6 +205,8 @@ def _build_runtime_settings(data: dict[str, Any]) -> RuntimeSettings:
         data_dir=data_dir,
         cache_dir=cache_dir,
         tmp_dir=tmp_dir,
+        orderbook_interval_minutes=orderbook_interval,
+        binance_interval_minutes=binance_interval,
     )
 
 
@@ -221,6 +231,12 @@ def _build_feature_settings(
         forward_fill_limit=forward_fill_limit,
         fillna_value=fillna_value,
     )
+
+
+def _build_live_feature_settings(
+    data: dict[str, Any], sentiment: SentimentSettings | None = None
+) -> FeatureSettings:
+    return _build_feature_settings(data, sentiment=sentiment)
 
 
 def _build_model_settings(data: dict[str, Any]) -> ModelSettings:
@@ -370,9 +386,8 @@ def _build_config() -> AppConfig:
         database = _build_database_settings(raw_config.get("database", {}))
         runtime = _build_runtime_settings(raw_config.get("runtime", {}))
         sentiment = _build_sentiment_settings(raw_config.get("sentiment", {}))
-        features = _build_feature_settings(
-            raw_config.get("features", {}), sentiment=sentiment
-        )
+        features = _build_feature_settings(raw_config.get("features", {}), sentiment=sentiment)
+        live_features = _build_live_feature_settings(raw_config.get("live", {}), sentiment=sentiment)
         models = _build_model_settings(raw_config.get("models", {}))
         backtest = _build_backtest_settings(raw_config.get("backtest", {}))
         onchain = _build_onchain_settings(raw_config.get("onchain", {}), runtime)
@@ -382,6 +397,18 @@ def _build_config() -> AppConfig:
         derivatives = _build_derivative_settings(raw_config.get("derivatives", {}))
         orderbook = _build_orderbook_settings(raw_config.get("orderbook", {}))
         horizons = tuple(int(float(x)) for x in _as_list(raw_config.get("horizons"), []))
+        live_universe = tuple(
+            str(item).strip().upper()
+            for item in _as_list(raw_config.get("live_universe"), [])
+            if str(item).strip()
+        )
+        live_asset_limits = raw_config.get("live_asset_limits", {}) or {}
+        live_initial_equity = _as_float(raw_config.get("live_initial_equity"), 10_000.0)
+        live_initial_cash = _as_float(raw_config.get("live_initial_cash"), 10_000.0)
+        live_position_size = _as_float(raw_config.get("live_position_size"), 0.01)
+        live_target_volatility = _as_float(raw_config.get("live_target_volatility"), 0.02)
+        live_min_position_size = _as_float(raw_config.get("live_min_position_size"), 0.001)
+        live_max_position_size = _as_float(raw_config.get("live_max_position_size"), 0.05)
         if not horizons:
             default_horizon = core.forward_steps * 15
             horizons = (default_horizon,)
@@ -395,6 +422,7 @@ def _build_config() -> AppConfig:
             database=database,
             runtime=runtime,
             features=features,
+            live=live_features,
             sentiment=sentiment,
             models=models,
             backtest=backtest,
@@ -406,6 +434,14 @@ def _build_config() -> AppConfig:
             pct_threshold=pct_threshold,
             derivatives=derivatives,
             orderbook=orderbook,
+            live_universe=live_universe,
+            live_asset_limits=live_asset_limits,
+            live_initial_equity=live_initial_equity,
+            live_initial_cash=live_initial_cash,
+            live_position_size=live_position_size,
+            live_target_volatility=live_target_volatility,
+            live_min_position_size=live_min_position_size,
+            live_max_position_size=live_max_position_size,
             config_path=path,
         )
     except ValidationError as exc:  # pragma: no cover - defensive

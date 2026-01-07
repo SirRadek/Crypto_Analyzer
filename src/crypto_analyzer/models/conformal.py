@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -206,7 +206,7 @@ def _extract_test_arrays(
         | pd.Series
         | tuple[Iterable[int] | np.ndarray | pd.Series, Iterable[float] | np.ndarray | pd.Series]
         | dict[str, Iterable[int] | np.ndarray | pd.Series]
-    )
+    ),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return label/probability arrays from user provided test data."""
 
@@ -223,7 +223,7 @@ def _extract_test_arrays(
             )
         return _to_numpy(labels), np.clip(_to_numpy(probs), 1e-6, 1 - 1e-6)
 
-    if isinstance(test_data, tuple) or isinstance(test_data, list):
+    if isinstance(test_data, (tuple, list)):
         if len(test_data) != 2:
             raise ValueError("Tuple/list input must provide (labels, probabilities)")
         labels, probs = test_data

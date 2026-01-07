@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Iterable, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 import numpy as np
 from sklearn.base import clone
@@ -49,7 +50,7 @@ _DEFAULT_SETTINGS = _BacktestSettings(
 )
 
 
-def _resolve_backtest_settings(config: "AppConfig | None") -> _BacktestSettings:
+def _resolve_backtest_settings(config: AppConfig | None) -> _BacktestSettings:
     if config is not None:
         backtest_cfg = config.backtest
         return _BacktestSettings(
@@ -82,7 +83,7 @@ class BacktestEngine:
         metrics: Iterable[str] | None = None,
         validation_fraction: float | None = None,
         walkforward_window: int | None = None,
-        config: "AppConfig | None" = None,
+        config: AppConfig | None = None,
     ) -> None:
         backtest_cfg = _resolve_backtest_settings(config)
         self.mode = mode.lower()
@@ -204,4 +205,3 @@ class BacktestEngine:
 
 
 __all__ = ["BacktestEngine", "EvaluationSummary"]
-

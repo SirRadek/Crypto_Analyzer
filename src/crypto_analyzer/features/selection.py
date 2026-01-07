@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -86,7 +86,9 @@ def shap_importance_by_regime(
     for regime, mask in regimes.groupby(regimes).groups.items():
         if len(mask) == 0:
             continue
-        sample = X.iloc[mask].sample(n=min(cfg.shap_samples, len(mask)), random_state=cfg.random_state)
+        sample = X.iloc[mask].sample(
+            n=min(cfg.shap_samples, len(mask)), random_state=cfg.random_state
+        )
         values = explainer(sample).values
         mean_abs = np.abs(values).mean(axis=0)
         df = pd.DataFrame({"feature": X.columns, "shap": mean_abs, "regime": regime})
@@ -138,4 +140,3 @@ def export_top_features(
 
     with Path(output_path).open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-

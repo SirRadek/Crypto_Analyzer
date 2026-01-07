@@ -1,8 +1,9 @@
 """Utility functions for reporting and plotting without seaborn."""
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import matplotlib.pyplot as plt
 import pandas as pd

@@ -96,4 +96,3 @@ def time_to_event(hazards: pd.DataFrame) -> pd.Series:
     hit[hazard_values == 0] = np.nan
     first = np.nanmin(hit, axis=1)
     return pd.Series(first, index=hazards.index, name="time_to_event")
-

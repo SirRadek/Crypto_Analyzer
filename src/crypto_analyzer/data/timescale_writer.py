@@ -19,14 +19,14 @@ and monitoring.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-import math
-
 import pandas as pd
+
 try:  # pragma: no cover - optional dependency during some tests
     from psycopg2.extensions import connection as PGConnection
     from psycopg2.extras import execute_batch
@@ -35,6 +35,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when psycopg2 missing
 
     def execute_batch(*args: Any, **kwargs: Any) -> None:
         raise ModuleNotFoundError("psycopg2 is required to persist data")
+
 
 from crypto_analyzer.utils.logging import get_logger
 
@@ -67,8 +68,7 @@ def _ensure_records(data: Any) -> list[dict[str, Any]]:
                 records.append(item.to_dict())
             else:
                 raise TypeError(
-                    "Data items must be mapping-like objects; received "
-                    f"{type(item)!r}"
+                    "Data items must be mapping-like objects; received " f"{type(item)!r}"
                 )
         return records
 
@@ -165,7 +165,9 @@ def _managed_connection(
     if connection is not None:
         yield connection
     else:
-        from crypto_analyzer.data.db import connection_scope  # local import to avoid optional dependency issues
+        from crypto_analyzer.data.db import (
+            connection_scope,  # local import to avoid optional dependency issues
+        )
 
         with connection_scope(**connect_kwargs) as conn:
             yield conn
@@ -348,7 +350,9 @@ def save_social_sentiment(
             raise ValueError("Twitter positive count cannot be negative")
         if twitter_negative is not None and twitter_negative < 0:
             raise ValueError("Twitter negative count cannot be negative")
-        payload.append((ts, reddit_score, twitter_score, mentions, twitter_positive, twitter_negative))
+        payload.append(
+            (ts, reddit_score, twitter_score, mentions, twitter_positive, twitter_negative)
+        )
 
     sql = (
         "INSERT INTO social_sentiment (timestamp, reddit_score, twitter_score, mentions, "
@@ -577,4 +581,3 @@ __all__ = [
     "save_news",
     "save_whale_transactions",
 ]
-

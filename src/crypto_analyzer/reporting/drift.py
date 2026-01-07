@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -128,4 +128,3 @@ def rolling_recalibration(
             raise ValueError("method must be 'isotonic' or 'sigmoid'")
         calibrators[timestamp] = calibrator
     return calibrators
-

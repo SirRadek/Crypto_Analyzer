@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import Any
 
 import pytest
@@ -37,7 +37,9 @@ class DummySession:
         self._payload = payload
         self.calls: list[dict[str, Any]] = []
 
-    def get(self, url: str, params: dict[str, Any] | None = None, timeout: int | None = None) -> DummyResponse:
+    def get(
+        self, url: str, params: dict[str, Any] | None = None, timeout: int | None = None
+    ) -> DummyResponse:
         self.calls.append({"url": url, "params": params, "timeout": timeout})
         return DummyResponse(self._payload)
 
@@ -93,7 +95,7 @@ def test_fetch_reddit_sentiment_computes_expected_metrics() -> None:
 
 
 def test_fetch_twitter_sentiment_aggregates_expected_values() -> None:
-    timestamp = datetime(2024, 9, 1, 12, 0, tzinfo=timezone.utc)
+    timestamp = datetime(2024, 9, 1, 12, 0, tzinfo=UTC)
     tweets = [
         DummyTwitterResponse(
             [
@@ -155,7 +157,7 @@ def test_fetch_twitter_sentiment_handles_rate_limit() -> None:
             response = requests.Response()
             response.status_code = 429
             response.reason = "Too Many Requests"
-            response._content = b"{\"errors\": [{\"message\": \"rate limit\"}]}"
+            response._content = b'{"errors": [{"message": "rate limit"}]}'
             raise tweepy.errors.TooManyRequests(response)
 
     client = RateLimitedClient()
@@ -181,7 +183,7 @@ def test_fetch_reddit_sentiment_normalises_time_parameters() -> None:
     payload = {"data": [{"body": "neutral"}]}
     analyzer = DummyAnalyzer({"neutral": 0.0})
     session = DummySession(payload)
-    after = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    after = datetime(2024, 1, 1, tzinfo=UTC)
 
     frame = fetch_reddit_sentiment(
         after=after,

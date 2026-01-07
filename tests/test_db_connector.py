@@ -56,4 +56,7 @@ def test_save_and_get_price_data(tmp_path: Path) -> None:
     assert pd.api.types.is_datetime64tz_dtype(frame["timestamp"])
     assert frame.loc[0, "close"] == 106.0
     assert frame.loc[0, "number_of_trades"] == 1_500
-    assert db_connector.get_latest_open_time(symbol=symbol, interval=interval, db_path=db_url) == 1_700_000_600_000
+    assert (
+        db_connector.get_latest_open_time(symbol=symbol, interval=interval, db_path=db_url)
+        == 1_700_000_600_000
+    )

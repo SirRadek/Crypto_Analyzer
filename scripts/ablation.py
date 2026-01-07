@@ -9,6 +9,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 import typer
+import xgboost as xgb
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -20,6 +21,7 @@ from crypto_analyzer.data.db_connector import get_price_data
 from crypto_analyzer.eval.cv import purged_walkforward_splits
 from crypto_analyzer.features.engineering import (
     FEATURE_COLUMNS,
+    FEATURE_GROUPS,
     create_features,
     get_feature_columns,
 )
@@ -34,14 +36,8 @@ from crypto_analyzer.utils.logging import get_logger
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 logger = get_logger(__name__)
 
-GROUPS = ["price", "volatility", "multi_tf", "derivatives", "orderbook"]
-PATTERNS = {
-    "price": [r"^ret", r"^rel_", r"^mom_", r"taker", r"close", r"volume", r"price"],
-    "volatility": [r"^vol", r"atr", r"^rv_", r"^bv_"],
-    "multi_tf": [r"_1d", r"_7d", r"_30d", r"roll_", r"ema", r"multi"],
-    "derivatives": [r"^deriv", r"funding", r"basis", r"oi_"],
-    "orderbook": [r"^lob", r"^ofi", r"^wall", r"order_flow"],
-}
+GROUPS = list(FEATURE_GROUPS.keys())
+PATTERNS = FEATURE_GROUPS
 
 
 def _read_table(path: Path) -> pd.DataFrame:
@@ -117,18 +113,72 @@ def _build_pipeline(feature_names: list[str]) -> Pipeline:
     return Pipeline([("transform", transformer), ("clf", clf)])
 
 
+def _predict_proba_xgb(model: xgb.XGBClassifier, X: pd.DataFrame, *, use_gpu: bool) -> np.ndarray:
+    if use_gpu:
+        try:
+            booster = model.get_booster()
+            try:
+                proba = booster.inplace_predict(X, predict_type="probability", device="cuda")
+            except TypeError:
+                proba = booster.inplace_predict(X, device="cuda")
+            arr = np.asarray(proba)
+            if arr.ndim == 1:
+                arr = np.column_stack([1.0 - arr, arr])
+            return arr
+        except Exception:
+            pass
+    proba = model.predict_proba(X)
+    arr = np.asarray(proba)
+    if arr.ndim == 1:
+        arr = np.column_stack([1.0 - arr, arr])
+    return arr
+
+
+def _build_xgb_model(
+    *,
+    use_gpu: bool,
+    random_state: int,
+    n_estimators: int,
+    max_depth: int,
+    learning_rate: float,
+    subsample: float,
+    colsample_bytree: float,
+) -> xgb.XGBClassifier:
+    return xgb.XGBClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        subsample=subsample,
+        colsample_bytree=colsample_bytree,
+        tree_method="gpu_hist" if use_gpu else "hist",
+        predictor="gpu_predictor" if use_gpu else "cpu_predictor",
+        device="cuda" if use_gpu else "cpu",
+        n_jobs=-1,
+        eval_metric="logloss",
+        random_state=random_state,
+        verbosity=0,
+    )
+
+
 def _execute_ablation(
     *,
     features: Path | None,
     symbol: str,
     db_path: Path,
-    label: Optional[str],
+    label: str | None,
     horizon: int,
     run_id: str | None,
-    include_onchain: Optional[bool],
-    include_orderbook: Optional[bool],
-    include_derivatives: Optional[bool],
-    include_sentiment: Optional[bool],
+    include_onchain: bool | None,
+    include_orderbook: bool | None,
+    include_derivatives: bool | None,
+    include_sentiment: bool | None,
+    model_type: str,
+    use_gpu: bool,
+    n_estimators: int,
+    max_depth: int,
+    learning_rate: float,
+    subsample: float,
+    colsample_bytree: float,
     dry_run: bool,
 ) -> Path:
     if horizon <= 0:
@@ -185,9 +235,22 @@ def _execute_ablation(
 
     results: list[dict[str, Any]] = []
 
-    baseline_pipeline = _build_pipeline(feature_cols)
-    baseline_pipeline.fit(X_train, y_train)
-    baseline_probs = baseline_pipeline.predict_proba(X_test)[:, 1]
+    if model_type == "xgb":
+        model = _build_xgb_model(
+            use_gpu=use_gpu,
+            random_state=CONFIG.models.random_seed,
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+        )
+        model.fit(X_train, y_train)
+        baseline_probs = _predict_proba_xgb(model, X_test, use_gpu=use_gpu)[:, 1]
+    else:
+        baseline_pipeline = _build_pipeline(feature_cols)
+        baseline_pipeline.fit(X_train, y_train)
+        baseline_probs = baseline_pipeline.predict_proba(X_test)[:, 1]
     results.append(
         {
             "group": "baseline",
@@ -203,9 +266,22 @@ def _execute_ablation(
         active_cols = [col for col in feature_cols if col not in drop_cols]
         if not active_cols:
             continue
-        pipeline = _build_pipeline(active_cols)
-        pipeline.fit(X_train[active_cols], y_train)
-        probs = pipeline.predict_proba(X_test[active_cols])[:, 1]
+        if model_type == "xgb":
+            model = _build_xgb_model(
+                use_gpu=use_gpu,
+                random_state=CONFIG.models.random_seed,
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+            )
+            model.fit(X_train[active_cols], y_train)
+            probs = _predict_proba_xgb(model, X_test[active_cols], use_gpu=use_gpu)[:, 1]
+        else:
+            pipeline = _build_pipeline(active_cols)
+            pipeline.fit(X_train[active_cols], y_train)
+            probs = pipeline.predict_proba(X_test[active_cols])[:, 1]
         metrics_row = {
             "group": group,
             "brier": brier_score(y_test, probs),
@@ -215,14 +291,23 @@ def _execute_ablation(
         }
         results.append(metrics_row)
 
-    result_df = pd.DataFrame(results).sort_values("brier")
+    result_df = pd.DataFrame(results)
+    baseline_row = result_df[result_df["group"] == "baseline"]
+    if not baseline_row.empty:
+        baseline = baseline_row.iloc[0]
+        result_df["delta_brier"] = result_df["brier"] - float(baseline["brier"])
+        result_df["delta_log_loss"] = result_df["log_loss"] - float(baseline["log_loss"])
+        result_df["delta_auc"] = result_df["auc"] - float(baseline["auc"])
+        result_df["recommend_drop"] = (
+            (result_df["group"] != "baseline")
+            & (result_df["delta_brier"] <= -0.0005)
+            & (result_df["delta_log_loss"] <= -0.0005)
+            & (result_df["delta_auc"] >= -0.002)
+        )
+    result_df = result_df.sort_values("brier")
 
-    csv_path = build_path(
-        f"ablation_{run_id_value}.csv", run_id=run_id_value, location="reports"
-    )
-    png_path = build_path(
-        f"ablation_{run_id_value}.png", run_id=run_id_value, location="reports"
-    )
+    csv_path = build_path(f"ablation_{run_id_value}.csv", run_id=run_id_value, location="reports")
+    png_path = build_path(f"ablation_{run_id_value}.png", run_id=run_id_value, location="reports")
 
     if dry_run:
         typer.echo("Dry run requested; skipping report generation.")
@@ -259,6 +344,10 @@ def _execute_ablation(
     save_png(fig, "ablation.png", run_id=run_id_value)
     plt.close(fig)
 
+    recommendations = []
+    if "recommend_drop" in result_df.columns:
+        recommendations = result_df.loc[result_df["recommend_drop"], "group"].tolist()
+
     metadata = {
         "run_id": run_id_value,
         "horizon": horizon,
@@ -270,8 +359,15 @@ def _execute_ablation(
         "features_path": str(features) if features else None,
         "symbol": symbol,
         "db_path": str(db_path),
+        "recommended_drop_groups": recommendations,
+        "recommendation_thresholds": {
+            "delta_brier": -0.0005,
+            "delta_log_loss": -0.0005,
+            "delta_auc_min": -0.002,
+        },
     }
     save_json(metadata, "config_dump.json", run_id=run_id_value)
+    save_json(metadata, f"ablation_recommendations_{run_id_value}.json", run_id=run_id_value)
 
     logger.info(
         "Generated ablation reports",
@@ -311,28 +407,49 @@ def main(
     label: Optional[str] = typer.Option(None, help="Custom label column name."),
     horizon: int = typer.Option(CONFIG.core.forward_steps * 15, help="Horizon in minutes."),
     run_id: Optional[str] = typer.Option(None, help="Optional run identifier."),
-    include_onchain: Optional[bool] = typer.Option(
+    include_onchain: bool = typer.Option(
         None,
         "--include-onchain/--exclude-onchain",
         help="Override on-chain features toggle.",
+        flag_value=True,
     ),
-    include_orderbook: Optional[bool] = typer.Option(
+    include_orderbook: bool = typer.Option(
         None,
         "--include-orderbook/--exclude-orderbook",
         help="Override orderbook features toggle.",
+        flag_value=True,
     ),
-    include_derivatives: Optional[bool] = typer.Option(
+    include_derivatives: bool = typer.Option(
         None,
         "--include-derivatives/--exclude-derivatives",
         help="Override derivative features toggle.",
+        flag_value=True,
     ),
-    include_sentiment: Optional[bool] = typer.Option(
+    include_sentiment: bool = typer.Option(
         None,
         "--include-sentiment/--exclude-sentiment",
         help="Override sentiment features toggle.",
+        flag_value=True,
     ),
+    model_type: str = typer.Option(
+        "xgb",
+        "--model",
+        help="Model family used for ablation (xgb or logreg).",
+    ),
+    use_gpu: bool = typer.Option(
+        CONFIG.models.use_gpu,
+        "--use-gpu/--no-gpu",
+        help="Enable GPU acceleration for XGBoost.",
+    ),
+    n_estimators: int = typer.Option(400, help="XGBoost trees for ablation."),
+    max_depth: int = typer.Option(6, help="XGBoost max depth for ablation."),
+    learning_rate: float = typer.Option(0.08, help="XGBoost learning rate for ablation."),
+    subsample: float = typer.Option(0.8, help="XGBoost subsample for ablation."),
+    colsample_bytree: float = typer.Option(0.8, help="XGBoost colsample for ablation."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
 ) -> None:
+    if model_type not in {"xgb", "logreg"}:
+        raise DataValidationError("--model must be 'xgb' or 'logreg'")
     _execute_ablation(
         features=features,
         symbol=symbol,
@@ -344,10 +461,16 @@ def main(
         include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
         include_sentiment=include_sentiment,
+        model_type=model_type,
+        use_gpu=use_gpu,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        subsample=subsample,
+        colsample_bytree=colsample_bytree,
         dry_run=dry_run,
     )
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI behaviour
     run_cli(app)
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -59,10 +60,8 @@ def purge_artifacts(
     files = list_artifacts(stem, dir, patterns)
     if confirm:
         for p in files:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 p.unlink()
-            except FileNotFoundError:
-                pass
     return files
 
 

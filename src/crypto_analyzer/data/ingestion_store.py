@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 from sqlalchemy import (
@@ -37,7 +37,12 @@ DERIVATIVES_TABLE = Table(
     Column("funding_rate", Float),
     Column("open_interest", Float),
     Column("basis", Float),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
     UniqueConstraint("timestamp", "symbol", name="ux_derivatives_intraday"),
 )
 
@@ -57,7 +62,12 @@ ORDERBOOK_TABLE = Table(
     Column("bid_notional_total", Float),
     Column("ask_notional_total", Float),
     Column("depth_imbalance", Float),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
     UniqueConstraint("timestamp", "symbol", name="ux_orderbook_snapshots"),
 )
 
@@ -74,7 +84,12 @@ NEWS_TABLE = Table(
     Column("negative_votes", Float),
     Column("tags", String(256)),
     Column("currencies", String(128)),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
 )
 
 REDDIT_SENTIMENT_TABLE = Table(
@@ -90,7 +105,12 @@ REDDIT_SENTIMENT_TABLE = Table(
     Column("reddit_positive_count", Float),
     Column("reddit_negative_count", Float),
     Column("reddit_neutral_count", Float),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
     UniqueConstraint("timestamp", "subreddit", "query", name="ux_reddit_sentiment"),
 )
 
@@ -100,7 +120,12 @@ GLASSNODE_ACTIVE_TABLE = Table(
     Column("timestamp", DateTime(timezone=True), nullable=False),
     Column("asset", String(16), nullable=False),
     Column("onch_active_addresses", Float),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
     UniqueConstraint("timestamp", "asset", name="ux_glassnode_active_addresses"),
 )
 
@@ -112,7 +137,12 @@ COINMETRICS_FLOWS_TABLE = Table(
     Column("onch_exchange_net_flow", Float),
     Column("onch_exchange_inflow", Float),
     Column("onch_exchange_outflow", Float),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
     UniqueConstraint("timestamp", "asset", name="ux_coinmetrics_exchange_flows"),
 )
 
@@ -123,7 +153,12 @@ FEAR_GREED_TABLE = Table(
     Column("value", Float),
     Column("classification", String(64)),
     Column("time_until_update", Float),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
 )
 
 WHALE_TRANSACTIONS_TABLE = Table(
@@ -139,7 +174,12 @@ WHALE_TRANSACTIONS_TABLE = Table(
     Column("from_owner", String(128)),
     Column("to_address", String(128)),
     Column("to_owner", String(128)),
-    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column(
+        "fetched_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
     UniqueConstraint("timestamp", "transaction_hash", name="ux_whale_transactions"),
 )
 
@@ -170,7 +210,9 @@ def _ensure_utc(value: object) -> datetime:
     return ts.to_pydatetime()
 
 
-def _prepare_records(frame: pd.DataFrame, *, extra: dict[str, object] | None = None) -> list[dict[str, object]]:
+def _prepare_records(
+    frame: pd.DataFrame, *, extra: dict[str, object] | None = None
+) -> list[dict[str, object]]:
     if frame.empty:
         return []
     records: list[dict[str, object]] = []
@@ -181,11 +223,10 @@ def _prepare_records(frame: pd.DataFrame, *, extra: dict[str, object] | None = N
                 if value is None or pd.isna(value):
                     break
                 record[key] = _ensure_utc(value)
+            elif value is None or (isinstance(value, float) and pd.isna(value)):
+                record[key] = None
             else:
-                if value is None or (isinstance(value, float) and pd.isna(value)):
-                    record[key] = None
-                else:
-                    record[key] = value
+                record[key] = value
         else:
             records.append(record)
     return records
@@ -210,7 +251,8 @@ def _upsert(
         return {
             col.name: getattr(insert_stmt.excluded, col.name)
             for col in table.c
-            if col.name not in conflict_cols and not col.primary_key
+            if col.name not in conflict_cols
+            and not col.primary_key
             and (allowed is None or col.name in allowed)
         }
 
@@ -223,7 +265,9 @@ def _upsert(
     elif dialect == "sqlite":
         insert_stmt = sqlite_insert(table)
         update_cols = _build_update_cols(insert_stmt)
-        insert_stmt = insert_stmt.on_conflict_do_update(index_elements=list(conflict_cols), set_=update_cols)
+        insert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=list(conflict_cols), set_=update_cols
+        )
     else:
         insert_stmt = table.insert().prefix_with("OR REPLACE")
 
@@ -232,7 +276,9 @@ def _upsert(
     return len(payload)
 
 
-def _latest_timestamp(table: Table, engine: Engine, *, filters: dict[str, object] | None = None) -> pd.Timestamp | None:
+def _latest_timestamp(
+    table: Table, engine: Engine, *, filters: dict[str, object] | None = None
+) -> pd.Timestamp | None:
     stmt = select(func.max(table.c.timestamp))
     if filters:
         for key, value in filters.items():
@@ -402,6 +448,8 @@ def store_glassnode_active_addresses(
     if addresses.empty:
         return StoreResult(0)
     frame = addresses.copy()
+    if "timestamp" not in frame.columns:
+        frame = frame.reset_index()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
     frame = frame.dropna(subset=["timestamp"]).reset_index(drop=True)
     frame["asset"] = asset

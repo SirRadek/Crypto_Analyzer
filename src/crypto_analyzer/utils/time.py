@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import pandas as pd
 
@@ -109,9 +109,7 @@ def resample_left_label_last(
         raise KeyError(f"Columns {joined!r} missing from dataframe")
 
     working = df.loc[:, [timestamp_col, *columns]].copy()
-    working[timestamp_col] = ensure_utc_series(
-        working[timestamp_col], column_name=timestamp_col
-    )
+    working[timestamp_col] = ensure_utc_series(working[timestamp_col], column_name=timestamp_col)
     working = working.sort_values(timestamp_col)
     indexed = working.set_index(timestamp_col)[columns]
 
@@ -185,4 +183,3 @@ def assert_no_future_leak(
             "Feature timestamps exceed their corresponding target timestamps. "
             f"Offending rows:\n{offending}"
         )
-

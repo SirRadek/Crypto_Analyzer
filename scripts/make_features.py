@@ -2,19 +2,44 @@
 
 from __future__ import annotations
 
+from enum import Enum
+import json
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 import pandas as pd
 import typer
 
 from crypto_analyzer.data.store import PriceDataStore, resolve_data_store
 from crypto_analyzer.features.engineering import create_features
-from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
 from crypto_analyzer.utils.cli import run_cli
+from crypto_analyzer.utils.config import CONFIG, FeatureSettings, override_feature_settings
 from crypto_analyzer.utils.errors import DataValidationError
 from crypto_analyzer.utils.io import initialize_run, save_json
 from crypto_analyzer.utils.logging import get_logger
+from crypto_analyzer.utils.feature_cache import (
+    build_cache_key,
+    build_cache_payload,
+    cache_paths,
+    default_cache_dir,
+)
+from crypto_analyzer.utils.profiling import profile_section
+
+
+class SourceChoice(str, Enum):
+    db = "db"
+    file = "file"
+
+
+class FormatChoice(str, Enum):
+    parquet = "parquet"
+    csv = "csv"
+
+
+class StoreChoice(str, Enum):
+    auto = "auto"
+    sqlite = "sqlite"
+    timescale = "timescale"
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -22,13 +47,13 @@ logger = get_logger(__name__)
 
 
 def _load_price_data(
-    source: Literal["db", "file"],
+    source: SourceChoice,
     *,
     path: Path | None,
     symbol: str,
     data_store: PriceDataStore | None,
 ) -> pd.DataFrame:
-    if source == "db":
+    if source == SourceChoice.db:
         if data_store is None:
             raise DataValidationError("Database source requested but no data store was configured")
         return data_store.fetch_prices(symbol)
@@ -67,9 +92,9 @@ def _configure_features(
     return settings
 
 
-def _write_output(df: pd.DataFrame, path: Path, fmt: Literal["parquet", "csv"]) -> None:
+def _write_output(df: pd.DataFrame, path: Path, fmt: FormatChoice) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if fmt == "parquet":
+    if fmt == FormatChoice.parquet:
         df.to_parquet(path, index=False)
     else:
         df.to_csv(path, index=False)
@@ -77,12 +102,12 @@ def _write_output(df: pd.DataFrame, path: Path, fmt: Literal["parquet", "csv"]) 
 
 def _prepare_settings(
     *,
-    forward_fill_limit: Optional[int],
-    fillna_value: Optional[float],
-    include_onchain: Optional[bool],
-    include_orderbook: Optional[bool],
-    include_derivatives: Optional[bool],
-    include_sentiment: Optional[bool],
+    forward_fill_limit: int | None,
+    fillna_value: float | None,
+    include_onchain: bool | None,
+    include_orderbook: bool | None,
+    include_derivatives: bool | None,
+    include_sentiment: bool | None,
 ) -> FeatureSettings:
     settings = CONFIG.features
     if forward_fill_limit is not None or fillna_value is not None:
@@ -91,8 +116,9 @@ def _prepare_settings(
             include_orderbook=settings.include_orderbook,
             include_derivatives=settings.include_derivatives,
             include_sentiment=settings.include_sentiment,
-            forward_fill_limit=
-            forward_fill_limit if forward_fill_limit is not None else settings.forward_fill_limit,
+            forward_fill_limit=forward_fill_limit
+            if forward_fill_limit is not None
+            else settings.forward_fill_limit,
             fillna_value=fillna_value if fillna_value is not None else settings.fillna_value,
         )
     return _configure_features(
@@ -110,10 +136,12 @@ def _resolve_output(
     run_dir: Path,
 ) -> tuple[Path, Path]:
     run_dir.mkdir(parents=True, exist_ok=True)
-    if not output.is_absolute():
-        target_output = run_dir / output.name
-    else:
+    if output.is_absolute():
         target_output = output
+    elif output.parent != Path("."):
+        target_output = output
+    else:
+        target_output = run_dir / output.name
     return target_output, run_dir / output.name
 
 
@@ -133,20 +161,22 @@ def _print_outputs(primary: Path, secondary: Path | None) -> None:
 
 def _generate_features(
     *,
-    source: Literal["db", "file"],
+    source: SourceChoice,
     input_path: Path | None,
     output: Path,
-    fmt: Literal["parquet", "csv"],
+    fmt: FormatChoice,
     symbol: str,
     data_store: PriceDataStore | None,
-    forward_fill_limit: Optional[int],
-    fillna_value: Optional[float],
-    include_onchain: Optional[bool],
-    include_orderbook: Optional[bool],
-    include_derivatives: Optional[bool],
-    include_sentiment: Optional[bool],
+    forward_fill_limit: int | None,
+    fillna_value: float | None,
+    include_onchain: bool | None,
+    include_orderbook: bool | None,
+    include_derivatives: bool | None,
+    include_sentiment: bool | None,
     run_id: str | None,
     dry_run: bool,
+    use_cache: bool,
+    cache_dir: Path | None,
 ) -> Path:
     if forward_fill_limit is not None and forward_fill_limit < 0:
         raise DataValidationError("--forward-fill-limit must be non-negative")
@@ -160,8 +190,48 @@ def _generate_features(
         include_sentiment=include_sentiment,
     )
 
-    df = _load_price_data(source, path=input_path, symbol=symbol, data_store=data_store)
-    feature_df = create_features(df, settings=settings)
+    cache_root = None if not use_cache else (cache_dir if cache_dir is not None else default_cache_dir())
+    cache_key: str | None = None
+    cache_parquet: Path | None = None
+    cache_meta: Path | None = None
+    cache_payload: dict[str, Any] | None = None
+
+    feature_df: pd.DataFrame | None = None
+    if use_cache and cache_root is not None:
+        store_label = getattr(data_store, "label", None)
+        store_location = None
+        if data_store is not None:
+            location = getattr(data_store, "path", None) or getattr(data_store, "url", None)
+            if location is not None:
+                store_location = str(location)
+        latest_open = None
+        if data_store is not None:
+            try:
+                latest_open = data_store.latest_open_time(symbol=symbol, interval=CONFIG.interval)
+            except Exception:  # pragma: no cover - cache is best-effort
+                latest_open = None
+
+        cache_payload = build_cache_payload(
+            source=source.value,
+            symbol=symbol,
+            input_path=input_path,
+            settings=settings,
+            store_label=store_label,
+            store_location=store_location,
+            latest_open_time=latest_open,
+        )
+        cache_key = build_cache_key(cache_payload)
+        cache_parquet, cache_meta = cache_paths(cache_root, cache_key)
+        if cache_parquet.exists():
+            logger.info(
+                "Loaded features from cache",
+                extra={"event": "cache_hit", "path": str(cache_parquet)},
+            )
+            feature_df = pd.read_parquet(cache_parquet)
+
+    if feature_df is None:
+        df = _load_price_data(source, path=input_path, symbol=symbol, data_store=data_store)
+        feature_df = create_features(df, settings=settings)
 
     run_id_value, run_dir, _ = initialize_run(run_id, deterministic_torch=False)
     logger.info(
@@ -178,6 +248,13 @@ def _generate_features(
     _write_output(feature_df, run_output, fmt)
     if target_output != run_output:
         _write_output(feature_df, target_output, fmt)
+
+    if cache_parquet is not None and cache_key is not None:
+        feature_df.to_parquet(cache_parquet, index=False)
+        if cache_meta is not None and cache_payload is not None:
+            cache_payload["output_path"] = str(cache_parquet)
+            cache_payload["rows"] = int(len(feature_df))
+            cache_meta.write_text(json.dumps(cache_payload, indent=2), encoding="utf-8")
 
     store_label = getattr(data_store, "label", None)
     if store_label == "sqlite":
@@ -219,10 +296,8 @@ def _generate_features(
 
 @app.command()
 def main(
-    source: Literal["db", "file"] = typer.Option(
-        "db", help="Where to load raw price data from."
-    ),
-    input_path: Path | None = typer.Option(
+    source: SourceChoice = typer.Option(SourceChoice.db, help="Where to load raw price data from."),
+    input_path: Optional[Path] = typer.Option(
         None,
         "--input",
         exists=False,
@@ -238,16 +313,14 @@ def main(
         "--output",
         help="Destination path for engineered features.",
     ),
-    fmt: Literal["parquet", "csv"] = typer.Option(
-        "parquet", "--format", help="Output file format."
-    ),
+    fmt: FormatChoice = typer.Option(FormatChoice.parquet, "--format", help="Output file format."),
     symbol: str = typer.Option(CONFIG.symbol, "--symbol", help="Trading symbol to load."),
-    store_choice: Literal["auto", "sqlite", "timescale"] = typer.Option(
-        "auto",
+    store_choice: StoreChoice = typer.Option(
+        StoreChoice.auto,
         "--store",
         help="Database backend to use when --source=db. 'auto' follows config defaults.",
     ),
-    db_path: Path | None = typer.Option(
+    db_path: Optional[Path] = typer.Option(
         CONFIG.db_path,
         "--db-path",
         exists=False,
@@ -257,30 +330,34 @@ def main(
         resolve_path=True,
         help="Override SQLite database path when using the local store.",
     ),
-    db_url: str | None = typer.Option(
+    db_url: Optional[str] = typer.Option(
         CONFIG.db_url,
         "--db-url",
         help="Override SQLAlchemy URL for Timescale/PostgreSQL connections.",
     ),
-    include_onchain: Optional[bool] = typer.Option(
+    include_onchain: bool = typer.Option(
         None,
         "--include-onchain/--exclude-onchain",
         help="Override on-chain features toggle.",
+        flag_value=True,
     ),
-    include_orderbook: Optional[bool] = typer.Option(
+    include_orderbook: bool = typer.Option(
         None,
         "--include-orderbook/--exclude-orderbook",
         help="Override orderbook features toggle.",
+        flag_value=True,
     ),
-    include_derivatives: Optional[bool] = typer.Option(
+    include_derivatives: bool = typer.Option(
         None,
         "--include-derivatives/--exclude-derivatives",
         help="Override derivative features toggle.",
+        flag_value=True,
     ),
-    include_sentiment: Optional[bool] = typer.Option(
+    include_sentiment: bool = typer.Option(
         None,
         "--include-sentiment/--exclude-sentiment",
         help="Override sentiment features toggle.",
+        flag_value=True,
     ),
     forward_fill_limit: Optional[int] = typer.Option(
         None, help="Override forward-fill window for NaN handling."
@@ -288,40 +365,54 @@ def main(
     fillna_value: Optional[float] = typer.Option(
         None, help="Override fallback value when forward fill runs out."
     ),
-    run_id: str | None = typer.Option(None, help="Optional run identifier."),
+    run_id: Optional[str] = typer.Option(None, help="Optional run identifier."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without writing."),
+    use_cache: bool = typer.Option(
+        CONFIG.database.feature_store is not None,
+        "--use-cache/--no-cache",
+        help="Cache engineered features to speed up reruns.",
+    ),
+    cache_dir: Optional[Path] = typer.Option(
+        None, "--cache-dir", help="Override feature cache directory."
+    ),
+    profile: bool = typer.Option(False, "--profile", help="Enable cProfile output."),
+    profile_path: Optional[Path] = typer.Option(
+        None, "--profile-path", help="Optional path for cProfile output."
+    ),
 ) -> None:
-    if source == "file" and input_path is None:
+    if source == SourceChoice.file and input_path is None:
         raise DataValidationError("--input is required when --source=file")
-    if source == "db" and input_path is not None:
+    if source == SourceChoice.db and input_path is not None:
         typer.secho("Ignoring --input because --source=db", fg=typer.colors.YELLOW)
 
     data_store: PriceDataStore | None = None
-    if source == "db":
+    if source == SourceChoice.db:
         data_store = resolve_data_store(
-            store_choice,
+            store_choice.value,
             sqlite_path=db_path,
             timescale_url=db_url,
         )
 
-    _generate_features(
-        source=source,
-        input_path=input_path,
-        output=output,
-        fmt=fmt,
-        symbol=symbol,
-        data_store=data_store,
-        forward_fill_limit=forward_fill_limit,
-        fillna_value=fillna_value,
-        include_onchain=include_onchain,
-        include_orderbook=include_orderbook,
+    with profile_section(profile, output=profile_path):
+        _generate_features(
+            source=source,
+            input_path=input_path,
+            output=output,
+            fmt=fmt,
+            symbol=symbol,
+            data_store=data_store,
+            forward_fill_limit=forward_fill_limit,
+            fillna_value=fillna_value,
+            include_onchain=include_onchain,
+            include_orderbook=include_orderbook,
         include_derivatives=include_derivatives,
         include_sentiment=include_sentiment,
         run_id=run_id,
         dry_run=dry_run,
+        use_cache=use_cache,
+        cache_dir=cache_dir,
     )
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     run_cli(app)
-

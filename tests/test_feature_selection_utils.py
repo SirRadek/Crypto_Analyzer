@@ -43,4 +43,3 @@ def test_drop_correlated_features_and_export(tmp_path):
     payload = json.loads(output.read_text())
     assert payload["horizon"] == "2h"
     assert payload["features"] == ["a"]
-

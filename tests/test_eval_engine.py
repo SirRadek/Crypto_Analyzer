@@ -70,4 +70,3 @@ def test_walkforward_engine_aggregates_fold_metrics():
     assert len(result["details"]) >= 2
     precisions = [fold["precision"] for fold in result["details"]]
     assert result["metrics"]["precision"] == pytest.approx(np.mean(precisions))
-

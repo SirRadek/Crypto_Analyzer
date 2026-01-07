@@ -68,9 +68,7 @@ def test_delete_old_records(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         remaining_prices = cursor.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
-        remaining_preds = cursor.execute(
-            f"SELECT COUNT(*) FROM {CONFIG.table_pred}"
-        ).fetchone()[0]
+        remaining_preds = cursor.execute(f"SELECT COUNT(*) FROM {CONFIG.table_pred}").fetchone()[0]
 
     assert remaining_prices == 1
     assert remaining_preds == 1

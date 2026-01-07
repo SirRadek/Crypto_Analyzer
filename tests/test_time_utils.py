@@ -72,4 +72,3 @@ def test_assert_no_future_leak_rejects_future_rows() -> None:
             target_time_col="timestamp_target_open",
             feature_time_col="timestamp_feature",
         )
-

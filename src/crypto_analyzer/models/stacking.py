@@ -10,8 +10,9 @@ the pipeline.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Literal, Sequence
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -151,4 +152,3 @@ def stack_predict(
         return probs
     labels = model.predict(X)
     return labels
-

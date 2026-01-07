@@ -2,8 +2,17 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 .venv/
+.logs/
+logs/
 venv/
 env/
+.venv_linux/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.hypothesis/
+.tox/
 # IDE settings
 .vscode/
 .idea/
@@ -17,6 +26,10 @@ data/
 !src/crypto_analyzer/data/schema.py
 datasets/
 outputs/
+reports/
+/runs/
+/logs/
+/ml/
 /models/
 cache/
 artifacts/

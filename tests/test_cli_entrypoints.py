@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 typer = pytest.importorskip("typer")
-from typer.testing import CliRunner
+from typer.testing import CliRunner  # noqa: E402
 
 
 RUNNER = CliRunner()

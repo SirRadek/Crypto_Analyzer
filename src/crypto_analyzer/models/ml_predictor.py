@@ -11,8 +11,8 @@ impact of the additional inputs.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -75,8 +75,7 @@ def _infer_feature_columns(
     missing = [column for column in required if column not in df.columns]
     if missing:
         raise ValueError(
-            "Missing required feature columns in the provided dataframe: "
-            + ", ".join(missing)
+            "Missing required feature columns in the provided dataframe: " + ", ".join(missing)
         )
 
     inferred.extend(required)
@@ -148,8 +147,7 @@ def train_daily_random_forest(
         missing = [column for column in features if column not in df.columns]
         if missing:
             raise ValueError(
-                "Feature columns requested but missing in dataframe: "
-                + ", ".join(missing)
+                "Feature columns requested but missing in dataframe: " + ", ".join(missing)
             )
 
     data = df.dropna(subset=features + [target_col])
@@ -194,7 +192,9 @@ def train_daily_random_forest(
     print("Test set predictions vs actual values (first 10 rows):")
     print(prediction_frame.head(10))
 
-    importances = pd.Series(estimator.feature_importances_, index=features).sort_values(ascending=False)
+    importances = pd.Series(estimator.feature_importances_, index=features).sort_values(
+        ascending=False
+    )
     print("Random forest feature importances:")
     print(importances.to_string())
 
@@ -213,4 +213,3 @@ def train_daily_random_forest(
 
 
 __all__ = ["NEW_DAILY_FEATURES", "RandomForestTrainingResult", "train_daily_random_forest"]
-

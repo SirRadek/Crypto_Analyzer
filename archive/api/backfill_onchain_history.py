@@ -16,9 +16,10 @@ import logging
 import math
 import sqlite3
 from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 import pandas as pd
 import requests
@@ -83,6 +84,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
+
 
 def _ensure_timestamp(value: Any) -> pd.Timestamp:
     """Convert *value* to a timezone-aware UTC timestamp."""
@@ -305,9 +307,10 @@ def _percentile(hist: Any, q: float) -> float | None:
 def _build_index(start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeIndex:
     floor = start.floor(CANDLE_FREQ)
     ceil = end.ceil(CANDLE_FREQ)
-    if ceil < floor:
-        ceil = floor
-    return pd.date_range(floor, ceil, freq=CANDLE_FREQ, tz=UTC)
+    ceil = max(ceil, floor)
+    if ceil == floor:
+        return pd.DatetimeIndex([floor], tz=UTC)
+    return pd.date_range(floor, ceil, freq=CANDLE_FREQ, tz=UTC, inclusive="left")
 
 
 def _chart_params(start: pd.Timestamp, end: pd.Timestamp) -> dict[str, Any]:
@@ -342,22 +345,13 @@ def ensure_onchain_schema(conn: sqlite3.Connection) -> None:
     """Ensure the SQLite schema for the on-chain table is up to date."""
 
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        f"CREATE TABLE IF NOT EXISTS {ONCHAIN_TABLE} (ts_utc INTEGER PRIMARY KEY)"
-    )
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {ONCHAIN_TABLE} (ts_utc INTEGER PRIMARY KEY)")
 
-    existing_columns = {
-        row[1]
-        for row in conn.execute(f"PRAGMA table_info({ONCHAIN_TABLE})")
-    }
+    existing_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({ONCHAIN_TABLE})")}
     for column, column_type in COLUMN_DEFINITIONS:
         if column not in existing_columns:
-            conn.execute(
-                f"ALTER TABLE {ONCHAIN_TABLE} ADD COLUMN {column} {column_type}"
-            )
-    conn.execute(
-        f"CREATE INDEX IF NOT EXISTS ix_onchain_ts ON {ONCHAIN_TABLE}(ts_utc)"
-    )
+            conn.execute(f"ALTER TABLE {ONCHAIN_TABLE} ADD COLUMN {column} {column_type}")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS ix_onchain_ts ON {ONCHAIN_TABLE}(ts_utc)")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -367,6 +361,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 # Fetch helpers
 # ---------------------------------------------------------------------------
+
 
 def fetch_hoenicke_fees(
     start: pd.Timestamp | str | datetime,
@@ -397,10 +392,7 @@ def fetch_hoenicke_fees(
         if isinstance(item, Mapping):
             ts = item.get("time") or item.get("timestamp") or item.get("ts")
             wavg = (
-                item.get("weighted_fee")
-                or item.get("avg")
-                or item.get("mean")
-                or item.get("wavg")
+                item.get("weighted_fee") or item.get("avg") or item.get("mean") or item.get("wavg")
             )
             p50 = item.get("median") or item.get("p50")
             p90 = item.get("p90") or item.get("percentile90") or item.get("p95")
@@ -570,9 +562,7 @@ def fetch_mining_difficulty(
             height = item.get("height")
             diff = item.get("difficulty") or item.get("y") or item.get("value")
             next_diff = (
-                item.get("next_difficulty")
-                or item.get("nextDiff")
-                or item.get("estimated_next")
+                item.get("next_difficulty") or item.get("nextDiff") or item.get("estimated_next")
             )
             change_pct = item.get("change") or item.get("diff_change_pct")
         elif isinstance(item, Sequence) and not isinstance(item, (bytes, str)):
@@ -679,17 +669,17 @@ def fetch_current_snapshot(
 # Backfill orchestrator
 # ---------------------------------------------------------------------------
 
+
 def _normalise_frame(frame: pd.DataFrame, index: pd.DatetimeIndex) -> pd.DataFrame:
     """Return *frame* aligned to ``index`` with a clean column set."""
 
     df = frame.copy()
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+    elif df.index.tz is None:
+        df.index = df.index.tz_localize(UTC)
     else:
-        if df.index.tz is None:
-            df.index = df.index.tz_localize(UTC)
-        else:
-            df.index = df.index.tz_convert(UTC)
+        df.index = df.index.tz_convert(UTC)
     if df.index.hasnans:
         df = df[~df.index.isna()]
     df = df.sort_index()
@@ -779,6 +769,7 @@ def backfill_onchain_history(
 # Command line interface
 # ---------------------------------------------------------------------------
 
+
 def cli(argv: Sequence[str] | None = None) -> int:
     import argparse
 
@@ -798,4 +789,3 @@ if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
         raise SystemExit(cli())
     except KeyboardInterrupt:
         raise SystemExit(130)
-

@@ -10,7 +10,9 @@ SLIPPAGE_BPS = 5
 TOTAL_COST = FEE_PER_TRADE + SLIPPAGE_BPS / 10_000
 
 
-def _manual_backtest(df: pd.DataFrame, latency_steps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _manual_backtest(
+    df: pd.DataFrame, latency_steps: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     working = df.sort_values("timestamp").reset_index(drop=True)
 
     if latency_steps > 0:
@@ -71,9 +73,7 @@ def test_backtest_applies_costs_and_latency():
 
     _, manual_equity_lat, manual_direction_lat = _manual_backtest(df, latency_steps=1)
 
-    np.testing.assert_allclose(
-        latency_result["equity"]["equity"].to_numpy(), manual_equity_lat
-    )
+    np.testing.assert_allclose(latency_result["equity"]["equity"].to_numpy(), manual_equity_lat)
     assert latency_result["metrics"]["trades"] == int(manual_direction_lat.sum())
     assert latency_result["equity"]["timestamp"].iloc[0] == df["timestamp"].iloc[1]
     assert latency_result["metrics"]["pnl"] == pytest.approx(float(manual_equity_lat[-1] - 1.0))
