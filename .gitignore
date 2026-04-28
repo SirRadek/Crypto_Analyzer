@@ -13,6 +13,7 @@ env/
 .coverage
 .hypothesis/
 .tox/
+*.egg-info/
 # IDE settings
 .vscode/
 .idea/
